@@ -15,30 +15,30 @@ declare collect_docker
 declare stream_fields
 declare custom_config_path
 
-# Read configuration
-victorialogs_endpoint=$(bashio::config 'victorialogs_endpoint')
-hostname=$(bashio::config 'hostname')
-instance=$(bashio::config 'instance')
-collect_journal=$(bashio::config 'collect_journal')
-collect_docker=$(bashio::config 'collect_docker')
+# Read configuration directly from options.json
+CONFIG_FILE="/data/options.json"
+
+victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${CONFIG_FILE}")
+hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
+instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
+collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
+collect_docker=$(jq -r '.collect_docker // false' "${CONFIG_FILE}")
+stream_fields=$(jq -r '.stream_fields | join(",")' "${CONFIG_FILE}")
+custom_config_path=$(jq -r '.custom_config_path // ""' "${CONFIG_FILE}")
 
 # Validate required configuration
-if bashio::var.is_empty "${victorialogs_endpoint}"; then
+if [[ -z "${victorialogs_endpoint}" ]]; then
     bashio::log.fatal "VictoriaLogs endpoint is required!"
-    bashio::exit.nok
+    exit 1
 fi
 
 # Use hostname from system if not specified
-if bashio::var.is_empty "${hostname}"; then
+if [[ -z "${hostname}" ]]; then
     hostname=$(hostname)
 fi
 
-# Build stream fields list (read directly from options.json for proper JSON parsing)
-stream_fields=$(jq -r '.stream_fields | join(",")' /data/options.json)
-
 # Check for custom config
-custom_config_path=$(bashio::config 'custom_config_path')
-if bashio::var.has_value "${custom_config_path}" && [[ -f "${custom_config_path}" ]]; then
+if [[ -n "${custom_config_path}" ]] && [[ -f "${custom_config_path}" ]]; then
     bashio::log.info "Using custom configuration from: ${custom_config_path}"
     cp "${custom_config_path}" /etc/vector/vector.yaml
     exit 0
@@ -75,7 +75,7 @@ echo "sources:" >> /etc/vector/vector.yaml
 declare -a enabled_sources=()
 
 # Add journald source if enabled
-if bashio::var.true "${collect_journal}"; then
+if [[ "${collect_journal}" == "true" ]]; then
     bashio::log.info "Enabling journald source..."
     enabled_sources+=("journald")
 
@@ -103,7 +103,7 @@ JOURNALDSOURCE
 fi
 
 # Add docker_logs source if enabled
-if bashio::var.true "${collect_docker}"; then
+if [[ "${collect_docker}" == "true" ]]; then
     bashio::log.info "Enabling docker_logs source..."
     enabled_sources+=("docker_logs")
 
