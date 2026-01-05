@@ -85,6 +85,7 @@ if [[ "${collect_journal}" == "true" ]]; then
   journald:
     type: journald
     current_boot_only: false
+    journal_directory: /var/log/journal
 JOURNALDSOURCE
 
     # Add include_units if specified
