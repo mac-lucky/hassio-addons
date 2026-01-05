@@ -17,25 +17,31 @@ RUN set -eux; \
     \
     # Determine architecture for Vector download
     case "${BUILD_ARCH}" in \
-        amd64) VECTOR_ARCH="x86_64-unknown-linux-musl" ;; \
-        aarch64) VECTOR_ARCH="aarch64-unknown-linux-musl" ;; \
+        amd64) VECTOR_ARCH="x86_64-unknown-linux-gnu" ;; \
+        aarch64) VECTOR_ARCH="aarch64-unknown-linux-gnu" ;; \
         *) echo "Unsupported architecture: ${BUILD_ARCH}" && exit 1 ;; \
     esac; \
+    \
+    # Install glibc compatibility layer and dependencies
+    apk add --no-cache \
+        jq=1.7.1-r0 \
+        libc6-compat \
+        libgcc \
+        libstdc++; \
     \
     # Download and install Vector
     curl -sSL "https://packages.timber.io/vector/${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${VECTOR_ARCH}.tar.gz" \
         | tar xzf - --strip-components=2 -C /usr/local/bin/ \
             "./vector-${VECTOR_ARCH}/bin/vector"; \
     \
+    # Create glibc symlink for compatibility
+    ln -sf /lib/libc.musl-*.so.1 /lib/ld-linux-*.so.* 2>/dev/null || true; \
+    \
     # Verify installation
     /usr/local/bin/vector --version; \
     \
     # Create required directories
-    mkdir -p /etc/vector /var/lib/vector; \
-    \
-    # Install additional dependencies
-    apk add --no-cache \
-        jq=1.7.1-r0
+    mkdir -p /etc/vector /var/lib/vector
 
 # Copy rootfs
 COPY rootfs /
