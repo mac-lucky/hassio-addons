@@ -1,7 +1,7 @@
 name: Vector Log Collector
-version: "1.1.3"
+version: "1.2.0"
 slug: vector
-description: High-performance log collector for VictoriaLogs - collects journal and Docker logs
+description: High-performance log collector for VictoriaLogs - collects journald logs
 url: https://github.com/mac-lucky/hassio-addons/tree/main/vector
 arch:
   - amd64
@@ -12,7 +12,6 @@ timeout: 60
 
 # System access for log collection
 journald: true
-docker_api: true
 
 # Directory mappings
 map:
@@ -38,12 +37,9 @@ options:
   instance: homeassistant
   log_level: info
   collect_journal: true
-  collect_docker: false
   redact_sensitive: true
   journal_include_units: []
   journal_exclude_units: []
-  docker_include_containers: []
-  docker_exclude_containers: []
   stream_fields:
     - host
     - container_name
@@ -58,15 +54,10 @@ schema:
   instance: str
   log_level: list(trace|debug|info|warning|error)
   collect_journal: bool
-  collect_docker: bool
   redact_sensitive: bool
   journal_include_units:
     - str
   journal_exclude_units:
-    - str
-  docker_include_containers:
-    - str
-  docker_exclude_containers:
     - str
   stream_fields:
     - str

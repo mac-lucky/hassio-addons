@@ -11,7 +11,6 @@ declare victorialogs_endpoint
 declare hostname
 declare instance
 declare collect_journal
-declare collect_docker
 declare redact_sensitive
 declare stream_fields
 declare custom_config_path
@@ -23,7 +22,6 @@ victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${CONFIG_FILE}")
 hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
 instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
 collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
-collect_docker=$(jq -r '.collect_docker // false' "${CONFIG_FILE}")
 redact_sensitive=$(jq -r '.redact_sensitive // true' "${CONFIG_FILE}")
 stream_fields=$(jq -r '.stream_fields | join(",")' "${CONFIG_FILE}")
 custom_config_path=$(jq -r '.custom_config_path // ""' "${CONFIG_FILE}")
@@ -51,7 +49,6 @@ bashio::log.info "VictoriaLogs endpoint: ${victorialogs_endpoint}"
 bashio::log.info "Hostname: ${hostname}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Collect journal: ${collect_journal}"
-bashio::log.info "Collect docker: ${collect_docker}"
 bashio::log.info "Redact sensitive: ${redact_sensitive}"
 
 # Create required directories and clear any existing config
@@ -116,34 +113,6 @@ JOURNALDSOURCE
     echo "" >> /etc/vector/vector.yaml
 fi
 
-# Add docker_logs source if enabled
-if [[ "${collect_docker}" == "true" ]]; then
-    bashio::log.info "Enabling docker_logs source..."
-    enabled_sources+=("docker_logs")
-
-    cat >> /etc/vector/vector.yaml << 'DOCKERSOURCE'
-  docker_logs:
-    type: docker_logs
-    docker_host: unix:///var/run/docker.sock
-DOCKERSOURCE
-
-    # Add include_containers if specified
-    containers_count=$(jq -r '.docker_include_containers | length' /data/options.json)
-    if [[ "${containers_count}" -gt 0 ]]; then
-        echo "    include_containers:" >> /etc/vector/vector.yaml
-        jq -r '.docker_include_containers[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
-    fi
-
-    # Add exclude_containers if specified
-    containers_count=$(jq -r '.docker_exclude_containers | length' /data/options.json)
-    if [[ "${containers_count}" -gt 0 ]]; then
-        echo "    exclude_containers:" >> /etc/vector/vector.yaml
-        jq -r '.docker_exclude_containers[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
-    fi
-
-    echo "" >> /etc/vector/vector.yaml
-fi
-
 # Check if any sources are enabled
 if [[ ${#enabled_sources[@]} -eq 0 ]]; then
     bashio::log.fatal "At least one log source must be enabled!"
@@ -183,9 +152,6 @@ cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
 
       # Extract container name from journald if available
       if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
-
-      # For docker logs
-      if exists(.container_name) { .unit = .container_name }
 
       # Map syslog priority to level name
       if exists(.PRIORITY) {
