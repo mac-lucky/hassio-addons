@@ -2,36 +2,42 @@
 ARG VECTOR_VERSION="0.44.0"
 ARG BUILD_FROM
 
-# Stage 1: Get Vector binary from official Alpine image
-FROM timberio/vector:${VECTOR_VERSION}-alpine AS vector
+# Stage 1: Get Vector binary from official Debian image
+FROM timberio/vector:${VECTOR_VERSION}-debian AS vector
 
 # Stage 2: Final image
 # hadolint ignore=DL3006
 FROM ${BUILD_FROM}
 
 # Set shell with pipefail
-SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Build arguments
 ARG BUILD_ARCH
 
 # Environment - config path set via CLI args in run script
 
-# Copy Vector binary from official Alpine image (already musl-compatible)
-COPY --from=vector /usr/local/bin/vector /usr/local/bin/vector
+# Copy Vector binary from official Debian image
+COPY --from=vector /usr/bin/vector /usr/local/bin/vector
 
-# hadolint ignore=DL3018
+# hadolint ignore=DL3008
 RUN set -eux; \
     \
-    # Install dependencies
-    apk add --no-cache \
-        jq=1.7.1-r0; \
+    # Install dependencies (systemd provides journalctl)
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        jq \
+        systemd; \
+    \
+    # Clean up
+    rm -rf /var/lib/apt/lists/*; \
     \
     # Create required directories
     mkdir -p /etc/vector /var/lib/vector; \
     \
     # Verify installation
-    /usr/local/bin/vector --version
+    /usr/local/bin/vector --version; \
+    journalctl --version
 
 # Copy rootfs
 COPY rootfs /
