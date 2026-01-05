@@ -1,0 +1,185 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "vector/**"
+      - ".github/workflows/ci.yaml"
+  pull_request:
+    paths:
+      - "vector/**"
+      - ".github/workflows/ci.yaml"
+  workflow_dispatch:
+
+env:
+  ADDON_SLUG: vector
+
+jobs:
+  information:
+    name: Gather Information
+    runs-on: ubuntu-latest
+    outputs:
+      architectures: ${{ steps.info.outputs.architectures }}
+      build_date: ${{ steps.info.outputs.build_date }}
+      description: ${{ steps.info.outputs.description }}
+      name: ${{ steps.info.outputs.name }}
+      version: ${{ steps.info.outputs.version }}
+      vector_version: ${{ steps.info.outputs.vector_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get add-on information
+        id: info
+        run: |
+          architectures=$(yq -o=json '.arch' vector/config.yaml)
+          echo "architectures=${architectures}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "description=$(yq '.description' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "name=$(yq '.name' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "version=$(yq '.version' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "vector_version=$(yq '.args.VECTOR_VERSION' vector/build.yaml)" >> $GITHUB_OUTPUT
+
+  lint-addon:
+    name: Addon Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run addon lint
+        uses: frenck/action-addon-linter@v2
+        with:
+          path: "./vector"
+
+  lint-hadolint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: vector/Dockerfile
+          failure-threshold: warning
+          ignore: DL3018
+
+  lint-yaml:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: vector/
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 200
+              truthy:
+                allowed-values: ['true', 'false', 'on', 'off']
+              comments:
+                min-spaces-from-content: 1
+
+  lint-shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: "./vector/rootfs"
+          severity: warning
+
+  build:
+    name: Build (${{ matrix.architecture }})
+    needs:
+      - information
+      - lint-addon
+      - lint-hadolint
+      - lint-yaml
+      - lint-shellcheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: ${{ fromJson(needs.information.outputs.architectures) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get base image
+        id: base
+        run: |
+          base_image=$(yq ".build_from.${{ matrix.architecture }}" vector/build.yaml)
+          echo "image=${base_image}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set platform
+        id: platform
+        run: |
+          case "${{ matrix.architecture }}" in
+            amd64) platform="linux/amd64" ;;
+            aarch64) platform="linux/arm64" ;;
+            armv7) platform="linux/arm/v7" ;;
+            armhf) platform="linux/arm/v6" ;;
+            i386) platform="linux/386" ;;
+          esac
+          echo "platform=${platform}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: vector
+          file: vector/Dockerfile
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:${{ needs.information.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:latest
+          build-args: |
+            BUILD_ARCH=${{ matrix.architecture }}
+            BUILD_DATE=${{ needs.information.outputs.build_date }}
+            BUILD_DESCRIPTION=${{ needs.information.outputs.description }}
+            BUILD_FROM=${{ steps.base.outputs.image }}
+            BUILD_NAME=${{ needs.information.outputs.name }}
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=${{ needs.information.outputs.version }}
+            VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
+          cache-from: type=gha,scope=build-${{ matrix.architecture }}
+          cache-to: type=gha,scope=build-${{ matrix.architecture }},mode=max
+          labels: |
+            org.opencontainers.image.title=${{ needs.information.outputs.name }}
+            org.opencontainers.image.description=${{ needs.information.outputs.description }}
+            org.opencontainers.image.created=${{ needs.information.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.information.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}

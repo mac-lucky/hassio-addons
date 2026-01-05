@@ -1,0 +1,70 @@
+configuration:
+  victorialogs_endpoint:
+    name: VictoriaLogs Endpoint
+    description: >-
+      The URL of your VictoriaLogs instance.
+      Example: http://192.168.1.100:9428
+  hostname:
+    name: Hostname
+    description: >-
+      Override the hostname label added to all logs.
+      Leave empty to use the system hostname.
+  instance:
+    name: Instance
+    description: >-
+      Instance identifier for multi-HA setups.
+      This label helps distinguish logs from different Home Assistant instances.
+  log_level:
+    name: Log Level
+    description: >-
+      The verbosity level of the add-on's own logging.
+      Set to debug or trace for troubleshooting.
+  collect_journal:
+    name: Collect Journal Logs
+    description: >-
+      Enable collection of systemd journal logs.
+      This includes logs from Home Assistant Core, Supervisor, and add-ons.
+  collect_docker:
+    name: Collect Docker Logs
+    description: >-
+      Enable collection of Docker container logs.
+      This provides direct access to container output streams.
+  journal_include_units:
+    name: Journal Include Units
+    description: >-
+      Only collect logs from these systemd units.
+      Leave empty to collect from all units.
+      Example: ["home-assistant.service", "hassio-supervisor.service"]
+  journal_exclude_units:
+    name: Journal Exclude Units
+    description: >-
+      Exclude logs from these systemd units.
+      Useful for filtering out noisy services.
+      Example: ["systemd-resolved.service", "systemd-timesyncd.service"]
+  docker_include_containers:
+    name: Docker Include Containers
+    description: >-
+      Only collect logs from these Docker containers.
+      Leave empty to collect from all containers.
+      Example: ["homeassistant", "addon_mosquitto"]
+  docker_exclude_containers:
+    name: Docker Exclude Containers
+    description: >-
+      Exclude logs from these Docker containers.
+      Example: ["addon_local_ssh"]
+  stream_fields:
+    name: Stream Fields
+    description: >-
+      Fields to use as VictoriaLogs stream identifiers.
+      These fields determine how logs are grouped for efficient querying.
+  extra_labels:
+    name: Extra Labels
+    description: >-
+      Additional key-value labels to add to all logs.
+      Example: {"environment": "production", "location": "home"}
+  custom_config_path:
+    name: Custom Config Path
+    description: >-
+      Path to a custom Vector configuration file.
+      When set, the add-on will use this config instead of generating one.
+      Example: /share/vector/custom.yaml

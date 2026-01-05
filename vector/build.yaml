@@ -1,0 +1,14 @@
+build_from:
+  amd64: ghcr.io/hassio-addons/base:16.3.2
+  aarch64: ghcr.io/hassio-addons/base:16.3.2
+  armv7: ghcr.io/hassio-addons/base:16.3.2
+
+args:
+  VECTOR_VERSION: "0.44.0"
+
+labels:
+  org.opencontainers.image.title: Vector Log Collector for Home Assistant
+  org.opencontainers.image.description: High-performance log collector sending to VictoriaLogs
+  org.opencontainers.image.vendor: Mac Lucky
+  org.opencontainers.image.licenses: MIT
+  org.opencontainers.image.source: https://github.com/mac-lucky/hassio-addons

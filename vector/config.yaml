@@ -1,0 +1,78 @@
+name: Vector Log Collector
+version: "1.0.0"
+slug: vector
+description: High-performance log collector for VictoriaLogs - collects journal and Docker logs
+url: https://github.com/mac-lucky/hassio-addons/tree/main/vector
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+startup: services
+boot: auto
+timeout: 60
+
+# System access for log collection
+journald: true
+docker_api: true
+
+# Directory mappings
+map:
+  - type: config
+    read_only: true
+  - type: share
+    read_only: false
+  - type: ssl
+    read_only: true
+  - type: addon_config
+    read_only: false
+
+# Web UI for Vector's built-in dashboard
+ports:
+  8686/tcp: null
+ports_description:
+  8686/tcp: Vector API (optional)
+
+# Configuration options
+options:
+  victorialogs_endpoint: ""
+  hostname: ""
+  instance: homeassistant
+  log_level: info
+  collect_journal: true
+  collect_docker: true
+  journal_include_units: []
+  journal_exclude_units: []
+  docker_include_containers: []
+  docker_exclude_containers: []
+  stream_fields:
+    - host
+    - container_name
+    - unit
+  extra_labels: {}
+  custom_config_path: ""
+
+# Schema validation
+schema:
+  victorialogs_endpoint: url
+  hostname: str?
+  instance: str
+  log_level: list(trace|debug|info|warning|error)
+  collect_journal: bool
+  collect_docker: bool
+  journal_include_units:
+    - str
+  journal_exclude_units:
+    - str
+  docker_include_containers:
+    - str
+  docker_exclude_containers:
+    - str
+  stream_fields:
+    - str
+  extra_labels:
+    str: str
+  custom_config_path: str?
+
+# Pre-built image location
+image: ghcr.io/mac-lucky/hassio-addon-vector-{arch}

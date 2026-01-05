@@ -1,0 +1,18 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Home Assistant Add-on: Vector
+# Cleanup when Vector stops
+# ==============================================================================
+
+declare exit_code=${1}
+
+if [[ "${exit_code}" -ne 0 ]] && [[ "${exit_code}" -ne 256 ]]; then
+    bashio::log.warning "Vector exited with code ${exit_code}"
+
+    # Check if we should sleep before restart
+    if [[ "${exit_code}" -eq 1 ]]; then
+        bashio::log.info "Waiting before restart..."
+        sleep 5
+    fi
+fi

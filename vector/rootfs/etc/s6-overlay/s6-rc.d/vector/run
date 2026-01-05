@@ -1,0 +1,38 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Home Assistant Add-on: Vector
+# Runs the Vector log collector
+# ==============================================================================
+
+declare -a vector_args=()
+declare log_level
+
+# Generate configuration from template
+bashio::log.info "Generating Vector configuration..."
+/usr/bin/generate-config.sh
+
+# Get log level from config
+log_level=$(bashio::config 'log_level')
+
+# Map HA log levels to Vector log levels
+case "${log_level}" in
+    trace)
+        vector_args+=("--verbose" "--verbose")
+        ;;
+    debug)
+        vector_args+=("--verbose")
+        ;;
+    info)
+        # Default, no extra args
+        ;;
+    warning|error)
+        vector_args+=("--quiet")
+        ;;
+esac
+
+# Set config file path
+vector_args+=("--config" "/etc/vector/vector.yaml")
+
+bashio::log.info "Starting Vector..."
+exec vector "${vector_args[@]}"
