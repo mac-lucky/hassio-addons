@@ -156,7 +156,7 @@ $(printf '%b' "${inputs_yaml}")    source: |
 
       # For journald logs - extract useful fields
       if exists(._SYSTEMD_UNIT) {
-        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service$', "")
+        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service\$', "")
         .container_name = .unit
       }
 
@@ -216,7 +216,7 @@ sinks:
     inputs:
       - enrich_logs
     endpoints:
-      - "${victorialogs_endpoint}/insert/elasticsearch/"
+      - "${victorialogs_endpoint}"
     api_version: v8
     compression: gzip
     healthcheck:
@@ -231,7 +231,7 @@ bashio::log.info "Vector configuration generated successfully"
 bashio::log.info "Configuration saved to /etc/vector/vector.yaml"
 
 # Validate the configuration
-if vector validate --config /etc/vector/vector.yaml; then
+if vector validate --config-yaml /etc/vector/vector.yaml; then
     bashio::log.info "Configuration validation passed"
 else
     bashio::log.error "Configuration validation failed!"
