@@ -33,8 +33,8 @@ if bashio::var.is_empty "${hostname}"; then
     hostname=$(hostname)
 fi
 
-# Build stream fields list
-stream_fields=$(bashio::config 'stream_fields' | jq -r 'join(",")')
+# Build stream fields list (read directly from options.json for proper JSON parsing)
+stream_fields=$(jq -r '.stream_fields | join(",")' /data/options.json)
 
 # Check for custom config
 custom_config_path=$(bashio::config 'custom_config_path')
@@ -86,23 +86,17 @@ if bashio::var.true "${collect_journal}"; then
 JOURNALDSOURCE
 
     # Add include_units if specified
-    if bashio::config.has_value 'journal_include_units'; then
-        units_json=$(bashio::config 'journal_include_units')
-        units_count=$(echo "${units_json}" | jq -r 'length')
-        if [[ "${units_count}" -gt 0 ]]; then
-            echo "    include_units:" >> /etc/vector/vector.yaml
-            echo "${units_json}" | jq -r '.[] | "      - " + .' >> /etc/vector/vector.yaml
-        fi
+    units_count=$(jq -r '.journal_include_units | length' /data/options.json)
+    if [[ "${units_count}" -gt 0 ]]; then
+        echo "    include_units:" >> /etc/vector/vector.yaml
+        jq -r '.journal_include_units[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
     # Add exclude_units if specified
-    if bashio::config.has_value 'journal_exclude_units'; then
-        units_json=$(bashio::config 'journal_exclude_units')
-        units_count=$(echo "${units_json}" | jq -r 'length')
-        if [[ "${units_count}" -gt 0 ]]; then
-            echo "    exclude_units:" >> /etc/vector/vector.yaml
-            echo "${units_json}" | jq -r '.[] | "      - " + .' >> /etc/vector/vector.yaml
-        fi
+    units_count=$(jq -r '.journal_exclude_units | length' /data/options.json)
+    if [[ "${units_count}" -gt 0 ]]; then
+        echo "    exclude_units:" >> /etc/vector/vector.yaml
+        jq -r '.journal_exclude_units[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
     echo "" >> /etc/vector/vector.yaml
@@ -120,23 +114,17 @@ if bashio::var.true "${collect_docker}"; then
 DOCKERSOURCE
 
     # Add include_containers if specified
-    if bashio::config.has_value 'docker_include_containers'; then
-        containers_json=$(bashio::config 'docker_include_containers')
-        containers_count=$(echo "${containers_json}" | jq -r 'length')
-        if [[ "${containers_count}" -gt 0 ]]; then
-            echo "    include_containers:" >> /etc/vector/vector.yaml
-            echo "${containers_json}" | jq -r '.[] | "      - " + .' >> /etc/vector/vector.yaml
-        fi
+    containers_count=$(jq -r '.docker_include_containers | length' /data/options.json)
+    if [[ "${containers_count}" -gt 0 ]]; then
+        echo "    include_containers:" >> /etc/vector/vector.yaml
+        jq -r '.docker_include_containers[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
     # Add exclude_containers if specified
-    if bashio::config.has_value 'docker_exclude_containers'; then
-        containers_json=$(bashio::config 'docker_exclude_containers')
-        containers_count=$(echo "${containers_json}" | jq -r 'length')
-        if [[ "${containers_count}" -gt 0 ]]; then
-            echo "    exclude_containers:" >> /etc/vector/vector.yaml
-            echo "${containers_json}" | jq -r '.[] | "      - " + .' >> /etc/vector/vector.yaml
-        fi
+    containers_count=$(jq -r '.docker_exclude_containers | length' /data/options.json)
+    if [[ "${containers_count}" -gt 0 ]]; then
+        echo "    exclude_containers:" >> /etc/vector/vector.yaml
+        jq -r '.docker_exclude_containers[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
     echo "" >> /etc/vector/vector.yaml
@@ -211,15 +199,12 @@ $(printf '%b' "${inputs_yaml}")    source: |
 TRANSFORMS
 
 # Add extra labels if specified
-if bashio::config.has_value 'extra_labels'; then
-    extra_labels_json=$(bashio::config 'extra_labels')
-    # Check if extra_labels is not empty object
-    if [[ "${extra_labels_json}" != "{}" ]] && [[ -n "${extra_labels_json}" ]]; then
-        bashio::log.info "Adding extra labels..."
-        echo "" >> /etc/vector/vector.yaml
-        echo "      # Extra custom labels" >> /etc/vector/vector.yaml
-        echo "${extra_labels_json}" | jq -r 'to_entries | .[] | "      ." + .key + " = \"" + .value + "\""' >> /etc/vector/vector.yaml
-    fi
+extra_labels_count=$(jq -r '.extra_labels | keys | length' /data/options.json)
+if [[ "${extra_labels_count}" -gt 0 ]]; then
+    bashio::log.info "Adding extra labels..."
+    echo "" >> /etc/vector/vector.yaml
+    echo "      # Extra custom labels" >> /etc/vector/vector.yaml
+    jq -r '.extra_labels | to_entries | .[] | "      ." + .key + " = \"" + .value + "\""' /data/options.json >> /etc/vector/vector.yaml
 fi
 
 # Add sinks section
