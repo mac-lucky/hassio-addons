@@ -25,10 +25,10 @@ RUN set -eux; \
     # Download and install Vector
     curl -sSL "https://packages.timber.io/vector/${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${VECTOR_ARCH}.tar.gz" \
         | tar xzf - --strip-components=2 -C /usr/local/bin/ \
-            "./vector-${VECTOR_ARCH}/bin/vector"; \
+            "./vector-${VECTOR_VERSION}-${VECTOR_ARCH}/bin/vector"; \
     \
     # Verify installation
-    vector --version; \
+    /usr/local/bin/vector --version; \
     \
     # Create required directories
     mkdir -p /etc/vector /var/lib/vector; \
