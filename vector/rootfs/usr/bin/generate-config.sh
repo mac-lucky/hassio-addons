@@ -142,13 +142,20 @@ for source in "${enabled_sources[@]}"; do
     inputs_yaml="${inputs_yaml}      - ${source}\n"
 done
 
-# Add transforms section
-cat >> /etc/vector/vector.yaml << TRANSFORMS
+# Add transforms section - header
+cat >> /etc/vector/vector.yaml << 'TRANSFORMS_HEADER'
 transforms:
   enrich_logs:
     type: remap
     inputs:
-$(printf '%b' "${inputs_yaml}")    source: |
+TRANSFORMS_HEADER
+
+# Add inputs list
+printf '%b' "${inputs_yaml}" >> /etc/vector/vector.yaml
+
+# Add VRL source with variables expanded
+cat >> /etc/vector/vector.yaml << TRANSFORMS_VRL
+    source: |
       # Add standard labels
       .host = "${hostname}"
       .instance = "${instance}"
@@ -156,7 +163,7 @@ $(printf '%b' "${inputs_yaml}")    source: |
 
       # For journald logs - extract useful fields
       if exists(._SYSTEMD_UNIT) {
-        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service\$', "")
+        .unit = replace(string!(._SYSTEMD_UNIT), r'\\.service\$', "")
         .container_name = .unit
       }
 
@@ -196,7 +203,7 @@ $(printf '%b' "${inputs_yaml}")    source: |
       if !exists(.timestamp) {
         .timestamp = now()
       }
-TRANSFORMS
+TRANSFORMS_VRL
 
 # Add extra labels if specified
 extra_labels_count=$(jq -r '.extra_labels | keys | length' /data/options.json)
