@@ -47,7 +47,22 @@ validate_safe_string() {
 mask_url_credentials() {
     local url="$1"
     # Mask user:pass@ in URLs
-    echo "${url}" | sed -E 's|(https?://)([^:]+):([^@]+)@|\1***:***@|g'
+    printf '%s\n' "${url}" | sed -E 's|(https?://)([^:]+):([^@]+)@|\1***:***@|g'
+}
+
+# Function to validate URL doesn't contain YAML-breaking characters
+validate_url_for_yaml() {
+    local url="$1"
+    # URLs should not contain unescaped quotes, newlines, or YAML special sequences
+    if [[ "${url}" =~ [\"\'\`\$\{\}] ]] || [[ "${url}" == *$'\n'* ]]; then
+        bashio::log.fatal "VictoriaLogs endpoint contains invalid characters"
+        exit 1
+    fi
+    # Must start with http:// or https://
+    if [[ ! "${url}" =~ ^https?:// ]]; then
+        bashio::log.fatal "VictoriaLogs endpoint must start with http:// or https://"
+        exit 1
+    fi
 }
 
 # Validate required configuration
@@ -55,6 +70,17 @@ if [[ -z "${victorialogs_endpoint}" ]]; then
     bashio::log.fatal "VictoriaLogs endpoint is required!"
     exit 1
 fi
+
+# Validate endpoint URL for YAML safety
+validate_url_for_yaml "${victorialogs_endpoint}"
+
+# Validate stream_fields contain only safe characters
+while IFS= read -r field; do
+    if [[ -n "${field}" ]] && [[ ! "${field}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        bashio::log.fatal "Invalid stream field: ${field} (must be valid identifier)"
+        exit 1
+    fi
+done < <(jq -r '.stream_fields // [] | .[]' "${CONFIG_FILE}")
 
 # Use hostname from system if not specified
 if [[ -z "${hostname}" ]]; then
@@ -65,23 +91,26 @@ fi
 validate_safe_string "${hostname}" "hostname"
 validate_safe_string "${instance}" "instance"
 
-# Check for custom config with path validation
+# Check for custom config with path validation (TOCTOU-safe)
 if [[ -n "${custom_config_path}" ]]; then
-    # Validate path is within allowed directories (addon_config or share)
-    real_path=$(realpath -m "${custom_config_path}" 2>/dev/null || echo "")
-    if [[ -z "${real_path}" ]]; then
-        bashio::log.fatal "Invalid custom config path!"
-        exit 1
-    fi
-    # Only allow paths under /addon_configs or /share
-    if [[ ! "${real_path}" =~ ^/(addon_configs|share)/ ]]; then
-        bashio::log.fatal "Custom config must be in /addon_configs or /share directory!"
-        exit 1
-    fi
+    # First check if file exists
     if [[ -f "${custom_config_path}" ]]; then
-        bashio::log.info "Using custom configuration from: ${custom_config_path}"
+        # Resolve the ACTUAL path (not -m which doesn't require existence)
+        # This prevents symlink attacks between check and use
+        real_path=$(realpath "${custom_config_path}" 2>/dev/null || echo "")
+        if [[ -z "${real_path}" ]]; then
+            bashio::log.fatal "Invalid custom config path!"
+            exit 1
+        fi
+        # Only allow paths under /addon_configs or /share
+        if [[ ! "${real_path}" =~ ^/(addon_configs|share)/ ]]; then
+            bashio::log.fatal "Custom config must be in /addon_configs or /share directory!"
+            exit 1
+        fi
+        # Use the resolved real_path for the copy to prevent TOCTOU
+        bashio::log.info "Using custom configuration from: ${real_path}"
         mkdir -p /etc/vector
-        cp "${custom_config_path}" /etc/vector/vector.yaml
+        cp "${real_path}" /etc/vector/vector.yaml
         # Validate custom config before accepting it
         if ! vector validate --config-yaml /etc/vector/vector.yaml; then
             bashio::log.fatal "Custom configuration validation failed!"
@@ -135,7 +164,7 @@ if [[ "${collect_journal}" == "true" ]]; then
     # Try both common journal locations - HA OS may use either
     # Vector's journalctl will use --directory flag
     journal_dir="/var/log/journal"
-    if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A ${journal_dir} 2>/dev/null)" ]]; then
+    if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A "${journal_dir}" 2>/dev/null)" ]]; then
         journal_dir="/run/log/journal"
     fi
     bashio::log.info "Using journal directory: ${journal_dir}"
