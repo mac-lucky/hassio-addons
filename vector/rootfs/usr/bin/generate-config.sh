@@ -238,9 +238,9 @@ cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
       .instance = "__INSTANCE__"
       if !exists(.source_type) { .source_type = "unknown" }
 
-      # For journald logs - extract unit name
+      # For journald logs - extract unit name (strip .service suffix)
       if exists(._SYSTEMD_UNIT) {
-        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service$', "")
+        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service', "")
         .container_name = .unit
       }
 
@@ -271,18 +271,18 @@ sed -i "s/__INSTANCE__/${escaped_instance}/g" /etc/vector/vector.yaml
 # Add sensitive data redaction if enabled
 if [[ "${redact_sensitive}" == "true" ]]; then
     bashio::log.info "Adding sensitive data redaction..."
+    # Redact sensitive data - simplified approach without backreferences to avoid $1 env var issues
     cat >> /etc/vector/vector.yaml << 'REDACT_VRL'
 
       # Redact sensitive data (API keys, tokens, authorization headers)
-      # Note: $$ is escaped to $ for Vector's YAML parser, which then passes $1 to VRL
-      .message = replace(string!(.message), r'(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9\-._~+/]+={0,2}', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(Authorization:\s*Basic\s+)[A-Za-z0-9+/]+={0,2}', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(X-API-Key:\s*)[A-Za-z0-9\-._~+/]+', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(X-Auth-Token:\s*)[A-Za-z0-9\-._~+/]+', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(api[_-]?key["\s:=]+)[A-Za-z0-9\-._]{16,}', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(token["\s:=]+)[A-Za-z0-9\-._]{16,}', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(password["\s:=]+)[^\s"]+', "$$1[REDACTED]")
-      .message = replace(.message, r'(?i)(secret["\s:=]+)[A-Za-z0-9\-._]{8,}', "$$1[REDACTED]")
+      .message = replace(string!(.message), r'(?i)Authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
+      .message = replace(.message, r'(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
+      .message = replace(.message, r'(?i)X-API-Key:\s*[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
+      .message = replace(.message, r'(?i)X-Auth-Token:\s*[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
+      .message = replace(.message, r'(?i)api[_-]?key["\s:=]+[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
+      .message = replace(.message, r'(?i)token["\s:=]+[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
+      .message = replace(.message, r'(?i)password["\s:=]+[^\s"]+', "password: [REDACTED]")
+      .message = replace(.message, r'(?i)secret["\s:=]+[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
 REDACT_VRL
 fi
 
