@@ -51,8 +51,9 @@ bashio::log.info "Instance: ${instance}"
 bashio::log.info "Collect journal: ${collect_journal}"
 bashio::log.info "Collect docker: ${collect_docker}"
 
-# Create config directory and clear any existing config
+# Create required directories and clear any existing config
 mkdir -p /etc/vector
+mkdir -p /share/vector
 rm -f /etc/vector/vector.yaml
 
 # Start generating the configuration
