@@ -12,6 +12,7 @@ declare hostname
 declare instance
 declare collect_journal
 declare collect_docker
+declare redact_sensitive
 declare stream_fields
 declare custom_config_path
 
@@ -23,6 +24,7 @@ hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
 instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
 collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
 collect_docker=$(jq -r '.collect_docker // false' "${CONFIG_FILE}")
+redact_sensitive=$(jq -r '.redact_sensitive // true' "${CONFIG_FILE}")
 stream_fields=$(jq -r '.stream_fields | join(",")' "${CONFIG_FILE}")
 custom_config_path=$(jq -r '.custom_config_path // ""' "${CONFIG_FILE}")
 
@@ -50,6 +52,7 @@ bashio::log.info "Hostname: ${hostname}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Collect journal: ${collect_journal}"
 bashio::log.info "Collect docker: ${collect_docker}"
+bashio::log.info "Redact sensitive: ${redact_sensitive}"
 
 # Create required directories and clear any existing config
 mkdir -p /etc/vector
@@ -202,6 +205,23 @@ TRANSFORMS_VRL
 # Replace placeholders with actual values
 sed -i "s/__HOSTNAME__/${hostname}/g" /etc/vector/vector.yaml
 sed -i "s/__INSTANCE__/${instance}/g" /etc/vector/vector.yaml
+
+# Add sensitive data redaction if enabled
+if [[ "${redact_sensitive}" == "true" ]]; then
+    bashio::log.info "Adding sensitive data redaction..."
+    cat >> /etc/vector/vector.yaml << 'REDACT_VRL'
+
+      # Redact sensitive data (API keys, tokens, authorization headers)
+      .message = replace(string!(.message), r'(?i)(Authorization:\s*Bearer\s+)[A-Za-z0-9\-._~+/]+={0,2}', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(Authorization:\s*Basic\s+)[A-Za-z0-9+/]+={0,2}', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(X-API-Key:\s*)[A-Za-z0-9\-._~+/]+', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(X-Auth-Token:\s*)[A-Za-z0-9\-._~+/]+', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(api[_-]?key["\s:=]+)[A-Za-z0-9\-._]{16,}', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(token["\s:=]+)[A-Za-z0-9\-._]{16,}', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(password["\s:=]+)[^\s"]+', "$1[REDACTED]")
+      .message = replace(.message, r'(?i)(secret["\s:=]+)[A-Za-z0-9\-._]{8,}', "$1[REDACTED]")
+REDACT_VRL
+fi
 
 # Add extra labels if specified
 extra_labels_count=$(jq -r '.extra_labels | keys | length' /data/options.json)
