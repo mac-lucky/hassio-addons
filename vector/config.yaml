@@ -1,5 +1,5 @@
 name: Vector Log Collector
-version: "1.0.8"
+version: "1.0.9"
 slug: vector
 description: High-performance log collector for VictoriaLogs - collects journal and Docker logs
 url: https://github.com/mac-lucky/hassio-addons/tree/main/vector

@@ -155,57 +155,44 @@ TRANSFORMS_HEADER
 # Add inputs list
 printf '%b' "${inputs_yaml}" >> /etc/vector/vector.yaml
 
-# Add VRL source with variables expanded
-cat >> /etc/vector/vector.yaml << TRANSFORMS_VRL
+# Add VRL source - use quoted heredoc for VRL syntax, substitute variables after
+cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
     source: |
-      # Add standard labels
-      .host = "${hostname}"
-      .instance = "${instance}"
-      .source_type = .source_type ?? "unknown"
+      # Add standard labels (HOSTNAME and INSTANCE replaced by sed below)
+      .host = "__HOSTNAME__"
+      .instance = "__INSTANCE__"
+      if !exists(.source_type) { .source_type = "unknown" }
 
-      # For journald logs - extract useful fields
+      # For journald logs - extract unit name
       if exists(._SYSTEMD_UNIT) {
-        .unit = replace(string!(._SYSTEMD_UNIT), r'\\.service\$', "")
+        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service$', "")
         .container_name = .unit
       }
 
       # Extract container name from journald if available
-      if exists(.CONTAINER_NAME) {
-        .container_name = del(.CONTAINER_NAME)
-      }
+      if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
 
       # For docker logs
-      if exists(.container_name) {
-        .unit = .container_name
-      }
+      if exists(.container_name) { .unit = .container_name }
 
-      # Extract priority/level
+      # Map syslog priority to level name
       if exists(.PRIORITY) {
-        priority = to_int(.PRIORITY) ?? 6
-        .level = if priority == 0 { "emergency" }
-                 else if priority == 1 { "alert" }
-                 else if priority == 2 { "critical" }
-                 else if priority == 3 { "error" }
-                 else if priority == 4 { "warning" }
-                 else if priority == 5 { "notice" }
-                 else if priority == 6 { "info" }
-                 else { "debug" }
+        p = to_int(.PRIORITY) ?? 6
+        .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warning" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
       }
 
       # Ensure message field exists
       if !exists(.message) {
-        if exists(.MESSAGE) {
-          .message = del(.MESSAGE)
-        } else {
-          .message = encode_json(.)
-        }
+        if exists(.MESSAGE) { .message = del(.MESSAGE) } else { .message = encode_json(.) }
       }
 
       # Add timestamp if missing
-      if !exists(.timestamp) {
-        .timestamp = now()
-      }
+      if !exists(.timestamp) { .timestamp = now() }
 TRANSFORMS_VRL
+
+# Replace placeholders with actual values
+sed -i "s/__HOSTNAME__/${hostname}/g" /etc/vector/vector.yaml
+sed -i "s/__INSTANCE__/${instance}/g" /etc/vector/vector.yaml
 
 # Add extra labels if specified
 extra_labels_count=$(jq -r '.extra_labels | keys | length' /data/options.json)
