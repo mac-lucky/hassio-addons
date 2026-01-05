@@ -15,8 +15,7 @@ SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 # Build arguments
 ARG BUILD_ARCH
 
-# Environment
-ENV VECTOR_CONFIG=/etc/vector/vector.yaml
+# Environment - config path set via CLI args in run script
 
 # Copy Vector binary from official Alpine image (already musl-compatible)
 COPY --from=vector /usr/local/bin/vector /usr/local/bin/vector

@@ -31,8 +31,8 @@ case "${log_level}" in
         ;;
 esac
 
-# Set config file path
-vector_args+=("--config" "/etc/vector/vector.yaml")
+# Set config file path (Vector 0.44+ uses --config-yaml)
+vector_args+=("--config-yaml" "/etc/vector/vector.yaml")
 
 bashio::log.info "Starting Vector..."
 exec vector "${vector_args[@]}"
