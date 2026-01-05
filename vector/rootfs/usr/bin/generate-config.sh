@@ -81,11 +81,19 @@ if [[ "${collect_journal}" == "true" ]]; then
     bashio::log.info "Enabling journald source..."
     enabled_sources+=("journald")
 
-    cat >> /etc/vector/vector.yaml << 'JOURNALDSOURCE'
+    # Try both common journal locations - HA OS may use either
+    # Vector's journalctl will use --directory flag
+    journal_dir="/var/log/journal"
+    if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A ${journal_dir} 2>/dev/null)" ]]; then
+        journal_dir="/run/log/journal"
+    fi
+    bashio::log.info "Using journal directory: ${journal_dir}"
+
+    cat >> /etc/vector/vector.yaml << JOURNALDSOURCE
   journald:
     type: journald
     current_boot_only: false
-    journal_directory: /var/log/journal
+    journal_directory: ${journal_dir}
 JOURNALDSOURCE
 
     # Add include_units if specified
