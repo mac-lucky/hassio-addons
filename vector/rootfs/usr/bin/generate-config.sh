@@ -23,8 +23,32 @@ hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
 instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
 collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
 redact_sensitive=$(jq -r '.redact_sensitive // true' "${CONFIG_FILE}")
-stream_fields=$(jq -r '.stream_fields | join(",")' "${CONFIG_FILE}")
+stream_fields=$(jq -r '.stream_fields // [] | join(",")' "${CONFIG_FILE}")
 custom_config_path=$(jq -r '.custom_config_path // ""' "${CONFIG_FILE}")
+
+# Function to sanitize strings for safe use in sed and YAML
+sanitize_for_sed() {
+    # Escape sed special characters: \ & / and newlines
+    printf '%s' "$1" | sed -e 's/[\\&/]/\\&/g' -e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+# Function to validate input contains only safe characters
+validate_safe_string() {
+    local value="$1"
+    local name="$2"
+    # Allow alphanumeric, dots, hyphens, underscores, and spaces
+    if [[ ! "${value}" =~ ^[a-zA-Z0-9._\ -]+$ ]]; then
+        bashio::log.fatal "${name} contains invalid characters. Only alphanumeric, dots, hyphens, underscores allowed."
+        exit 1
+    fi
+}
+
+# Function to mask credentials in URLs for logging
+mask_url_credentials() {
+    local url="$1"
+    # Mask user:pass@ in URLs
+    echo "${url}" | sed -E 's|(https?://)([^:]+):([^@]+)@|\1***:***@|g'
+}
 
 # Validate required configuration
 if [[ -z "${victorialogs_endpoint}" ]]; then
@@ -37,15 +61,42 @@ if [[ -z "${hostname}" ]]; then
     hostname=$(hostname)
 fi
 
-# Check for custom config
-if [[ -n "${custom_config_path}" ]] && [[ -f "${custom_config_path}" ]]; then
-    bashio::log.info "Using custom configuration from: ${custom_config_path}"
-    cp "${custom_config_path}" /etc/vector/vector.yaml
-    exit 0
+# Validate hostname and instance to prevent injection
+validate_safe_string "${hostname}" "hostname"
+validate_safe_string "${instance}" "instance"
+
+# Check for custom config with path validation
+if [[ -n "${custom_config_path}" ]]; then
+    # Validate path is within allowed directories (addon_config or share)
+    real_path=$(realpath -m "${custom_config_path}" 2>/dev/null || echo "")
+    if [[ -z "${real_path}" ]]; then
+        bashio::log.fatal "Invalid custom config path!"
+        exit 1
+    fi
+    # Only allow paths under /addon_configs or /share
+    if [[ ! "${real_path}" =~ ^/(addon_configs|share)/ ]]; then
+        bashio::log.fatal "Custom config must be in /addon_configs or /share directory!"
+        exit 1
+    fi
+    if [[ -f "${custom_config_path}" ]]; then
+        bashio::log.info "Using custom configuration from: ${custom_config_path}"
+        mkdir -p /etc/vector
+        cp "${custom_config_path}" /etc/vector/vector.yaml
+        # Validate custom config before accepting it
+        if ! vector validate --config-yaml /etc/vector/vector.yaml; then
+            bashio::log.fatal "Custom configuration validation failed!"
+            bashio::exit.nok
+        fi
+        bashio::log.info "Custom configuration validation passed"
+        exit 0
+    fi
 fi
 
+# Mask credentials in endpoint URL for logging
+masked_endpoint=$(mask_url_credentials "${victorialogs_endpoint}")
+
 bashio::log.info "Generating Vector configuration..."
-bashio::log.info "VictoriaLogs endpoint: ${victorialogs_endpoint}"
+bashio::log.info "VictoriaLogs endpoint: ${masked_endpoint}"
 bashio::log.info "Hostname: ${hostname}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Collect journal: ${collect_journal}"
@@ -63,10 +114,10 @@ cat > /etc/vector/vector.yaml << 'VECTORCONFIG'
 
 data_dir: /share/vector
 
-# API for healthcheck and monitoring
+# API for healthcheck and monitoring (localhost only for security)
 api:
   enabled: true
-  address: 0.0.0.0:8686
+  address: 127.0.0.1:8686
 
 VECTORCONFIG
 
@@ -96,18 +147,32 @@ if [[ "${collect_journal}" == "true" ]]; then
     journal_directory: ${journal_dir}
 JOURNALDSOURCE
 
-    # Add include_units if specified
-    units_count=$(jq -r '.journal_include_units | length' /data/options.json)
+    # Add include_units if specified (with validation)
+    units_count=$(jq -r '.journal_include_units // [] | length' /data/options.json)
     if [[ "${units_count}" -gt 0 ]]; then
+        # Validate unit names contain only safe characters
+        while IFS= read -r unit; do
+            if [[ ! "${unit}" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+                bashio::log.fatal "Invalid journal unit name: ${unit}"
+                bashio::exit.nok
+            fi
+        done < <(jq -r '.journal_include_units // [] | .[]' /data/options.json)
         echo "    include_units:" >> /etc/vector/vector.yaml
-        jq -r '.journal_include_units[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
+        jq -r '.journal_include_units // [] | .[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
-    # Add exclude_units if specified
-    units_count=$(jq -r '.journal_exclude_units | length' /data/options.json)
+    # Add exclude_units if specified (with validation)
+    units_count=$(jq -r '.journal_exclude_units // [] | length' /data/options.json)
     if [[ "${units_count}" -gt 0 ]]; then
+        # Validate unit names contain only safe characters
+        while IFS= read -r unit; do
+            if [[ ! "${unit}" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+                bashio::log.fatal "Invalid journal unit name: ${unit}"
+                bashio::exit.nok
+            fi
+        done < <(jq -r '.journal_exclude_units // [] | .[]' /data/options.json)
         echo "    exclude_units:" >> /etc/vector/vector.yaml
-        jq -r '.journal_exclude_units[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
+        jq -r '.journal_exclude_units // [] | .[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
     fi
 
     echo "" >> /etc/vector/vector.yaml
@@ -168,9 +233,11 @@ cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
       if !exists(.timestamp) { .timestamp = now() }
 TRANSFORMS_VRL
 
-# Replace placeholders with actual values
-sed -i "s/__HOSTNAME__/${hostname}/g" /etc/vector/vector.yaml
-sed -i "s/__INSTANCE__/${instance}/g" /etc/vector/vector.yaml
+# Replace placeholders with actual values (using sanitized strings)
+escaped_hostname=$(sanitize_for_sed "${hostname}")
+escaped_instance=$(sanitize_for_sed "${instance}")
+sed -i "s/__HOSTNAME__/${escaped_hostname}/g" /etc/vector/vector.yaml
+sed -i "s/__INSTANCE__/${escaped_instance}/g" /etc/vector/vector.yaml
 
 # Add sensitive data redaction if enabled
 if [[ "${redact_sensitive}" == "true" ]]; then
@@ -189,13 +256,21 @@ if [[ "${redact_sensitive}" == "true" ]]; then
 REDACT_VRL
 fi
 
-# Add extra labels if specified
-extra_labels_count=$(jq -r '.extra_labels | keys | length' /data/options.json)
+# Add extra labels if specified (with validation to prevent VRL injection)
+extra_labels_count=$(jq -r '.extra_labels // {} | keys | length' /data/options.json)
 if [[ "${extra_labels_count}" -gt 0 ]]; then
     bashio::log.info "Adding extra labels..."
+    # Validate label keys and values contain only safe characters
+    while IFS= read -r key; do
+        if [[ ! "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            bashio::log.fatal "Invalid extra label key: ${key} (must be valid identifier)"
+            bashio::exit.nok
+        fi
+    done < <(jq -r '.extra_labels // {} | keys | .[]' /data/options.json)
+    # Values are escaped by jq's @json, preventing injection
     echo "" >> /etc/vector/vector.yaml
     echo "      # Extra custom labels" >> /etc/vector/vector.yaml
-    jq -r '.extra_labels | to_entries | .[] | "      ." + .key + " = \"" + .value + "\""' /data/options.json >> /etc/vector/vector.yaml
+    jq -r '.extra_labels // {} | to_entries | .[] | "      ." + .key + " = " + (.value | @json)' /data/options.json >> /etc/vector/vector.yaml
 fi
 
 # Add sinks section

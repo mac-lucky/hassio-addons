@@ -10,7 +10,10 @@ declare log_level
 
 # Generate configuration from template
 bashio::log.info "Generating Vector configuration..."
-/usr/bin/generate-config.sh
+if ! /usr/bin/generate-config.sh; then
+    bashio::log.fatal "Configuration generation failed!"
+    bashio::exit.nok
+fi
 
 # Get log level from config
 log_level=$(bashio::config 'log_level')

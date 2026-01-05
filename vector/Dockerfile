@@ -33,7 +33,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     \
     # Create required directories
-    mkdir -p /etc/vector /var/lib/vector; \
+    mkdir -p /etc/vector; \
     \
     # Verify installation
     /usr/local/bin/vector --version; \
