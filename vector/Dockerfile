@@ -1,3 +1,8 @@
+# Stage 1: Get Vector binary from official Alpine image
+ARG VECTOR_VERSION="0.44.0"
+FROM timberio/vector:${VECTOR_VERSION}-alpine AS vector
+
+# Stage 2: Final image
 ARG BUILD_FROM
 # hadolint ignore=DL3006
 FROM ${BUILD_FROM}
@@ -7,41 +12,25 @@ SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
 # Build arguments
 ARG BUILD_ARCH
-ARG VECTOR_VERSION="0.44.0"
 
 # Environment
 ENV VECTOR_CONFIG=/etc/vector/vector.yaml
 
+# Copy Vector binary from official Alpine image (already musl-compatible)
+COPY --from=vector /usr/local/bin/vector /usr/local/bin/vector
+
 # hadolint ignore=DL3018
 RUN set -eux; \
     \
-    # Determine architecture for Vector download
-    case "${BUILD_ARCH}" in \
-        amd64) VECTOR_ARCH="x86_64-unknown-linux-gnu" ;; \
-        aarch64) VECTOR_ARCH="aarch64-unknown-linux-gnu" ;; \
-        *) echo "Unsupported architecture: ${BUILD_ARCH}" && exit 1 ;; \
-    esac; \
-    \
-    # Install glibc compatibility layer and dependencies
+    # Install dependencies
     apk add --no-cache \
-        jq=1.7.1-r0 \
-        libc6-compat \
-        libgcc \
-        libstdc++; \
-    \
-    # Download and install Vector
-    curl -sSL "https://packages.timber.io/vector/${VECTOR_VERSION}/vector-${VECTOR_VERSION}-${VECTOR_ARCH}.tar.gz" \
-        | tar xzf - --strip-components=2 -C /usr/local/bin/ \
-            "./vector-${VECTOR_ARCH}/bin/vector"; \
-    \
-    # Create glibc symlink for compatibility
-    ln -sf /lib/libc.musl-*.so.1 /lib/ld-linux-*.so.* 2>/dev/null || true; \
-    \
-    # Verify installation
-    /usr/local/bin/vector --version; \
+        jq=1.7.1-r0; \
     \
     # Create required directories
-    mkdir -p /etc/vector /var/lib/vector
+    mkdir -p /etc/vector /var/lib/vector; \
+    \
+    # Verify installation
+    /usr/local/bin/vector --version
 
 # Copy rootfs
 COPY rootfs /
