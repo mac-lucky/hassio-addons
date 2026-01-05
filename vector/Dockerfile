@@ -1,9 +1,11 @@
-# Stage 1: Get Vector binary from official Alpine image
+# Global build arguments (must be before first FROM to use in FROM)
 ARG VECTOR_VERSION="0.44.0"
+ARG BUILD_FROM
+
+# Stage 1: Get Vector binary from official Alpine image
 FROM timberio/vector:${VECTOR_VERSION}-alpine AS vector
 
 # Stage 2: Final image
-ARG BUILD_FROM
 # hadolint ignore=DL3006
 FROM ${BUILD_FROM}
 
