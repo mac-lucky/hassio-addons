@@ -1,6 +1,9 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
+# Set shell with pipefail
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+
 # Build arguments
 ARG BUILD_ARCH
 ARG VECTOR_VERSION="0.44.0"
@@ -15,7 +18,6 @@ RUN set -eux; \
     case "${BUILD_ARCH}" in \
         amd64) VECTOR_ARCH="x86_64-unknown-linux-musl" ;; \
         aarch64) VECTOR_ARCH="aarch64-unknown-linux-musl" ;; \
-        armv7) VECTOR_ARCH="armv7-unknown-linux-musleabihf" ;; \
         *) echo "Unsupported architecture: ${BUILD_ARCH}" && exit 1 ;; \
     esac; \
     \

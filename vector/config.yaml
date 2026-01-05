@@ -6,10 +6,8 @@ url: https://github.com/mac-lucky/hassio-addons/tree/main/vector
 arch:
   - amd64
   - aarch64
-  - armv7
 init: false
 startup: services
-boot: auto
 timeout: 60
 
 # System access for log collection
