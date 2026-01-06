@@ -31,6 +31,8 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `victorialogs_username` | `""` | Username for basic auth (leave empty to disable) |
+| `victorialogs_password` | `""` | Password for basic auth |
 | `hostname` | System hostname | Override the hostname label |
 | `instance` | `homeassistant` | Instance identifier for multi-HA setups |
 | `log_level` | `info` | Logging verbosity (trace/debug/info/warning/error) |
@@ -47,7 +49,9 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 ### Example Configuration
 
 ```yaml
-victorialogs_endpoint: "http://192.168.1.100:9428"
+victorialogs_endpoint: "http://192.168.1.100:8427"
+victorialogs_username: "myuser"
+victorialogs_password: "mypassword"
 hostname: "homeassistant-prod"
 instance: "main"
 log_level: "info"

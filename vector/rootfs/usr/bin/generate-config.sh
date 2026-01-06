@@ -8,6 +8,8 @@
 set -e
 
 declare victorialogs_endpoint
+declare victorialogs_username
+declare victorialogs_password
 declare hostname
 declare instance
 declare collect_journal
@@ -19,6 +21,8 @@ declare custom_config_path
 CONFIG_FILE="/data/options.json"
 
 victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${CONFIG_FILE}")
+victorialogs_username=$(jq -r '.victorialogs_username // ""' "${CONFIG_FILE}")
+victorialogs_password=$(jq -r '.victorialogs_password // ""' "${CONFIG_FILE}")
 hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
 instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
 collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
@@ -317,11 +321,26 @@ sinks:
     compression: gzip
     healthcheck:
       enabled: false
+SINKS
+
+# Add basic auth if username is provided
+if [[ -n "${victorialogs_username}" ]]; then
+    bashio::log.info "Adding basic auth for VictoriaLogs..."
+    cat >> /etc/vector/vector.yaml << AUTHCONFIG
+    auth:
+      strategy: basic
+      user: "${victorialogs_username}"
+      password: "${victorialogs_password}"
+AUTHCONFIG
+fi
+
+# Add query section
+cat >> /etc/vector/vector.yaml << QUERY
     query:
       _msg_field: message
       _time_field: timestamp
       _stream_fields: ${stream_fields}
-SINKS
+QUERY
 
 bashio::log.info "Vector configuration generated successfully"
 bashio::log.info "Configuration saved to /etc/vector/vector.yaml"

@@ -1,5 +1,5 @@
 name: Vector Log Collector
-version: "1.3.3"
+version: "1.4.0"
 slug: vector
 description: High-performance log collector for VictoriaLogs - collects journald logs
 url: https://github.com/mac-lucky/hassio-addons/tree/main/vector
@@ -33,6 +33,8 @@ ports_description:
 # Configuration options
 options:
   victorialogs_endpoint: ""
+  victorialogs_username: ""
+  victorialogs_password: ""
   hostname: ""
   instance: homeassistant
   log_level: info
@@ -50,6 +52,8 @@ options:
 # Schema validation
 schema:
   victorialogs_endpoint: url
+  victorialogs_username: str?
+  victorialogs_password: password?
   hostname: str?
   instance: str
   log_level: list(trace|debug|info|warning|error)
