@@ -251,10 +251,25 @@ cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
       # Extract container name from journald if available
       if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
 
-      # Map syslog priority to level name
-      if exists(.PRIORITY) {
+      # Extract level from message content first (more accurate for HA logs)
+      # Home Assistant logs format: "2026-01-11 09:04:15 WARNING (MainThread)..."
+      if match(string!(.message), r'^\x1b\[\d+m?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') {
+        level_match = parse_regex!(string!(.message), r'^\x1b\[\d+m?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)')
+        .level = downcase(level_match.level)
+        if .level == "warning" { .level = "warn" }
+        if .level == "critical" { .level = "error" }
+        if .level == "fatal" { .level = "error" }
+      } else if match(string!(.message), r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') {
+        # Same pattern without ANSI codes
+        level_match = parse_regex!(string!(.message), r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)')
+        .level = downcase(level_match.level)
+        if .level == "warning" { .level = "warn" }
+        if .level == "critical" { .level = "error" }
+        if .level == "fatal" { .level = "error" }
+      } else if exists(.PRIORITY) {
+        # Fall back to syslog priority if no level found in message
         p = to_int(.PRIORITY) ?? 6
-        .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warning" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
+        .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
       }
 
       # Ensure message field exists

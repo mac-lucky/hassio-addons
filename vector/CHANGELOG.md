@@ -5,6 +5,18 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-01-12
+
+### Fixed
+
+- Log level extraction now parses message content instead of relying solely on syslog PRIORITY
+- Home Assistant logs with "WARNING" in message now correctly set `level: "warn"` instead of `level: "error"`
+
+### Changed
+
+- Level extraction priority: message content patterns take precedence over syslog PRIORITY field
+- Normalized level values: `warning` → `warn`, `critical`/`fatal` → `error`
+
 ## [1.4.0] - 2026-01-06
 
 ### Added
