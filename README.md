@@ -1,3 +1,5 @@
+<img src="icon.svg" width="96" align="right" alt="">
+
 # Mac Lucky's Home Assistant Add-ons
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
