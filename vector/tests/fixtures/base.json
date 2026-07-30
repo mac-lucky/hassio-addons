@@ -1,0 +1,19 @@
+{
+  "victorialogs_endpoint": "http://192.168.1.100:9428/insert/elasticsearch",
+  "hostname": "ha-test",
+  "instance": "homeassistant",
+  "log_level": "info",
+  "collect_journal": true,
+  "redact_sensitive": true,
+  "journal_include_units": [],
+  "journal_exclude_units": [],
+  "extra_labels": {},
+  "custom_config_path": "",
+  "stream_fields": [
+    "host",
+    "container_name",
+    "unit"
+  ],
+  "victorialogs_username": "",
+  "victorialogs_password": ""
+}

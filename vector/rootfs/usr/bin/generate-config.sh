@@ -8,8 +8,6 @@
 set -e
 
 declare victorialogs_endpoint
-declare victorialogs_username
-declare victorialogs_password
 declare hostname
 declare instance
 declare collect_journal
@@ -17,23 +15,50 @@ declare redact_sensitive
 declare stream_fields
 declare custom_config_path
 
-# Read configuration directly from options.json
-CONFIG_FILE="/data/options.json"
 
-victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${CONFIG_FILE}")
-victorialogs_username=$(jq -r '.victorialogs_username // ""' "${CONFIG_FILE}")
-victorialogs_password=$(jq -r '.victorialogs_password // ""' "${CONFIG_FILE}")
-hostname=$(jq -r '.hostname // ""' "${CONFIG_FILE}")
-instance=$(jq -r '.instance // "homeassistant"' "${CONFIG_FILE}")
-collect_journal=$(jq -r '.collect_journal // false' "${CONFIG_FILE}")
-redact_sensitive=$(jq -r '.redact_sensitive // true' "${CONFIG_FILE}")
-stream_fields=$(jq -r '.stream_fields // [] | join(",")' "${CONFIG_FILE}")
-custom_config_path=$(jq -r '.custom_config_path // ""' "${CONFIG_FILE}")
+# shellcheck source=/dev/null
+source /usr/lib/vector-common.sh
+
+# The credentials are deliberately never read into a plain shell variable here -
+# load_credentials exports them escaped, and every check below uses the exported
+# values so the plaintext exists in exactly one place. It also refuses to load
+# them at all when a custom config is in use. Called again even though the run
+# script already did it, so this script also works standalone.
+vector_addon::load_credentials
+
+victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${VECTOR_OPTIONS_FILE}")
+hostname=$(jq -r '.hostname // ""' "${VECTOR_OPTIONS_FILE}")
+instance=$(jq -r '.instance // "homeassistant"' "${VECTOR_OPTIONS_FILE}")
+# Not `// true`: jq's alternative operator treats false as empty, so an option
+# the user explicitly set to false would read back as true
+collect_journal=$(jq -r 'if .collect_journal == null then true else .collect_journal end' "${VECTOR_OPTIONS_FILE}")
+redact_sensitive=$(jq -r 'if .redact_sensitive == null then true else .redact_sensitive end' "${VECTOR_OPTIONS_FILE}")
+stream_fields=$(jq -r '.stream_fields // [] | join(",")' "${VECTOR_OPTIONS_FILE}")
+custom_config_path=$(vector_addon::custom_config_path)
+
+readonly IDENTIFIER_RE='^[a-zA-Z_][a-zA-Z0-9_]*$'
+readonly UNIT_NAME_RE='^[a-zA-Z0-9._@-]+$'
 
 # Function to sanitize strings for safe use in sed and YAML
 sanitize_for_sed() {
     # Escape sed special characters: \ & / and newlines
     printf '%s' "$1" | sed -e 's/[\\&/]/\\&/g' -e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+# List form of validate_safe_string: every element a jq filter yields must match
+# the pattern, or the add-on refuses to start. The filters are literals from
+# this file, never user input.
+validate_list() {
+    local filter="$1"
+    local pattern="$2"
+    local label="$3"
+    local item
+    while IFS= read -r item; do
+        if [[ ! "${item}" =~ ${pattern} ]]; then
+            bashio::log.fatal "Invalid ${label}: ${item}"
+            bashio::exit.nok
+        fi
+    done < <(jq -r "${filter}" "${VECTOR_OPTIONS_FILE}")
 }
 
 # Function to validate input contains only safe characters
@@ -43,48 +68,90 @@ validate_safe_string() {
     # Allow alphanumeric, dots, hyphens, underscores, and spaces
     if [[ ! "${value}" =~ ^[a-zA-Z0-9._\ -]+$ ]]; then
         bashio::log.fatal "${name} contains invalid characters. Only alphanumeric, dots, hyphens, underscores allowed."
-        exit 1
+        bashio::exit.nok
     fi
 }
 
-# Function to mask credentials in URLs for logging
-mask_url_credentials() {
-    local url="$1"
-    # Mask user:pass@ in URLs
-    printf '%s\n' "${url}" | sed -E 's|(https?://)([^:]+):([^@]+)@|\1***:***@|g'
+# Function to mask userinfo anywhere in a stream of text. Matches up to the LAST
+# @ before the path, because a password may itself contain an @ - stopping at the
+# first one would print the tail of it. Cannot cross / so a query string is safe.
+mask_credentials_stream() {
+    sed -E 's|(https?://)[^/[:space:]]*@|\1***:***@|g'
+}
+
+# Function to print the config with any credentials removed. The generated file
+# only ever references the password, but the endpoint may carry user:pass@ and a
+# user-supplied custom config can contain a literal password.
+dump_config_redacted() {
+    mask_credentials_stream < "${VECTOR_CONFIG}" \
+        | sed -E 's/^([[:space:]]*(user|password|auth_token|token):[[:space:]]*).*$/\1[REDACTED]/'
+}
+
+# Function to run vector validate with its output masked - Vector quotes the
+# endpoint back in its error messages, credentials included
+run_vector_validate() {
+    vector validate --config-yaml "${VECTOR_CONFIG}" 2>&1 | mask_credentials_stream
+    return "${PIPESTATUS[0]}"
+}
+
+# Function to validate one journal unit list and append it to the journald
+# source. Takes the options.json key and the Vector key to write it as.
+emit_journal_units() {
+    local option="$1"
+    local yaml_key="$2"
+    [[ -n "$(jq -r --arg o "${option}" '.[$o] // [] | .[]' "${VECTOR_OPTIONS_FILE}")" ]] || return 0
+
+    validate_list ".${option} // [] | .[]" "${UNIT_NAME_RE}" 'journal unit name'
+    echo "    ${yaml_key}:" >> "${VECTOR_CONFIG}"
+    # @json quotes the value: a unit starting with @ is a reserved YAML indicator
+    jq -r --arg o "${option}" '.[$o][] | "      - " + (. | @json)' \
+        "${VECTOR_OPTIONS_FILE}" >> "${VECTOR_CONFIG}"
 }
 
 # Function to validate URL doesn't contain YAML-breaking characters
 validate_url_for_yaml() {
     local url="$1"
-    # URLs should not contain unescaped quotes, newlines, or YAML special sequences
-    if [[ "${url}" =~ [\"\'\`\$\{\}] ]] || [[ "${url}" == *$'\n'* ]]; then
+    # Note: $ and {} are rejected because Vector interpolates them textually
+    # before parsing, not because YAML would mind them
+    if [[ "${url}" =~ [\"\'\`\$\{\}] ]]; then
         bashio::log.fatal "VictoriaLogs endpoint contains invalid characters"
-        exit 1
+        bashio::exit.nok
     fi
     # Must start with http:// or https://
     if [[ ! "${url}" =~ ^https?:// ]]; then
         bashio::log.fatal "VictoriaLogs endpoint must start with http:// or https://"
-        exit 1
+        bashio::exit.nok
     fi
 }
 
 # Validate required configuration
 if [[ -z "${victorialogs_endpoint}" ]]; then
     bashio::log.fatal "VictoriaLogs endpoint is required!"
-    exit 1
+    bashio::exit.nok
 fi
 
 # Validate endpoint URL for YAML safety
 validate_url_for_yaml "${victorialogs_endpoint}"
 
-# Validate stream_fields contain only safe characters
-while IFS= read -r field; do
-    if [[ -n "${field}" ]] && [[ ! "${field}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-        bashio::log.fatal "Invalid stream field: ${field} (must be valid identifier)"
-        exit 1
-    fi
-done < <(jq -r '.stream_fields // [] | .[]' "${CONFIG_FILE}")
+# Check the raw JSON, not the shell variables: command substitution has already
+# stripped any trailing newline by then, so a password ending in one would
+# silently reach Vector truncated. CR and NEL are YAML line breaks too, and any
+# of them would end the quoted scalar these values land in.
+# NEL has to be written \x{85}: a raw U+0085 in the class breaks it in Oniguruma
+if ! jq -e '((.victorialogs_username // "") + (.victorialogs_password // "")
+             + (.victorialogs_endpoint // "")) | test("[\\n\\r\\x{85}]") | not' \
+        "${VECTOR_OPTIONS_FILE}" > /dev/null; then
+    bashio::log.fatal "Endpoint, username and password must not contain line breaks"
+    bashio::exit.nok
+fi
+
+if [[ -z "${VICTORIALOGS_USER}" ]] && [[ -n "${VICTORIALOGS_PASSWORD}" ]]; then
+    bashio::log.warning "A VictoriaLogs password is set but the username is empty; basic auth will not be used"
+elif [[ -n "${VICTORIALOGS_USER}" ]] && [[ -z "${VICTORIALOGS_PASSWORD}" ]]; then
+    bashio::log.warning "A VictoriaLogs username is set but the password is empty; the server will likely reject it"
+fi
+
+validate_list '.stream_fields // [] | .[]' "${IDENTIFIER_RE}" 'stream field (must be a valid identifier)'
 
 # Use hostname from system if not specified
 if [[ -z "${hostname}" ]]; then
@@ -97,51 +164,63 @@ validate_safe_string "${instance}" "instance"
 
 # Check for custom config with path validation (TOCTOU-safe)
 if [[ -n "${custom_config_path}" ]]; then
-    # First check if file exists
-    if [[ -f "${custom_config_path}" ]]; then
-        # Resolve the ACTUAL path (not -m which doesn't require existence)
-        # This prevents symlink attacks between check and use
-        real_path=$(realpath "${custom_config_path}" 2>/dev/null || echo "")
-        if [[ -z "${real_path}" ]]; then
-            bashio::log.fatal "Invalid custom config path!"
-            exit 1
-        fi
-        # Only allow paths under /addon_configs or /share
-        if [[ ! "${real_path}" =~ ^/(addon_configs|share)/ ]]; then
-            bashio::log.fatal "Custom config must be in /addon_configs or /share directory!"
-            exit 1
-        fi
-        # Use the resolved real_path for the copy to prevent TOCTOU
-        bashio::log.info "Using custom configuration from: ${real_path}"
-        mkdir -p /etc/vector
-        cp "${real_path}" /etc/vector/vector.yaml
-        # Validate custom config before accepting it
-        if ! vector validate --config-yaml /etc/vector/vector.yaml; then
-            bashio::log.fatal "Custom configuration validation failed!"
-            bashio::exit.nok
-        fi
-        bashio::log.info "Custom configuration validation passed"
-        exit 0
+    # Falling back to the generated config would silently ignore what the user asked for
+    if [[ ! -f "${custom_config_path}" ]]; then
+        bashio::log.fatal "Custom config not found: ${custom_config_path}"
+        bashio::log.fatal "Fix custom_config_path or clear it to use the generated configuration"
+        bashio::exit.nok
     fi
+    # Resolve the ACTUAL path (not -m which doesn't require existence)
+    # This prevents symlink attacks between check and use
+    real_path=$(realpath "${custom_config_path}" 2>/dev/null || echo "")
+    if [[ -z "${real_path}" ]]; then
+        bashio::log.fatal "Invalid custom config path!"
+        bashio::exit.nok
+    fi
+    # Only allow paths under /addon_configs or /share
+    if [[ ! "${real_path}" =~ ^/(addon_configs|share)/ ]]; then
+        bashio::log.fatal "Custom config must be in /addon_configs or /share directory!"
+        bashio::exit.nok
+    fi
+    # Use the resolved real_path for the copy to prevent TOCTOU
+    bashio::log.info "Using custom configuration from: ${real_path}"
+    mkdir -p "$(dirname "${VECTOR_CONFIG}")"
+    install -m 600 "${real_path}" "${VECTOR_CONFIG}"
+    # Validate custom config before accepting it
+    if ! run_vector_validate; then
+        bashio::log.fatal "Custom configuration validation failed!"
+        bashio::log.fatal "Run 'vector validate' against your file to see the details"
+        bashio::exit.nok
+    fi
+    bashio::log.info "Custom configuration validation passed"
+    exit 0
 fi
 
-# Mask credentials in endpoint URL for logging
-masked_endpoint=$(mask_url_credentials "${victorialogs_endpoint}")
+# journald is the only source, so disabling it leaves nothing to collect
+if [[ "${collect_journal}" != "true" ]]; then
+    bashio::log.fatal "collect_journal is disabled and it is the only log source!"
+    bashio::exit.nok
+fi
+
+masked_endpoint=$(printf '%s\n' "${victorialogs_endpoint}" | mask_credentials_stream)
 
 bashio::log.info "Generating Vector configuration..."
 bashio::log.info "VictoriaLogs endpoint: ${masked_endpoint}"
 bashio::log.info "Hostname: ${hostname}"
 bashio::log.info "Instance: ${instance}"
-bashio::log.info "Collect journal: ${collect_journal}"
 bashio::log.info "Redact sensitive: ${redact_sensitive}"
 
-# Create required directories and clear any existing config
-mkdir -p /etc/vector
+# Create required directories and clear any existing config. The file is created
+# empty and locked down first, because the endpoint written into it further down
+# can carry credentials and > preserves the mode of an existing file.
+mkdir -p "$(dirname "${VECTOR_CONFIG}")"
 mkdir -p /share/vector
-rm -f /etc/vector/vector.yaml
+rm -f "${VECTOR_CONFIG}" "${VECTOR_VRL}"
+install -m 600 /dev/null "${VECTOR_CONFIG}"
+install -m 600 /dev/null "${VECTOR_VRL}"
 
 # Start generating the configuration
-cat > /etc/vector/vector.yaml << 'VECTORCONFIG'
+cat > "${VECTOR_CONFIG}" << 'VECTORCONFIG'
 # Vector Configuration - Auto-generated by Home Assistant Add-on
 # Do not edit directly; modify addon options instead
 
@@ -154,176 +233,124 @@ api:
 
 VECTORCONFIG
 
-# Add sources section
-echo "sources:" >> /etc/vector/vector.yaml
+# Try both common journal locations - HA OS may use either
+# Vector's journalctl will use --directory flag
+journal_dir="/var/log/journal"
+if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A "${journal_dir}" 2>/dev/null)" ]]; then
+    journal_dir="/run/log/journal"
+fi
+bashio::log.info "Using journal directory: ${journal_dir}"
 
-# Track which sources are enabled for transform inputs
-declare -a enabled_sources=()
-
-# Add journald source if enabled
-if [[ "${collect_journal}" == "true" ]]; then
-    bashio::log.info "Enabling journald source..."
-    enabled_sources+=("journald")
-
-    # Try both common journal locations - HA OS may use either
-    # Vector's journalctl will use --directory flag
-    journal_dir="/var/log/journal"
-    if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A "${journal_dir}" 2>/dev/null)" ]]; then
-        journal_dir="/run/log/journal"
-    fi
-    bashio::log.info "Using journal directory: ${journal_dir}"
-
-    cat >> /etc/vector/vector.yaml << JOURNALDSOURCE
+cat >> "${VECTOR_CONFIG}" << JOURNALDSOURCE
+sources:
   journald:
     type: journald
     current_boot_only: false
     journal_directory: ${journal_dir}
 JOURNALDSOURCE
 
-    # Add include_units if specified (with validation)
-    units_count=$(jq -r '.journal_include_units // [] | length' /data/options.json)
-    if [[ "${units_count}" -gt 0 ]]; then
-        # Validate unit names contain only safe characters
-        while IFS= read -r unit; do
-            if [[ ! "${unit}" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
-                bashio::log.fatal "Invalid journal unit name: ${unit}"
-                bashio::exit.nok
-            fi
-        done < <(jq -r '.journal_include_units // [] | .[]' /data/options.json)
-        echo "    include_units:" >> /etc/vector/vector.yaml
-        jq -r '.journal_include_units // [] | .[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
-    fi
+emit_journal_units journal_include_units include_units
+emit_journal_units journal_exclude_units exclude_units
 
-    # Add exclude_units if specified (with validation)
-    units_count=$(jq -r '.journal_exclude_units // [] | length' /data/options.json)
-    if [[ "${units_count}" -gt 0 ]]; then
-        # Validate unit names contain only safe characters
-        while IFS= read -r unit; do
-            if [[ ! "${unit}" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
-                bashio::log.fatal "Invalid journal unit name: ${unit}"
-                bashio::exit.nok
-            fi
-        done < <(jq -r '.journal_exclude_units // [] | .[]' /data/options.json)
-        echo "    exclude_units:" >> /etc/vector/vector.yaml
-        jq -r '.journal_exclude_units // [] | .[] | "      - " + .' /data/options.json >> /etc/vector/vector.yaml
-    fi
+# Add transforms section - the program itself lives in its own file
+cat >> "${VECTOR_CONFIG}" << TRANSFORMS_HEADER
 
-    echo "" >> /etc/vector/vector.yaml
-fi
-
-# Check if any sources are enabled
-if [[ ${#enabled_sources[@]} -eq 0 ]]; then
-    bashio::log.fatal "At least one log source must be enabled!"
-    bashio::exit.nok
-fi
-
-# Build inputs list for transforms
-inputs_yaml=""
-for source in "${enabled_sources[@]}"; do
-    inputs_yaml="${inputs_yaml}      - ${source}\n"
-done
-
-# Add transforms section - header
-cat >> /etc/vector/vector.yaml << 'TRANSFORMS_HEADER'
 transforms:
   enrich_logs:
     type: remap
     inputs:
+      - journald
+    file: ${VECTOR_VRL}
 TRANSFORMS_HEADER
 
-# Add inputs list
-printf '%b' "${inputs_yaml}" >> /etc/vector/vector.yaml
+# Write the VRL program - quoted heredoc so its $, \d and \s survive verbatim,
+# with the two runtime values substituted by sed afterwards
+cat > "${VECTOR_VRL}" << 'TRANSFORMS_VRL'
+# Add standard labels (HOSTNAME and INSTANCE replaced by sed below)
+.host = "__HOSTNAME__"
+.instance = "__INSTANCE__"
+if !exists(.source_type) { .source_type = "unknown" }
 
-# Add VRL source - use quoted heredoc for VRL syntax, substitute variables after
-cat >> /etc/vector/vector.yaml << 'TRANSFORMS_VRL'
-    source: |
-      # Add standard labels (HOSTNAME and INSTANCE replaced by sed below)
-      .host = "__HOSTNAME__"
-      .instance = "__INSTANCE__"
-      if !exists(.source_type) { .source_type = "unknown" }
+# For journald logs - extract unit name (strip .service suffix)
+if exists(._SYSTEMD_UNIT) {
+  .unit = replace(string!(._SYSTEMD_UNIT), r'\.service', "")
+  .container_name = .unit
+}
 
-      # For journald logs - extract unit name (strip .service suffix)
-      if exists(._SYSTEMD_UNIT) {
-        .unit = replace(string!(._SYSTEMD_UNIT), r'\.service', "")
-        .container_name = .unit
-      }
+# Extract container name from journald if available
+if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
 
-      # Extract container name from journald if available
-      if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
+# A missing or non-string message aborts the whole program, which would
+# skip both the enrichment above and the redaction below.
+# The last resort is a placeholder rather than encode_json(.): the journal
+# fields are shipped separately anyway, and folding them into .message
+# would push things like _CMDLINE (which carries credentials) through a
+# redaction pass that is only written for message-shaped text.
+if !exists(.message) {
+  if exists(.MESSAGE) { .message = del(.MESSAGE) } else { .message = "(no message)" }
+}
+# Not redundant with the coalesce below: to_string on an array yields the
+# fallback and would throw the message away, encode_json keeps it
+if !is_string(.message) { .message = encode_json(.message) }
+msg = to_string(.message) ?? ""
 
-      # Extract level from message content first (more accurate for HA logs)
-      # Home Assistant logs format: "2026-01-11 09:04:15 WARNING (MainThread)..."
-      if match(string!(.message), r'^\x1b\[\d+m?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') {
-        level_match = parse_regex!(string!(.message), r'^\x1b\[\d+m?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)')
-        .level = downcase(level_match.level)
-        if .level == "warning" { .level = "warn" }
-        if .level == "critical" { .level = "error" }
-        if .level == "fatal" { .level = "error" }
-      } else if match(string!(.message), r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') {
-        # Same pattern without ANSI codes
-        level_match = parse_regex!(string!(.message), r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)')
-        .level = downcase(level_match.level)
-        if .level == "warning" { .level = "warn" }
-        if .level == "critical" { .level = "error" }
-        if .level == "fatal" { .level = "error" }
-      } else if exists(.PRIORITY) {
-        # Fall back to syslog priority if no level found in message
-        p = to_int(.PRIORITY) ?? 6
-        .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
-      }
+# Extract level from message content first (more accurate for HA logs).
+# Home Assistant logs format: "2026-01-11 09:04:15 WARNING (MainThread)..."
+# with an optional ANSI colour prefix.
+level_match = parse_regex(msg, r'^(?:\x1b\[\d+m?)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') ?? {}
+if is_string(level_match.level) {
+  lvl = downcase(string!(level_match.level))
+  if lvl == "warning" { lvl = "warn" }
+  if lvl == "critical" { lvl = "error" }
+  if lvl == "fatal" { lvl = "error" }
+  .level = lvl
+} else if exists(.PRIORITY) {
+  # Fall back to syslog priority if no level found in message
+  p = to_int(.PRIORITY) ?? 6
+  .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
+}
 
-      # Ensure message field exists
-      if !exists(.message) {
-        if exists(.MESSAGE) { .message = del(.MESSAGE) } else { .message = encode_json(.) }
-      }
-
-      # Add timestamp if missing
-      if !exists(.timestamp) { .timestamp = now() }
+# Add timestamp if missing
+if !exists(.timestamp) { .timestamp = now() }
 TRANSFORMS_VRL
 
 # Replace placeholders with actual values (using sanitized strings)
-escaped_hostname=$(sanitize_for_sed "${hostname}")
-escaped_instance=$(sanitize_for_sed "${instance}")
-sed -i "s/__HOSTNAME__/${escaped_hostname}/g" /etc/vector/vector.yaml
-sed -i "s/__INSTANCE__/${escaped_instance}/g" /etc/vector/vector.yaml
+sed -i -e "s/__HOSTNAME__/$(sanitize_for_sed "${hostname}")/g" \
+       -e "s/__INSTANCE__/$(sanitize_for_sed "${instance}")/g" "${VECTOR_VRL}"
 
 # Add sensitive data redaction if enabled
 if [[ "${redact_sensitive}" == "true" ]]; then
     bashio::log.info "Adding sensitive data redaction..."
     # Redact sensitive data - simplified approach without backreferences to avoid $1 env var issues
-    cat >> /etc/vector/vector.yaml << 'REDACT_VRL'
+    cat >> "${VECTOR_VRL}" << 'REDACT_VRL'
 
-      # Redact sensitive data (API keys, tokens, authorization headers)
-      .message = replace(string!(.message), r'(?i)Authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
-      .message = replace(.message, r'(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
-      .message = replace(.message, r'(?i)X-API-Key:\s*[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
-      .message = replace(.message, r'(?i)X-Auth-Token:\s*[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
-      .message = replace(.message, r'(?i)api[_-]?key["\s:=]+[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
-      .message = replace(.message, r'(?i)token["\s:=]+[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
-      .message = replace(.message, r'(?i)password["\s:=]+[^\s"]+', "password: [REDACTED]")
-      .message = replace(.message, r'(?i)secret["\s:=]+[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
+# Redact sensitive data (API keys, tokens, authorization headers).
+# Works on msg, so anything added below sees the redacted text too.
+msg = replace(msg, r'(?i)Authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
+msg = replace(msg, r'(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
+msg = replace(msg, r'(?i)X-API-Key:\s*[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
+msg = replace(msg, r'(?i)X-Auth-Token:\s*[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
+msg = replace(msg, r'(?i)api[_-]?key["\s:=]+[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
+msg = replace(msg, r'(?i)token["\s:=]+[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
+msg = replace(msg, r'(?i)password["\s:=]+[^\s"]+', "password: [REDACTED]")
+msg = replace(msg, r'(?i)secret["\s:=]+[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
+.message = msg
 REDACT_VRL
 fi
 
 # Add extra labels if specified (with validation to prevent VRL injection)
-extra_labels_count=$(jq -r '.extra_labels // {} | keys | length' /data/options.json)
+extra_labels_count=$(jq -r '.extra_labels // {} | keys | length' "${VECTOR_OPTIONS_FILE}")
 if [[ "${extra_labels_count}" -gt 0 ]]; then
     bashio::log.info "Adding extra labels..."
-    # Validate label keys and values contain only safe characters
-    while IFS= read -r key; do
-        if [[ ! "${key}" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-            bashio::log.fatal "Invalid extra label key: ${key} (must be valid identifier)"
-            bashio::exit.nok
-        fi
-    done < <(jq -r '.extra_labels // {} | keys | .[]' /data/options.json)
+    validate_list '.extra_labels // {} | keys | .[]' "${IDENTIFIER_RE}" 'extra label key (must be a valid identifier)'
     # Values are escaped by jq's @json, preventing injection
-    echo "" >> /etc/vector/vector.yaml
-    echo "      # Extra custom labels" >> /etc/vector/vector.yaml
-    jq -r '.extra_labels // {} | to_entries | .[] | "      ." + .key + " = " + (.value | @json)' /data/options.json >> /etc/vector/vector.yaml
+    echo "" >> "${VECTOR_VRL}"
+    echo "# Extra custom labels" >> "${VECTOR_VRL}"
+    jq -r '.extra_labels // {} | to_entries | .[] | "." + .key + " = " + (.value | @json)' "${VECTOR_OPTIONS_FILE}" >> "${VECTOR_VRL}"
 fi
 
 # Add sinks section
-cat >> /etc/vector/vector.yaml << SINKS
+cat >> "${VECTOR_CONFIG}" << SINKS
 
 sinks:
   victorialogs:
@@ -338,34 +365,48 @@ sinks:
       enabled: false
 SINKS
 
-# Add basic auth if username is provided
-if [[ -n "${victorialogs_username}" ]]; then
+# Add basic auth if username is provided.
+# Two things here are load-bearing and neither is obvious:
+# - the heredoc delimiter is quoted, so the references reach the file verbatim
+#   for Vector to resolve. Unquote it and bash puts the password back on disk.
+# - the scalars must stay SINGLE-quoted. Vector substitutes textually, and
+#   vector-common.sh doubles ' to match. Switching to double quotes lets a
+#   password containing " or \ corrupt the config.
+if [[ -n "${VICTORIALOGS_USER}" ]]; then
     bashio::log.info "Adding basic auth for VictoriaLogs..."
-    cat >> /etc/vector/vector.yaml << AUTHCONFIG
+    cat >> "${VECTOR_CONFIG}" << 'AUTHCONFIG'
     auth:
       strategy: basic
-      user: "${victorialogs_username}"
-      password: "${victorialogs_password}"
+      user: '${VICTORIALOGS_USER}'
+      password: '${VICTORIALOGS_PASSWORD}'
 AUTHCONFIG
 fi
 
 # Add query section
-cat >> /etc/vector/vector.yaml << QUERY
+cat >> "${VECTOR_CONFIG}" << 'QUERY'
     query:
       _msg_field: message
       _time_field: timestamp
-      _stream_fields: ${stream_fields}
 QUERY
 
+# An empty value parses as null and the sink rejects it. @json does the quoting,
+# the same way the extra_labels values above are emitted.
+if [[ -n "${stream_fields}" ]]; then
+    jq -r '.stream_fields | join(",") | "      _stream_fields: " + @json' \
+        "${VECTOR_OPTIONS_FILE}" >> "${VECTOR_CONFIG}"
+else
+    bashio::log.warning "No stream fields configured; logs will land in a single stream"
+fi
+
 bashio::log.info "Vector configuration generated successfully"
-bashio::log.info "Configuration saved to /etc/vector/vector.yaml"
+bashio::log.info "Configuration saved to ${VECTOR_CONFIG}"
 
 # Validate the configuration
-if vector validate --config-yaml /etc/vector/vector.yaml; then
+if run_vector_validate; then
     bashio::log.info "Configuration validation passed"
 else
     bashio::log.error "Configuration validation failed!"
-    bashio::log.error "Generated configuration:"
-    cat /etc/vector/vector.yaml
+    bashio::log.error "Generated configuration (credentials redacted):"
+    dump_config_redacted
     bashio::exit.nok
 fi

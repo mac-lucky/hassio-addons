@@ -8,6 +8,13 @@
 declare -a vector_args=()
 declare log_level
 
+# shellcheck source=/dev/null
+source /usr/lib/vector-common.sh
+
+# Vector resolves the references in the generated config at exec time, so it
+# needs these in the environment; generate-config.sh loads them itself as well
+vector_addon::load_credentials
+
 # Generate configuration from template
 bashio::log.info "Generating Vector configuration..."
 if ! /usr/bin/generate-config.sh; then
@@ -35,7 +42,7 @@ case "${log_level}" in
 esac
 
 # Set config file path (Vector 0.44+ uses --config-yaml)
-vector_args+=("--config-yaml" "/etc/vector/vector.yaml")
+vector_args+=("--config-yaml" "${VECTOR_CONFIG}")
 
 bashio::log.info "Starting Vector..."
 exec vector "${vector_args[@]}"

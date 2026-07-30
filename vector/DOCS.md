@@ -6,11 +6,14 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 ## Features
 
 - Collects systemd journal logs (Home Assistant Core, Supervisor, add-ons, host system)
-- Collects Docker container logs
 - Low memory footprint (~30-50MB RAM)
-- Configurable filtering by unit/container name
+- Configurable filtering by systemd unit
 - Custom labels for log enrichment
+- Optional redaction of secrets found in log messages
 - Built-in configuration validation
+
+Docker container logs are not collected separately. On Home Assistant OS the
+journal already carries container output, so the journald source covers it.
 
 ## Installation
 
@@ -25,23 +28,25 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 
 | Option | Description |
 |--------|-------------|
-| `victorialogs_endpoint` | URL of your VictoriaLogs instance (e.g., `http://192.168.1.100:9428`) |
+| `victorialogs_endpoint` | Full URL of the VictoriaLogs insert path (e.g., `http://192.168.1.100:9428/insert/elasticsearch`) |
+
+The endpoint is passed to Vector's `elasticsearch` sink verbatim and Vector
+appends `/_bulk`, so the insert path has to be part of the URL. A bare
+`http://192.168.1.100:9428` will not work.
 
 ### Optional Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `victorialogs_username` | `""` | Username for basic auth (leave empty to disable) |
-| `victorialogs_password` | `""` | Password for basic auth |
+| `victorialogs_password` | `""` | Password for basic auth, only used when a username is set |
 | `hostname` | System hostname | Override the hostname label |
 | `instance` | `homeassistant` | Instance identifier for multi-HA setups |
 | `log_level` | `info` | Logging verbosity (trace/debug/info/warning/error) |
 | `collect_journal` | `true` | Collect systemd journal logs |
-| `collect_docker` | `true` | Collect Docker container logs |
+| `redact_sensitive` | `true` | Replace API keys, tokens and passwords found in log messages with `[REDACTED]` |
 | `journal_include_units` | `[]` | Only collect from these systemd units |
 | `journal_exclude_units` | `[]` | Exclude these systemd units |
-| `docker_include_containers` | `[]` | Only collect from these containers |
-| `docker_exclude_containers` | `[]` | Exclude these containers |
 | `stream_fields` | `["host", "container_name", "unit"]` | Fields for VictoriaLogs stream identifiers |
 | `extra_labels` | `{}` | Additional key-value labels to add to all logs |
 | `custom_config_path` | `""` | Path to custom Vector config file (advanced) |
@@ -49,23 +54,25 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 ### Example Configuration
 
 ```yaml
-victorialogs_endpoint: "http://192.168.1.100:8427"
+victorialogs_endpoint: "http://192.168.1.100:9428/insert/elasticsearch"
 victorialogs_username: "myuser"
 victorialogs_password: "mypassword"
 hostname: "homeassistant-prod"
 instance: "main"
 log_level: "info"
 collect_journal: true
-collect_docker: true
+redact_sensitive: true
 journal_exclude_units:
-  - "systemd-resolved"
-  - "systemd-timesyncd"
-docker_exclude_containers:
-  - "addon_local_ssh"
+  - "systemd-resolved.service"
+  - "systemd-timesyncd.service"
 extra_labels:
   environment: "production"
   location: "home"
 ```
+
+The credentials are never written into the generated Vector configuration. The
+add-on passes them to Vector through the environment, so they cannot appear in
+the add-on log if the configuration fails to validate.
 
 ## Log Sources
 
@@ -80,21 +87,11 @@ When `collect_journal` is enabled, the add-on collects all systemd journal entri
 
 Use `journal_include_units` to collect only specific units, or `journal_exclude_units` to filter out noisy services.
 
-### Docker Logs
-
-When `collect_docker` is enabled, the add-on collects logs from Docker containers:
-
-- **Add-on containers**
-- **Home Assistant Core container**
-- Any other containers running on the host
-
-Use `docker_include_containers` or `docker_exclude_containers` to filter specific containers.
-
 ## VictoriaLogs Integration
 
 Logs are sent to VictoriaLogs using the Elasticsearch-compatible bulk API:
 
-- **Endpoint**: `{victorialogs_endpoint}/insert/elasticsearch/`
+- **Endpoint**: `{victorialogs_endpoint}` with `/_bulk` appended by Vector
 - **Compression**: gzip
 - **API version**: v8
 
@@ -135,16 +132,29 @@ For advanced users, you can provide a complete custom Vector configuration:
 2. Set `custom_config_path: "/share/vector/custom.yaml"`
 3. The add-on will use your config instead of generating one
 
-Your custom config must be valid Vector YAML configuration.
+The file has to live under `/share` or `/addon_configs` and must be valid Vector
+YAML. If the path does not exist the add-on refuses to start rather than falling
+back to the generated configuration, so a typo cannot leave you running a config
+you did not intend.
+
+None of the other options apply while a custom config is in use. That includes
+the basic auth credentials, which are deliberately not placed in Vector's
+environment at all in this mode: `/share` is writable by every add-on that maps
+it, and Vector substitutes environment variables into a config before parsing
+it, so a custom config could otherwise read the password back out. Put the
+credentials directly in your own config, or use Vector's own secrets support.
+
+If a custom config fails validation the add-on will not print it. Run
+`vector validate` against your file to see the details.
 
 ## Troubleshooting
 
 ### No logs appearing in VictoriaLogs
 
 1. Check the add-on logs for errors
-2. Verify the VictoriaLogs endpoint is reachable from Home Assistant
-3. Ensure VictoriaLogs is accepting connections on the configured port
-4. Check that at least one source (`collect_journal` or `collect_docker`) is enabled
+2. Verify the VictoriaLogs endpoint is reachable from Home Assistant, including the insert path
+3. Check that VictoriaLogs is accepting connections on the configured port
+4. Check that `collect_journal` is enabled
 
 ### Configuration validation failed
 
@@ -154,20 +164,19 @@ The add-on validates the generated configuration before starting. If validation 
 2. Review your configuration options
 3. If using `custom_config_path`, validate your custom config with `vector validate`
 
+On failure the add-on prints the generated configuration with credentials
+redacted, so it is safe to paste into a bug report.
+
 ### High memory usage
 
-Vector typically uses 30-50MB of RAM. If usage is higher:
-
-1. Reduce the number of collected sources
-2. Add exclusions for noisy units/containers:
+Vector typically uses 30-50MB of RAM. If usage is higher, add exclusions for
+noisy units:
 
 ```yaml
 journal_exclude_units:
-  - "systemd-journald"
-  - "systemd-timesyncd"
-  - "systemd-resolved"
-docker_exclude_containers:
-  - "addon_local_ssh"
+  - "systemd-journald.service"
+  - "systemd-timesyncd.service"
+  - "systemd-resolved.service"
 ```
 
 ### Connection refused errors
@@ -180,12 +189,9 @@ If you see "connection refused" errors:
 
 ## Vector API
 
-The add-on exposes Vector's API on port 8686 (optional). You can use this to:
-
-- Check Vector's health: `http://<ha-ip>:8686/health`
-- View metrics: `http://<ha-ip>:8686/metrics`
-
-To expose the port, configure it in the add-on's network settings.
+Vector's API is enabled but bound to `127.0.0.1:8686` inside the container, so
+it is not reachable from the network even if you map the port. It is there for
+`vector top` and similar commands run from an add-on shell.
 
 ## Support
 

@@ -27,6 +27,7 @@ jobs:
       name: ${{ steps.info.outputs.name }}
       version: ${{ steps.info.outputs.version }}
       vector_version: ${{ steps.info.outputs.vector_version }}
+      base_images: ${{ steps.info.outputs.base_images }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +42,7 @@ jobs:
           echo "name=$(yq -r '.name' vector/config.yaml)" >> $GITHUB_OUTPUT
           echo "version=$(yq -r '.version' vector/config.yaml)" >> $GITHUB_OUTPUT
           echo "vector_version=$(yq -r '.args.VECTOR_VERSION' vector/build.yaml)" >> $GITHUB_OUTPUT
+          echo "base_images=$(yq -o=json -I=0 '.build_from' vector/build.yaml)" >> $GITHUB_OUTPUT
 
   lint-addon:
     name: Addon Lint
@@ -102,6 +104,38 @@ jobs:
           scandir: "./vector/rootfs"
           severity: warning
 
+  test-generator:
+    name: Config Generator
+    needs:
+      - information
+      - lint-shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: vector
+          file: vector/Dockerfile
+          load: true
+          tags: hassio-addon-vector:test
+          build-args: |
+            BUILD_ARCH=amd64
+            BUILD_FROM=${{ fromJSON(needs.information.outputs.base_images).amd64 }}
+            VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
+          cache-from: type=gha,scope=test-amd64
+          cache-to: type=gha,scope=test-amd64,mode=max
+
+      - name: Run generator tests
+        run: |
+          docker run --rm -v "${{ github.workspace }}/vector/tests:/tests:ro" \
+            --entrypoint /bin/bash hassio-addon-vector:test /tests/run.sh
+
   build:
     name: Build (${{ matrix.architecture }})
     needs:
@@ -110,6 +144,7 @@ jobs:
       - lint-hadolint
       - lint-yaml
       - lint-shellcheck
+      - test-generator
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -121,12 +156,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Get base image
-        id: base
-        run: |
-          base_image=$(yq ".build_from.${{ matrix.architecture }}" vector/build.yaml)
-          echo "image=${base_image}" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -168,13 +197,15 @@ jobs:
             BUILD_ARCH=${{ matrix.architecture }}
             BUILD_DATE=${{ needs.information.outputs.build_date }}
             BUILD_DESCRIPTION=${{ needs.information.outputs.description }}
-            BUILD_FROM=${{ steps.base.outputs.image }}
+            BUILD_FROM=${{ fromJSON(needs.information.outputs.base_images)[matrix.architecture] }}
             BUILD_NAME=${{ needs.information.outputs.name }}
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=${{ needs.information.outputs.version }}
             VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
-          cache-from: type=gha,scope=build-${{ matrix.architecture }}
+          cache-from: |
+            type=gha,scope=build-${{ matrix.architecture }}
+            type=gha,scope=test-amd64
           cache-to: type=gha,scope=build-${{ matrix.architecture }},mode=max
           labels: |
             org.opencontainers.image.title=${{ needs.information.outputs.name }}

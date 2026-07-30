@@ -1,0 +1,4 @@
+{"message":"2026-01-11 09:04:15 WARNING (MainThread) password=\"hunter2sentinel\" ok","PRIORITY":"6","_SYSTEMD_UNIT":"home-assistant.service"}
+{"MESSAGE":"plain journald field only","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service"}
+{"message":[104,105],"PRIORITY":"4","_SYSTEMD_UNIT":"kernel.service"}
+{"PRIORITY":"2","_SYSTEMD_UNIT":"nomessage.service","_CMDLINE":"/usr/bin/restic --password-command 'echo restic-sentinel'"}

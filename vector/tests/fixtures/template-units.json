@@ -1,0 +1,6 @@
+{
+  "journal_include_units": [
+    "@reboot.service",
+    "getty@tty1.service"
+  ]
+}

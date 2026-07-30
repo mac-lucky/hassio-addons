@@ -14,8 +14,7 @@ A collection of Home Assistant add-ons focused on observability and monitoring.
 
 High-performance log collector that sends Home Assistant logs to VictoriaLogs.
 
-- Collects systemd journal logs (HA Core, Supervisor, add-ons)
-- Collects Docker container logs
+- Collects systemd journal logs (HA Core, Supervisor, add-ons, host services)
 - Low memory footprint (~30-50MB)
 - Configurable filtering and labeling
 
