@@ -1,6 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>mac-lucky/actions-shared-workflows"],
+  "packageRules": [
+    {
+      "matchDepNames": ["vectordotdev/vector"],
+      "automerge": false,
+      "labels": ["major"]
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",
