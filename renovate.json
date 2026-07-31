@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>mac-lucky/actions-shared-workflows"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^vector/Dockerfile$/", "/^vector/build\\.yaml$/"],
+      "matchStrings": [
+        "ARG VECTOR_VERSION=\"(?<currentValue>[0-9.]+)\"",
+        "VECTOR_VERSION: \"(?<currentValue>[0-9.]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "vectordotdev/vector",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
+}
