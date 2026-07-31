@@ -1,5 +1,5 @@
 # Global build arguments (must be before first FROM to use in FROM)
-ARG VECTOR_VERSION="0.44.0"
+ARG VECTOR_VERSION="0.57.0"
 ARG BUILD_FROM
 
 # Stage 1: Get Vector binary from official Debian image
