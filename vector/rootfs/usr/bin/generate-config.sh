@@ -245,7 +245,7 @@ cat >> "${VECTOR_CONFIG}" << JOURNALDSOURCE
 sources:
   journald:
     type: journald
-    current_boot_only: false
+    current_boot_only: true
     journal_directory: ${journal_dir}
 JOURNALDSOURCE
 
