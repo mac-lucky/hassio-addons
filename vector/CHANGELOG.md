@@ -5,6 +5,16 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-07-31
+
+### Changed
+
+- Vector bumped to 0.57.0
+- The journald source now sets `current_boot_only: true`. Vector 0.57 refuses to
+  start with `current_boot_only: false` on systemd versions 250 through 257 (the
+  base image ships 252), so only the current boot's logs are collected instead
+  of the full journal history across reboots
+
 ## [1.6.0] - 2026-07-30
 
 ### Security
