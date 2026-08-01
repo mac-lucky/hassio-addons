@@ -11,9 +11,8 @@ declare log_level
 # shellcheck source=/dev/null
 source /usr/lib/vector-common.sh
 
-# Vector resolves the references in the generated config at exec time, so it
-# needs these in the environment; generate-config.sh loads them itself as well
-vector_addon::load_credentials
+# Nothing to set up for the credentials here: Vector resolves them at config
+# load by running vector-secrets.sh, which reads the options file itself
 
 # Generate configuration from template
 bashio::log.info "Generating Vector configuration..."

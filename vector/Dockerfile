@@ -45,7 +45,8 @@ COPY rootfs /
 # Set permissions
 RUN chmod +x /etc/s6-overlay/s6-rc.d/vector/run \
     && chmod +x /etc/s6-overlay/s6-rc.d/vector/finish \
-    && chmod +x /usr/bin/generate-config.sh
+    && chmod +x /usr/bin/generate-config.sh \
+    && chmod +x /usr/bin/vector-secrets.sh
 
 # Build arguments for labels
 ARG BUILD_DATE

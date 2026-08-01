@@ -70,9 +70,11 @@ extra_labels:
   location: "home"
 ```
 
-The credentials are never written into the generated Vector configuration. The
-add-on passes them to Vector through the environment, so they cannot appear in
-the add-on log if the configuration fails to validate.
+The credentials are never written into the generated Vector configuration. It
+holds `SECRET[victorialogs.user]` and `SECRET[victorialogs.password]`, which
+Vector resolves at startup by running a helper that reads them from the add-on
+options, so they cannot appear in the add-on log if the configuration fails to
+validate.
 
 ## Log Sources
 
@@ -138,11 +140,10 @@ back to the generated configuration, so a typo cannot leave you running a config
 you did not intend.
 
 None of the other options apply while a custom config is in use. That includes
-the basic auth credentials, which are deliberately not placed in Vector's
-environment at all in this mode: `/share` is writable by every add-on that maps
-it, and Vector substitutes environment variables into a config before parsing
-it, so a custom config could otherwise read the password back out. Put the
-credentials directly in your own config, or use Vector's own secrets support.
+the basic auth credentials: `/share` is writable by every add-on that maps it,
+and a custom config could declare the same secret backend and read the password
+back out, so the backend serves nothing in this mode. Put the credentials
+directly in your own config, or use Vector's own secrets support.
 
 If a custom config fails validation the add-on will not print it. Run
 `vector validate` against your file to see the details.

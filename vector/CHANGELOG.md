@@ -5,6 +5,34 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-08-01
+
+### Fixed
+
+- Basic auth works again. 1.6.0 moved the credentials into the environment and
+  had the generated config reference them as `${VICTORIALOGS_USER}` and
+  `${VICTORIALOGS_PASSWORD}`, but Vector does not interpolate environment
+  variables into a `--config-yaml` config. The sink authenticated with those
+  literal strings, so a VictoriaLogs instance behind auth rejected every batch
+  with 401 and dropped the events. Anyone who set a username and password has
+  been shipping nothing since upgrading to 1.6.0; no configuration change is
+  needed on your side, only this update
+- The credentials now go through Vector's own secrets management. The config
+  holds `SECRET[victorialogs.user]` and `SECRET[victorialogs.password]`, which
+  Vector resolves at startup by running `vector-secrets.sh`. The password still
+  never reaches disk and still cannot appear in the config dump printed on a
+  validation failure
+
+### Added
+
+- The test suite now checks the `Authorization` header the sink actually sends,
+  by running one Vector as the receiver and one as the sender. Every assertion
+  in 1.6.0 passed while the add-on was authenticating with literal text, because
+  none of them looked past the generated file
+- A test that loads the generated config with Vector for real. `vector validate`
+  does not resolve secrets, so the validation step the add-on already ran could
+  not catch a substitution that breaks the config
+
 ## [1.6.1] - 2026-07-31
 
 ### Changed

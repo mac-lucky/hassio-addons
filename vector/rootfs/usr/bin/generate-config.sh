@@ -14,17 +14,17 @@ declare collect_journal
 declare redact_sensitive
 declare stream_fields
 declare custom_config_path
+declare auth_username
 
 
 # shellcheck source=/dev/null
 source /usr/lib/vector-common.sh
 
-# The credentials are deliberately never read into a plain shell variable here -
-# load_credentials exports them escaped, and every check below uses the exported
-# values so the plaintext exists in exactly one place. It also refuses to load
-# them at all when a custom config is in use. Called again even though the run
-# script already did it, so this script also works standalone.
-vector_addon::load_credentials
+# Only the username is read. It decides whether the auth block is emitted at
+# all; the password is never loaded into a shell variable here, so there is no
+# copy of it in this process to escape, log or leak. vector-secrets.sh hands
+# both straight to Vector at config load.
+auth_username=$(vector_addon::auth_username)
 
 victorialogs_endpoint=$(jq -r '.victorialogs_endpoint // ""' "${VECTOR_OPTIONS_FILE}")
 hostname=$(jq -r '.hostname // ""' "${VECTOR_OPTIONS_FILE}")
@@ -136,7 +136,7 @@ validate_url_for_yaml "${victorialogs_endpoint}"
 # Check the raw JSON, not the shell variables: command substitution has already
 # stripped any trailing newline by then, so a password ending in one would
 # silently reach Vector truncated. CR and NEL are YAML line breaks too, and any
-# of them would end the quoted scalar these values land in.
+# of them would end the quoted scalar these values are substituted into.
 # NEL has to be written \x{85}: a raw U+0085 in the class breaks it in Oniguruma
 if ! jq -e '((.victorialogs_username // "") + (.victorialogs_password // "")
              + (.victorialogs_endpoint // "")) | test("[\\n\\r\\x{85}]") | not' \
@@ -145,9 +145,13 @@ if ! jq -e '((.victorialogs_username // "") + (.victorialogs_password // "")
     bashio::exit.nok
 fi
 
-if [[ -z "${VICTORIALOGS_USER}" ]] && [[ -n "${VICTORIALOGS_PASSWORD}" ]]; then
+# Read straight from the options rather than through auth_username, so that "no
+# username" and "custom config in use" stay distinguishable here
+if jq -e '(.victorialogs_username // "") == "" and (.victorialogs_password // "") != ""' \
+        "${VECTOR_OPTIONS_FILE}" > /dev/null; then
     bashio::log.warning "A VictoriaLogs password is set but the username is empty; basic auth will not be used"
-elif [[ -n "${VICTORIALOGS_USER}" ]] && [[ -z "${VICTORIALOGS_PASSWORD}" ]]; then
+elif jq -e '(.victorialogs_username // "") != "" and (.victorialogs_password // "") == ""' \
+        "${VECTOR_OPTIONS_FILE}" > /dev/null; then
     bashio::log.warning "A VictoriaLogs username is set but the password is empty; the server will likely reject it"
 fi
 
@@ -366,19 +370,27 @@ sinks:
 SINKS
 
 # Add basic auth if username is provided.
-# Two things here are load-bearing and neither is obvious:
-# - the heredoc delimiter is quoted, so the references reach the file verbatim
-#   for Vector to resolve. Unquote it and bash puts the password back on disk.
-# - the scalars must stay SINGLE-quoted. Vector substitutes textually, and
-#   vector-common.sh doubles ' to match. Switching to double quotes lets a
-#   password containing " or \ corrupt the config.
-if [[ -n "${VICTORIALOGS_USER}" ]]; then
+# SECRET[<backend>.<name>] is Vector's own indirection: it runs the backend
+# declared at the bottom of this file and substitutes what comes back, so the
+# credentials never land here. Bash must expand the backend name, hence the
+# unquoted delimiter; SECRET[...] survives it because it holds no $.
+#
+# Three things are load-bearing and none is obvious:
+# - the scalars must stay SINGLE-quoted. Vector substitutes the secret in as
+#   text and parses afterwards, so an unescaped quote in a password ends the
+#   scalar and breaks the config. vector-secrets.sh doubles ' to match.
+# - do not swap this for an environment reference. Vector does not interpolate
+#   ${VAR} in a --config-yaml config and the sink then authenticates with the
+#   literal text. That shipped in 1.6.0 and was rejected by every server.
+# - `vector validate` does not resolve secrets, so it cannot catch a mistake
+#   here. Only a real run can; tests/run.sh does one.
+if [[ -n "${auth_username}" ]]; then
     bashio::log.info "Adding basic auth for VictoriaLogs..."
-    cat >> "${VECTOR_CONFIG}" << 'AUTHCONFIG'
+    cat >> "${VECTOR_CONFIG}" << AUTHCONFIG
     auth:
       strategy: basic
-      user: '${VICTORIALOGS_USER}'
-      password: '${VICTORIALOGS_PASSWORD}'
+      user: 'SECRET[${VECTOR_SECRETS_BACKEND}.user]'
+      password: 'SECRET[${VECTOR_SECRETS_BACKEND}.password]'
 AUTHCONFIG
 fi
 
@@ -396,6 +408,20 @@ if [[ -n "${stream_fields}" ]]; then
         "${VECTOR_OPTIONS_FILE}" >> "${VECTOR_CONFIG}"
 else
     bashio::log.warning "No stream fields configured; logs will land in a single stream"
+fi
+
+# The backend that resolves the SECRET[] references in the sink. It has to come
+# last: it is a top-level key, and everything above is still inside the sink
+# block until the indentation drops back to column 0.
+if [[ -n "${auth_username}" ]]; then
+    cat >> "${VECTOR_CONFIG}" << SECRETS
+
+secret:
+  ${VECTOR_SECRETS_BACKEND}:
+    type: exec
+    command:
+      - ${VECTOR_SECRETS_HELPER}
+SECRETS
 fi
 
 bashio::log.info "Vector configuration generated successfully"

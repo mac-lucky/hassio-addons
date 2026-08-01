@@ -53,12 +53,114 @@ run_case auth-quotes
 check     "exits 0"                     test "${rc}" -eq 0
 check_not "password not on disk"        grep -Fq SENTINELPW "${VECTOR_CONFIG}"
 check_not "password not in the log"     grep -Fq SENTINELPW "${LOG}"
-check     "auth references the env var" \
-    grep -Fq "password: '\${VICTORIALOGS_PASSWORD}'" "${VECTOR_CONFIG}"
+check     "auth references the secret backend" \
+    grep -Fq "password: 'SECRET[victorialogs.password]'" "${VECTOR_CONFIG}"
+check     "the secret backend is declared" \
+    grep -Fq -- "- ${VECTOR_SECRETS_HELPER}" "${VECTOR_CONFIG}"
+
+# `vector validate` does not resolve secrets, so the generator's own validation
+# step cannot see a substitution that breaks the config. Only a real load can,
+# and that is how 1.6.0 shipped broken. Config errors are fatal at startup, so
+# reaching the timeout is the pass.
+timeout 10 vector --config-yaml "${VECTOR_CONFIG}" > /tmp/realrun.log 2>&1
+check_not "the generated config survives a real load, not just validate" \
+    grep -q "Configuration error" /tmp/realrun.log
 
 check "config points at the VRL file" grep -Fq "file: ${VECTOR_VRL}" "${VECTOR_CONFIG}"
 # Keep this one for the VRL section below; later cases overwrite it
 cp "${VECTOR_VRL}" /tmp/enrich.vrl
+
+# The credentials as they actually leave the process.
+#
+# This is the assertion the suite was missing. 1.6.0 and 1.6.1 passed every
+# check above and still authenticated with the literal text
+# "${VICTORIALOGS_PASSWORD}", because Vector does not interpolate the
+# environment into a --config-yaml config. Nothing short of a real request shows
+# that, so both ends here are Vector itself - no dependency the image lacks.
+#
+# The auth and secret blocks are lifted out of the config the generator just
+# wrote rather than restated, so a change in how they are emitted is exercised
+# instead of bypassed. Still running on the auth-quotes fixture, whose username
+# and password carry a quote, a backslash, a dollar and braces.
+current="auth-wire"
+probe=/tmp/wire
+rm -rf "${probe}"; mkdir -p "${probe}"
+
+awk '/^    auth:/{f=1;print;next} f&&/^    [a-z]/{f=0} f' "${VECTOR_CONFIG}" > "${probe}/auth.yaml"
+awk '/^secret:/{f=1} f' "${VECTOR_CONFIG}" > "${probe}/secret.yaml"
+
+cat > "${probe}/recv.yaml" <<EOF
+data_dir: ${probe}
+sources:
+  inbound:
+    type: http_server
+    address: 127.0.0.1:18099
+    strict_path: false
+    headers:
+      - Authorization
+    decoding:
+      codec: bytes
+sinks:
+  captured:
+    type: file
+    inputs:
+      - inbound
+    path: ${probe}/captured.log
+    encoding:
+      codec: json
+EOF
+
+{
+    cat <<EOF
+data_dir: ${probe}
+sources:
+  gen:
+    type: demo_logs
+    format: syslog
+    interval: 0.2
+sinks:
+  victorialogs:
+    type: elasticsearch
+    inputs:
+      - gen
+    endpoints:
+      - "http://127.0.0.1:18099"
+    api_version: v8
+    healthcheck:
+      enabled: false
+EOF
+    cat "${probe}/auth.yaml"
+    cat "${probe}/secret.yaml"
+} > "${probe}/send.yaml"
+
+check "auth block was lifted"   test -s "${probe}/auth.yaml"
+check "secret block was lifted" test -s "${probe}/secret.yaml"
+
+vector --config-yaml "${probe}/recv.yaml" --quiet > "${probe}/recv.log" 2>&1 &
+recv_pid=$!
+for _ in $(seq 1 100); do
+    (exec 3<>/dev/tcp/127.0.0.1/18099) 2>/dev/null && break
+    sleep 0.2
+done
+vector --config-yaml "${probe}/send.yaml" --quiet > "${probe}/send.log" 2>&1 &
+send_pid=$!
+for _ in $(seq 1 150); do
+    [[ -s "${probe}/captured.log" ]] && break
+    sleep 0.2
+done
+kill "${send_pid}" "${recv_pid}" 2> /dev/null
+wait "${send_pid}" "${recv_pid}" 2> /dev/null
+
+# Found by shape, not by field name, so a rename in Vector's http_server source
+# fails loudly here instead of silently matching nothing
+wire_header=$(grep -o '"Basic [^"]*"' "${probe}/captured.log" 2>/dev/null | head -1 | tr -d '"')
+wire_creds=$(printf '%s' "${wire_header#Basic }" | base64 -d 2>/dev/null)
+expected_creds="$(jq -r '.victorialogs_username' "${VECTOR_OPTIONS_FILE}")"
+expected_creds+=":$(jq -r '.victorialogs_password' "${VECTOR_OPTIONS_FILE}")"
+
+check "a request reached the receiver" test -s "${probe}/captured.log"
+check "the request carries basic auth" test -n "${wire_header}"
+check "the credentials resolve on the wire" test "${wire_creds}" = "${expected_creds}"
 
 run_case endpoint-creds
 check     "exits 0"                    test "${rc}" -eq 0
@@ -95,18 +197,39 @@ run_case custom-missing
 check "exits non-zero"        test "${rc}" -ne 0
 check "names the missing path" grep -q does-not-exist "${LOG}"
 
-# A custom config is arbitrary YAML from a share every add-on can write, and
-# Vector interpolates env vars into it - the credentials must not be reachable
+# A custom config is arbitrary YAML from a share every add-on can write, and it
+# can declare the same secret backend - the credentials must not be reachable
 printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: blackhole\n    inputs: [s]\n' \
     > /share/vector/custom.yaml
 current="custom-present"
 jq -s '.[0] * .[1]' "${TESTS_DIR}/fixtures/base.json" \
     "${TESTS_DIR}/fixtures/custom-present.json" > "${VECTOR_OPTIONS_FILE}"
-env -u VICTORIALOGS_USER -u VICTORIALOGS_PASSWORD bash -c '
-    source /usr/lib/vector-common.sh
-    vector_addon::load_credentials
-    printf "%s%s" "${VICTORIALOGS_USER}" "${VICTORIALOGS_PASSWORD}"' > "${LOG}"
-check_not "credentials not exported for a custom config" grep -Fq SENTINELPW "${LOG}"
+printf '{"version":"1.0","secrets":["user","password"]}' \
+    | "${VECTOR_SECRETS_HELPER}" > "${LOG}" 2>&1
+check_not "backend serves nothing for a custom config" grep -Fq SENTINELPW "${LOG}"
+check     "backend errors instead of returning empty" grep -Fq 'no such secret' "${LOG}"
+check_not "no username either"                        grep -Fq "us'er" "${LOG}"
+
+# The backend answers exactly what Vector asks for, with the values intact
+current="secrets-backend"
+jq -s '.[0] * .[1]' "${TESTS_DIR}/fixtures/base.json" \
+    "${TESTS_DIR}/fixtures/auth-quotes.json" > "${VECTOR_OPTIONS_FILE}"
+printf '{"version":"1.0","secrets":["user","password"]}' \
+    | "${VECTOR_SECRETS_HELPER}" > "${LOG}" 2>&1
+raw_password=$(jq -r '.victorialogs_password' "${VECTOR_OPTIONS_FILE}")
+raw_username=$(jq -r '.victorialogs_username' "${VECTOR_OPTIONS_FILE}")
+# Escaped for the single-quoted scalar Vector substitutes them into, so what
+# comes out here is not the plain value. The auth-wire case above is what pins
+# the pair of escape and scalar down to the right plaintext on the wire.
+check "password comes back escaped for YAML" \
+    test "$(jq -r '.password.value' "${LOG}")" = "${raw_password//\'/\'\'}"
+check "username comes back escaped for YAML" \
+    test "$(jq -r '.user.value' "${LOG}")" = "${raw_username//\'/\'\'}"
+check "the fixture actually exercises the escape" \
+    grep -Fq "'" <<< "${raw_password}${raw_username}"
+check "an unknown name is an error, not an empty value" \
+    test "$(printf '{"version":"1.0","secrets":["nope"]}' \
+        | "${VECTOR_SECRETS_HELPER}" | jq -r '.nope.value')" = "null"
 
 # The generated VRL, over the events that used to abort it
 current="vrl"
