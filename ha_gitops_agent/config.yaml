@@ -13,12 +13,12 @@ arch:
 # and compiles on every install.
 image: ghcr.io/mac-lucky/hassio-addon-ha-gitops-agent-{arch}
 startup: services
-boot: auto
+# boot, ingress_port and panel_admin are omitted deliberately: their defaults
+# (auto, 8099, true) are already what this add-on wants, and the add-on
+# linter rejects keys that restate a default.
 ingress: true
-ingress_port: 8099
 panel_icon: mdi:source-branch
 panel_title: GitOps
-panel_admin: true
 hassio_api: true
 hassio_role: manager
 homeassistant_api: true

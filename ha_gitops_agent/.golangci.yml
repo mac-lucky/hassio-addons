@@ -13,6 +13,12 @@ linters:
     - unused
     - gosec
     - misspell
+  settings:
+    misspell:
+      # Mosquitto is the MQTT broker add-on's actual name (core_mosquitto),
+      # not a misspelling of the insect.
+      ignore-rules:
+        - mosquitto
   exclusions:
     rules:
       - path: _test\.go
