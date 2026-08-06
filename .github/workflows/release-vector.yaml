@@ -8,10 +8,14 @@ name: Vector Release
 # actions-shared-workflows/generate-release-notes finds the previous tag with
 # --match "<prefix>/v*". The older vector-1.6.0 tag predates this and matches
 # nothing here, so the first tag in the new shape has no range to report.
+#
+# Dispatching this against an existing tag re-runs the same release, which is
+# the way to recover a publish that failed halfway without moving the tag.
 on:
   push:
     tags:
       - "vector/v*"
+  workflow_dispatch:
 
 jobs:
   verify:

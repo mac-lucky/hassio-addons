@@ -8,10 +8,14 @@ name: GitOps Agent Release
 # actions-shared-workflows/generate-release-notes finds the previous tag with
 # --match "<prefix>/v*". A tag shaped any other way makes every release read
 # as the first one.
+#
+# Dispatching this against an existing tag re-runs the same release, which is
+# the way to recover a publish that failed halfway without moving the tag.
 on:
   push:
     tags:
       - "ha_gitops_agent/v*"
+  workflow_dispatch:
 
 jobs:
   verify:
