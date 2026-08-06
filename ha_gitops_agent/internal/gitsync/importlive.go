@@ -83,21 +83,12 @@ func (g *GitSync) Import(ctx context.Context, configRoot string, limits ImportLi
 		return ImportResult{}, fmt.Errorf("gitsync: import: nothing to import: no importable files found under %s", configRoot)
 	}
 
-	// Exit 2 alone means "the branch is not on the remote". Every other
-	// non-zero (128 for an unreachable host or an expired token) has to
-	// propagate, or an ordinary auth failure takes the orphan path and
-	// builds a parentless commit the remote correctly rejects.
-	lsRemote, err := g.runGitRaw(ctx, []string{"ls-remote", "--exit-code", "--heads", g.Opts.RepoURL, g.Opts.Branch}, "", g.credentialEnv(), 0)
+	// A probe failure has to propagate, or an ordinary auth failure takes
+	// the orphan path below and builds a parentless commit the remote
+	// correctly rejects.
+	remoteHasBranch, err := g.RemoteHasBranch(ctx)
 	if err != nil {
 		return ImportResult{}, err
-	}
-	remoteHasBranch := lsRemote.ExitCode == 0
-	if lsRemote.ExitCode != 0 && lsRemote.ExitCode != 2 {
-		reason := g.redactCredentials(strings.TrimSpace(lsRemote.Stderr))
-		if reason == "" {
-			reason = g.redactCredentials(strings.TrimSpace(lsRemote.Stdout))
-		}
-		return ImportResult{}, newCommandError("git ls-remote failed (exit %d): %s", lsRemote.ExitCode, reason)
 	}
 
 	restoreSHA := g.CurrentSHA(ctx)

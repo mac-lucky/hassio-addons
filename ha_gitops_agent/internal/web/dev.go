@@ -78,6 +78,7 @@ var devStatuses = map[string]recon.Status{
 	"dry_run":  devDriftStatus(true),
 	"applying": devApplyingStatus(),
 	"error":    devErrorStatus(),
+	"unseeded": devUnseededStatus(),
 
 	"import_preview":   devImportPreviewStatus(),
 	"import_done":      devImportDoneStatus(),
@@ -91,6 +92,25 @@ var devStatuses = map[string]recon.Status{
 	"health":         devHealthStatus(),
 	"managed":        devManagedStatus(),
 	"paused":         devPausedStatus(),
+}
+
+// devUnseededStatus is a repository whose tracked branch does not exist
+// yet: the seed banner and the blue pill, with import on so the banner
+// names the button. No plan, no history - nothing has ever run against it.
+func devUnseededStatus() recon.Status {
+	return recon.Status{
+		State:           recon.StateUnseeded,
+		Configured:      true,
+		RepoURL:         "https://github.com/example/ha-config.git",
+		Branch:          "main",
+		IntervalMinutes: 5,
+		ImportEnabled:   true,
+		NextCheckUTC:    devNextCheckUTC,
+		Events: []recon.Event{{
+			TS:      "2026-08-01T21:10:03+00:00",
+			Message: "nothing to sync yet: branch main does not exist in the repository - import to seed it, or check the branch name",
+		}},
+	}
 }
 
 // devPausedStatus is the loop switched off: chip, banner, Resume button.

@@ -22,7 +22,9 @@ import (
 	"os"
 	"path"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
@@ -448,6 +450,8 @@ func isRegularFile(fsys fs.FS, urlPath string) bool {
 // ingress_port.
 func New(agent Agent) http.Handler {
 	mux := http.NewServeMux()
+	// One per handler, so two servers in a test never share a slot.
+	tracker := &opTracker{}
 
 	staticSub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -497,27 +501,27 @@ func New(agent Agent) http.Handler {
 		}
 	})
 
-	mux.HandleFunc("POST /reconcile", opRoute(agent, "reconcile", func(ctx context.Context) error {
+	mux.HandleFunc("POST /reconcile", opRoute(agent, tracker, "reconcile", func(ctx context.Context) error {
 		agent.ReconcileNow(ctx)
 		return nil
 	}))
 
-	mux.HandleFunc("POST /apply", opRoute(agent, "apply", func(ctx context.Context) error {
+	mux.HandleFunc("POST /apply", opRoute(agent, tracker, "apply", func(ctx context.Context) error {
 		agent.ApplyNow(ctx, true)
 		return nil
 	}))
 
-	mux.HandleFunc("POST /rollback", opRoute(agent, "rollback", func(ctx context.Context) error {
+	mux.HandleFunc("POST /rollback", opRoute(agent, tracker, "rollback", func(ctx context.Context) error {
 		agent.Rollback(ctx)
 		return nil
 	}))
 
-	mux.HandleFunc("POST /commitback", opRoute(agent, "commit drift back", func(ctx context.Context) error {
+	mux.HandleFunc("POST /commitback", opRoute(agent, tracker, "commit drift back", func(ctx context.Context) error {
 		_, err := agent.CommitDriftBack(ctx)
 		return err
 	}))
 
-	mux.HandleFunc("POST /import/preview", opRoute(agent, "import preview", func(ctx context.Context) error {
+	mux.HandleFunc("POST /import/preview", opRoute(agent, tracker, "import preview", func(ctx context.Context) error {
 		_, err := agent.PreviewImport(ctx)
 		return err
 	}))
@@ -532,7 +536,7 @@ func New(agent Agent) http.Handler {
 		writeFragment(w, safeStatus(agent), "")
 	})
 
-	mux.HandleFunc("POST /import", opRoute(agent, "import", func(ctx context.Context) error {
+	mux.HandleFunc("POST /import", opRoute(agent, tracker, "import", func(ctx context.Context) error {
 		_, err := agent.ImportLive(ctx)
 		return err
 	}))
@@ -544,7 +548,7 @@ func New(agent Agent) http.Handler {
 	// plans, so the row would otherwise vanish for a whole interval.
 	mux.HandleFunc("POST /retry", func(w http.ResponseWriter, r *http.Request) {
 		key := r.FormValue("key")
-		opRoute(agent, "retry blocked item", func(ctx context.Context) error {
+		opRoute(agent, tracker, "retry blocked item", func(ctx context.Context) error {
 			if err := agent.RetryBlocked(key); err != nil {
 				return err
 			}
@@ -564,7 +568,7 @@ func New(agent Agent) http.Handler {
 
 	mux.HandleFunc("GET /status.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(safeStatus(agent)); err != nil {
+		if err := json.NewEncoder(w).Encode(statusJSON{Status: safeStatus(agent), Operation: tracker.view()}); err != nil {
 			slog.Warn("web: failed to encode status.json", "error", err)
 		}
 	})
@@ -584,24 +588,108 @@ func New(agent Agent) http.Handler {
 // The Busy check is an early out, not the lock: recon takes
 // opLock.TryLock and refuses on its own. op's error goes to the container
 // log; the user reads refusals in the polled fragment's event log.
-func opRoute(agent Agent, name string, op func(context.Context) error) http.HandlerFunc {
+func opRoute(agent Agent, tracker *opTracker, name string, op func(context.Context) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !agent.Status().Busy {
 			done := make(chan struct{})
 			// opContext, not r.Context(): the operation outlives the
 			// response, whose end cancels the request context.
 			ctx := opContext(r)
+			id := tracker.start(name)
+			w.Header().Set(opIDHeader, strconv.FormatUint(id, 10))
 			go func() {
 				defer close(done)
 				defer recoverOp(name)
-				if err := op(ctx); err != nil {
+				err := op(ctx)
+				tracker.finish(id, err)
+				if err != nil {
 					slog.Warn("web: operation did not run", "op", name, "error", err)
 				}
 			}()
 			awaitBusy(agent, done)
+		} else {
+			w.Header().Set(opRefusedHeader, "busy")
 		}
 		writeFragment(w, safeStatus(agent), "")
 	}
+}
+
+// Headers an API caller reads off an action POST. The body is always the
+// htmx fragment, so the correlation id rides here rather than in it.
+const (
+	opIDHeader      = "X-GitOps-Op-Id"
+	opRefusedHeader = "X-GitOps-Op-Refused"
+)
+
+// opTracker is the most recent background operation a route started:
+// which one, whether it is still running, and what it returned. One slot,
+// not a queue - opRoute refuses a second while one runs, so there is never
+// a second to hold. Built per New, never package state.
+//
+// It exists for the non-browser caller. A POST answers before its
+// operation has necessarily started (see opRoute), so a script reading
+// /status.json straight afterwards cannot tell "not started yet" from
+// "finished": Busy is false in both, and true for an unrelated tick. The
+// id handed back is what closes that gap.
+type opTracker struct {
+	mu          sync.Mutex
+	id          uint64
+	name        string
+	running     bool
+	err         string
+	finishedUTC string
+}
+
+// opView is opTracker's snapshot, embedded in /status.json.
+type opView struct {
+	// ID is 0 until this process starts its first operation.
+	ID      uint64 `json:"id"`
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+	// Error is only meaningful once Running is false.
+	Error       string `json:"error"`
+	FinishedUTC string `json:"finished_utc"`
+}
+
+func (t *opTracker) start(name string) uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.id++
+	t.name = name
+	t.running = true
+	t.err = ""
+	t.finishedUTC = ""
+	return t.id
+}
+
+// finish ignores a stale id, so a late panic recovery from a superseded
+// operation cannot overwrite the current one's result.
+func (t *opTracker) finish(id uint64, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.id != id {
+		return
+	}
+	t.running = false
+	t.finishedUTC = time.Now().UTC().Format(time.RFC3339)
+	if err != nil {
+		t.err = err.Error()
+	}
+}
+
+func (t *opTracker) view() opView {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return opView{ID: t.id, Name: t.name, Running: t.running, Error: t.err, FinishedUTC: t.finishedUTC}
+}
+
+// statusJSON is recon.Status plus the web layer's own view of the
+// operation a POST started - the one fact recon.Status cannot carry,
+// because it describes the config and not this process's routes. Embedded,
+// so every existing top-level key stays where it was.
+type statusJSON struct {
+	recon.Status
+	Operation opView `json:"operation"`
 }
 
 // pauseRoute builds POST /pause or /resume: set the flag, answer with the

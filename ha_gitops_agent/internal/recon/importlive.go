@@ -128,11 +128,12 @@ func (r *Reconciler) ImportLive(ctx context.Context) (ImportSummary, error) {
 }
 
 // importLive drives one import; callers must already hold opLock. A
-// failure surfaces in lastImportError and records history.OutcomeError,
+// FAILURE surfaces in lastImportError and records history.OutcomeError,
 // but does NOT set lastError or StateError (like commitDriftBack) - the
 // record describes the run, the sync state describes live versus the
-// repository. Its own run, so an import writes two history rows: import
-// and reconcile, which is what actually happened.
+// repository. On SUCCESS the opposite applies, and only in one direction:
+// see clearSyncVerdictAfterImport. Its own run, so an import writes two
+// history rows: import and reconcile, which is what actually happened.
 func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 	run := r.beginRun(history.KindImport)
 	defer run.abandon()
@@ -165,7 +166,9 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 	state.LastImportSHA = res.CommitSHA
 	state.LastImportUTC = importedUTC
 	if saveErr := r.applier.StateSave(state); saveErr != nil {
-		slog.Warn("recon: import succeeded but failed to persist state", "error", saveErr)
+		r.noteImportRecordFailure(saveErr)
+	} else {
+		r.clearImportRecordFailure()
 	}
 
 	r.withMu(func() {
@@ -176,6 +179,7 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 		// import it would read as the import's own result.
 		r.lastImportPreview = nil
 	})
+	r.clearSyncVerdictAfterImport()
 
 	onto := "onto " + r.opts.Branch
 	if res.Created {
@@ -208,4 +212,59 @@ func (r *Reconciler) setImportError(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastImportError = err.Error()
+}
+
+// clearSyncVerdictAfterImport retires the previous cycle's verdict, which
+// an import invalidates: the tracked branch has moved, so an error about
+// the tip that used to be there - the missing branch a seed just created
+// above all - describes a world that no longer exists. importLive's own
+// pushStatus would otherwise republish it for the whole chained reconcile.
+//
+// Only from the two failure states. A drift_pending plan may still hold
+// registry ops, which an import cannot have changed (gitops/ is excluded
+// from it). in_sync here is provisional - the reconcile chained under the
+// same opLock replaces it - and lastCycleFailed is left for it to settle.
+func (r *Reconciler) clearSyncVerdictAfterImport() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state != StateError && r.state != StateUnseeded {
+		return
+	}
+	r.state = StateInSync
+	r.lastError = ""
+}
+
+// noteImportRecordFailure raises the standing flag for an import that was
+// pushed but whose record could not be written to /data. Logged on the
+// transition only, like noteHistoryWriteFailure.
+//
+// Unlike its siblings this does NOT clear on its own: nothing retries the
+// write, and the value on disk stays wrong until another import lands.
+func (r *Reconciler) noteImportRecordFailure(err error) {
+	slog.Warn("recon: import succeeded but failed to persist state", "error", err)
+
+	var first bool
+	r.withMu(func() {
+		first = !r.importRecordFailed
+		r.importRecordFailed = true
+	})
+
+	if first {
+		r.logEvent("the import was pushed but its record could not be saved to /data: " + err.Error() +
+			" - after a restart the dashboard will show the previous import instead")
+	}
+}
+
+// clearImportRecordFailure is the other half of that guard, reached only
+// by a later import whose save worked.
+func (r *Reconciler) clearImportRecordFailure() {
+	var recovered bool
+	r.withMu(func() {
+		recovered = r.importRecordFailed
+		r.importRecordFailed = false
+	})
+
+	if recovered {
+		r.logEvent("the import record is being saved again")
+	}
 }

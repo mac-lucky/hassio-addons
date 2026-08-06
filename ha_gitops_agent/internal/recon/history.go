@@ -63,6 +63,11 @@ func (rr *runRecorder) abandon() {
 	})
 }
 
+// discard drops the recorder without a row, for a cycle that turns out to
+// be a standing refusal rather than a run (see beginRun). Sets done, so
+// the deferred abandon is a no-op.
+func (rr *runRecorder) discard() { rr.done = true }
+
 // recordRun appends rec to the in-memory ring and then to disk, in
 // separate critical sections: r.mu is never held across I/O, so a slow
 // /data cannot block the web UI's next Status call. A failed write never

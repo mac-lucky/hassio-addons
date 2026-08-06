@@ -55,6 +55,11 @@ type Options struct {
 	// agent's own slug is refused at runtime rather than dropped here, so
 	// the refusal is visible instead of silent.
 	AutoUpdateAddons []string
+	// AutoUpdateIntervalMinutes is how often that check runs. Its own
+	// cadence, not IntervalMinutes: an add-on version is not in the
+	// repository, so the check is not part of a reconcile. Startup-only,
+	// like IntervalMinutes.
+	AutoUpdateIntervalMinutes int
 	// TrackAddonVersions records every installed add-on's version in
 	// gitops/addon-versions.yaml, rewriting it whenever one changes -
 	// whoever changed it (recon.recordAddonVersions). A repository write,
@@ -89,6 +94,9 @@ type Options struct {
 const (
 	defaultIntervalMinutes = 5
 	defaultApplyAfterPull  = "reload"
+	// Six hours, paced to Supervisor's own store refresh - checking faster
+	// only re-reads the same cached numbers.
+	defaultAutoUpdateIntervalMinutes = 360
 )
 
 var validApplyAfterPull = map[string]bool{
@@ -125,25 +133,31 @@ func Load(path string) (Options, error) {
 		intervalMinutes = defaultIntervalMinutes
 	}
 
+	autoUpdateIntervalMinutes, ok := safeInt(raw["auto_update_interval_minutes"])
+	if !ok || autoUpdateIntervalMinutes < 15 || autoUpdateIntervalMinutes > 10080 {
+		autoUpdateIntervalMinutes = defaultAutoUpdateIntervalMinutes
+	}
+
 	branch := asString(raw["branch"], "main")
 	if branch == "" {
 		branch = "main"
 	}
 
 	return Options{
-		RepoURL:            asString(raw["repo_url"], ""),
-		Branch:             branch,
-		GitUsername:        asString(raw["git_username"], ""),
-		GitToken:           asString(raw["git_token"], ""),
-		IntervalMinutes:    intervalMinutes,
-		DryRun:             truthy(raw["dry_run"], true),
-		ApplyAfterPull:     applyAfterPull,
-		CommitBack:         truthy(raw["commit_back"], false),
-		AllowImport:        truthy(raw["allow_import"], false),
-		WebhookSecret:      asString(raw["webhook_secret"], ""),
-		AgeKey:             asString(raw["age_key"], ""),
-		AutoUpdateAddons:   asStringSlice(raw["auto_update_addons"]),
-		TrackAddonVersions: truthy(raw["track_addon_versions"], false),
+		RepoURL:                   asString(raw["repo_url"], ""),
+		Branch:                    branch,
+		GitUsername:               asString(raw["git_username"], ""),
+		GitToken:                  asString(raw["git_token"], ""),
+		IntervalMinutes:           intervalMinutes,
+		DryRun:                    truthy(raw["dry_run"], true),
+		ApplyAfterPull:            applyAfterPull,
+		CommitBack:                truthy(raw["commit_back"], false),
+		AllowImport:               truthy(raw["allow_import"], false),
+		WebhookSecret:             asString(raw["webhook_secret"], ""),
+		AgeKey:                    asString(raw["age_key"], ""),
+		AutoUpdateAddons:          asStringSlice(raw["auto_update_addons"]),
+		AutoUpdateIntervalMinutes: autoUpdateIntervalMinutes,
+		TrackAddonVersions:        truthy(raw["track_addon_versions"], false),
 
 		ReconcileYAMLFiles:    truthy(reconcile["yaml_files"], true),
 		ReconcileRegistries:   truthy(reconcile["registries"], false),

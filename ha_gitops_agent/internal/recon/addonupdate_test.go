@@ -856,3 +856,37 @@ func waitForAddonUpdateRows(t *testing.T, r *Reconciler) {
 	}
 	t.Fatal("no add-on update check completed within the deadline")
 }
+
+func TestAddonCheckIntervalComesFromTheOption(t *testing.T) {
+	// The package var shrunk the way the loop tests shrink it, so a test
+	// that reads the option cannot pass by accident.
+	setAddonUpdateTimers(t, time.Millisecond, 5*time.Millisecond)
+
+	f := newReconcilerFakes()
+	opts := baseOpts()
+	opts.AutoUpdateAddons = []string{"core_mosquitto"}
+	opts.AutoUpdateIntervalMinutes = 60
+	r := f.reconciler(opts)
+
+	if got := r.addonCheckInterval(); got != time.Hour {
+		t.Errorf("addonCheckInterval = %v, want 1h from the option", got)
+	}
+	// The card's staleness marker has to follow the option too, or a slower
+	// cadence would mark every row stale.
+	if got := r.Status().AddonCheckIntervalSeconds; got != 3600 {
+		t.Errorf("AddonCheckIntervalSeconds = %d, want 3600", got)
+	}
+}
+
+// A hand-built Options carries 0, which is what lets setAddonUpdateTimers
+// still govern the loop tests.
+func TestAddonCheckIntervalFallsBackToTheCompiledDefault(t *testing.T) {
+	f := newReconcilerFakes()
+	opts := baseOpts()
+	opts.AutoUpdateAddons = []string{"core_mosquitto"}
+	r := f.reconciler(opts)
+
+	if got := r.addonCheckInterval(); got != addonUpdateCheckInterval {
+		t.Errorf("addonCheckInterval = %v, want the package default %v", got, addonUpdateCheckInterval)
+	}
+}

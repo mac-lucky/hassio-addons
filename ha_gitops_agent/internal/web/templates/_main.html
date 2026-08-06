@@ -38,6 +38,7 @@
   <div class="chips">
     {{if .Status.HistoryWriteFailing}}<span class="chip">history writes failing</span>{{end}}
     {{if .Status.VersionRecordFailing}}<span class="chip">version record failing</span>{{end}}
+    {{if .Status.ImportRecordFailing}}<span class="chip">import record not saved</span>{{end}}
     {{if .Status.AddonUpdateSelfSlugFailing}}<span class="chip">update check cannot resolve own slug</span>{{end}}
     {{/* The one chip raised by a reconcile layer: planHacsLayer skips
          itself, so without this the option is on and nothing happens. */}}
@@ -185,6 +186,23 @@
   <strong>Dry run is on.</strong> Detected changes are shown below but nothing
   is written to /homeassistant automatically. Use the Apply button to write a
   change anyway, or turn dry run off in this add-on's Configuration tab.
+</div>
+{{end}}
+
+{{/* A banner, not a callout: nothing failed. The repository is reachable
+     and the branch simply is not in it yet, which only an import or a
+     first push resolves - so this says which. */}}
+{{if eq .Status.State "unseeded"}}
+<div class="banner">
+  <strong>The {{.Status.Branch}} branch does not exist in this repository yet.</strong>
+  There is nothing to sync until it does, and nothing is wrong with the add-on -
+  it starts reconciling on its own as soon as the branch exists.
+  {{if .Status.ImportEnabled}}Press <strong>Import</strong> to copy your current
+  /homeassistant into it as the first commit.{{else}}Turn on <code>allow_import</code>
+  and press Import to seed it from your current config, or push a first commit to
+  <code>{{.Status.Branch}}</code> yourself.{{end}}
+  If you meant a branch that already exists, check <code>branch</code> in the
+  Configuration tab.
 </div>
 {{end}}
 

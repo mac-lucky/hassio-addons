@@ -271,6 +271,11 @@ func newCommandError(format string, args ...any) *CommandError {
 	return &CommandError{Message: fmt.Sprintf(format, args...)}
 }
 
+// ErrRemoteBranchMissing reports that opts.Branch is not on the remote: an
+// unseeded repository or a mistyped branch, not a failure. Fetch wraps it
+// with the branch name; recon matches it with errors.Is.
+var ErrRemoteBranchMissing = errors.New("the tracked branch does not exist on the remote yet")
+
 // redactCredentials strips both secrets credentialEnv can put in front of
 // git - the raw token and the base64 "user:token" blob, which some git/curl
 // failure paths echo back verbatim - from all git output before it is
@@ -376,6 +381,14 @@ func (g *GitSync) EnsureClone(ctx context.Context) error {
 // file on disk.
 func (g *GitSync) Fetch(ctx context.Context) (string, error) {
 	if _, err := g.runGit(ctx, []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}, g.Workdir, g.credentialEnv()); err != nil {
+		// Exit 128 covers a missing branch and every auth or network failure
+		// alike, so an exit code decides rather than git's prose. Only a
+		// definite absence becomes the sentinel: a probe that itself fails,
+		// or that finds the branch, leaves the fetch's own error alone. The
+		// probe runs only here, so the happy path still costs two calls.
+		if has, probeErr := g.RemoteHasBranch(ctx); probeErr == nil && !has {
+			return "", fmt.Errorf("%w: %s", ErrRemoteBranchMissing, g.Opts.Branch)
+		}
 		return "", err
 	}
 	result, err := g.runGit(ctx, []string{"rev-parse", "FETCH_HEAD"}, g.Workdir, nil)
@@ -383,6 +396,28 @@ func (g *GitSync) Fetch(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(result.Stdout), nil
+}
+
+// RemoteHasBranch reports whether opts.Branch exists on the remote. Exit 2
+// alone means "no such branch"; every other non-zero (128 for an
+// unreachable host or an expired token) is an error, or an auth failure
+// would read as an empty repository.
+func (g *GitSync) RemoteHasBranch(ctx context.Context) (bool, error) {
+	result, err := g.runGitRaw(ctx, []string{"ls-remote", "--exit-code", "--heads", g.Opts.RepoURL, g.Opts.Branch}, "", g.credentialEnv(), 0)
+	if err != nil {
+		return false, err
+	}
+	switch result.ExitCode {
+	case 0:
+		return true, nil
+	case 2:
+		return false, nil
+	}
+	reason := g.redactCredentials(strings.TrimSpace(result.Stderr))
+	if reason == "" {
+		reason = g.redactCredentials(strings.TrimSpace(result.Stdout))
+	}
+	return false, newCommandError("git ls-remote failed (exit %d): %s", result.ExitCode, reason)
 }
 
 // credentialEnv returns the extra environment Fetch adds to authenticate as

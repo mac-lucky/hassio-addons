@@ -19,13 +19,16 @@ import (
 // Timeout bounds the Supervisor call before Push treats it as failed.
 const Timeout = 10 * time.Second
 
-// States sensor.gitops_agent_status may be set to.
+// States sensor.gitops_agent_status may be set to. A whitelist: Push
+// drops anything absent here, so a new recon state must be added before
+// recon can publish it.
 var States = map[string]bool{
 	"in_sync":       true,
 	"drift_pending": true,
 	"applying":      true,
 	"error":         true,
 	"disabled":      true,
+	"unseeded":      true,
 }
 
 // EntityID is the entity this package publishes to.

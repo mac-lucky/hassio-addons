@@ -161,10 +161,32 @@ is refused, with the refusal reported rather than silently ignored.
 Updating the add-on that is mid-update is not something Supervisor can
 do safely, so that one stays a manual click.
 
-The check does not run on the `interval_minutes` sync tick. It runs
-every 6 hours, plus once shortly after the add-on starts, plus whenever
-you press **Check for updates** on its card. That button runs the same
-check the timer runs, so with `dry_run` off it installs what it finds.
+The check does not run on the `interval_minutes` sync tick. It runs on
+its own cadence, set by `auto_update_interval_minutes` below, plus once
+shortly after the add-on starts, plus whenever you press **Check for
+updates** on its card. That button runs the same check the timer runs,
+so with `dry_run` off it installs what it finds.
+
+### `auto_update_interval_minutes`
+
+`360` by default - six hours. How often the check above asks Supervisor
+whether any listed add-on is behind, from 15 minutes to 10080 (7 days).
+
+This is not `interval_minutes`, and changing it never affects how often
+your config is reconciled. Nothing here touches the repository.
+
+Six hours is the default because it is paced to Supervisor rather than
+to this agent - see "When it runs" below for why lowering it does not
+learn about a release any sooner. The 15-minute floor is there for the
+same reason, and because with `dry_run` off each check can install
+updates and restart add-ons.
+
+The dashboard also uses this value to decide when the add-on card's
+results have gone stale, so a longer interval widens that threshold
+rather than marking every row stale.
+
+Read once at startup, like `interval_minutes`: saving it in the
+Configuration tab restarts the add-on, which is what applies it.
 
 ### `track_addon_versions`
 
@@ -1244,6 +1266,26 @@ tracks - so neither can get an existing `/config` into an empty
 repository. Import is the one-way trip that can, enabled by
 `allow_import` (default `false`).
 
+### An empty repository
+
+A repository with no commits has no branch either, so there is nothing
+to fetch and nothing to compare against. The agent reports this as its
+own state, `unseeded`, rather than as an error: the dashboard says the
+branch does not exist yet and points at Import, the sensor carries
+`unseeded`, and no error is recorded. It repeats every interval without
+filling the activity feed or the run history - the condition is logged
+once, when it starts.
+
+Apply refuses while unseeded, because there is no plan to apply. Import
+is the way out: it creates the branch and pushes the first commit, and
+the reconcile chained after it picks up from there. A first commit you
+push yourself works just as well - the agent starts reconciling on the
+next tick with no intervention.
+
+A branch name that is simply mistyped looks identical, which is why the
+banner says to check `branch` as well. Credentials that do not work, and
+a host that cannot be reached, are still errors.
+
 Two buttons, both manual, neither ever triggered by the interval:
 
 - **Preview** scans the live config tree and lists exactly what
@@ -1443,14 +1485,17 @@ add-on's page URL in Home Assistant. A page at
 Not on the `interval_minutes` sync tick - this has nothing to do with
 the repository, and pinning it to a one-minute poll would ask Supervisor
 the same question 1440 times a day. It runs once about two minutes after
-the add-on starts, then every 6 hours.
+the add-on starts, then every `auto_update_interval_minutes` (six hours
+by default).
 
 The startup delay is there because add-on startup is the worst moment to
 ask: the agent comes up while Supervisor is still starting everything
 else on the host, and the first reconcile - the thing you actually watch
-after a restart - is competing for the same Supervisor.
+after a restart - is competing for the same Supervisor. The startup
+delay is fixed; only the repeat interval is configurable.
 
-Six hours is paced to Supervisor rather than to this agent. Supervisor
+Six hours is the default rather than a fixed cadence, and it is paced to
+Supervisor rather than to this agent. Supervisor
 refreshes its own copy of the add-on store on a timer of its own and
 answers version queries out of that cached copy, so asking more often
 would not learn about a new release any sooner. An update lands within a
@@ -2215,6 +2260,35 @@ whenever `commit_back` is enabled and there is pending file drift - see
 "Drift commit-back" above. "Preview" and "Import" appear whenever
 `allow_import` is enabled, regardless of
 whether anything is pending - see "Importing an existing config" above.
+
+### Watching an operation from a script
+
+The action routes answer immediately - an apply can wait 15 minutes on
+the pre-apply backup, far past any HTTP timeout - so the response says
+only that the operation was accepted, never how it went. A browser polls
+the page for that; a script has `GET /status.json`.
+
+Each accepted POST returns an `X-GitOps-Op-Id` header, and
+`/status.json` carries a matching `operation` object:
+
+```json
+"operation": {
+  "id": 7,
+  "name": "import",
+  "running": false,
+  "error": "",
+  "finished_utc": "2026-08-06T09:44:10Z"
+}
+```
+
+Read the id from the POST, then poll until `operation.id` is at least
+that id and `operation.running` is false; `operation.error` is then the
+outcome, empty on success. The id is what makes this reliable - `busy`
+alone cannot distinguish "not started yet" from "already finished", and
+can be true because of an unrelated interval tick.
+
+A POST refused because something else is already running returns
+`X-GitOps-Op-Refused: busy`, no id, and starts nothing.
 
 The panel does not appear in the sidebar automatically. After
 installing, open the add-on's page and turn on **Show in sidebar**

@@ -77,6 +77,7 @@ type fakeAgent struct {
 	// addonCheckIntervalSeconds is the staleness threshold handed to the
 	// client. Zero means no stale marker, as a shrunk interval does.
 	addonCheckIntervalSeconds int
+	importRecordFailing       bool
 	runHistory                []history.Record
 	nextCheckUTC              string
 	// historyAll is what HistoryAll answers with, standing in for runs held
@@ -304,6 +305,7 @@ func (f *fakeAgent) Status() recon.Status {
 		PendingRestartSlugs:        f.pendingRestartSlugs,
 		HistoryWriteFailing:        f.historyWriteFailing,
 		VersionRecordFailing:       f.versionRecordFailing,
+		ImportRecordFailing:        f.importRecordFailing,
 		AddonCheckFailing:          f.addonCheckFailing,
 		AddonUpdateSelfSlugFailing: f.addonUpdateSelfSlugFailing,
 		// Derived as recon.Status derives it (files plus registry ops,
@@ -733,6 +735,7 @@ func TestStatusJSONShape(t *testing.T) {
 		"state", "busy", "configured", "dry_run", "repo_url", "branch",
 		"last_sha", "pending_count", "pending_registry", "last_error", "last_apply_utc",
 		"commit_back_enabled", "last_drift_branch", "history_total", "rollback_preview",
+		"operation",
 	} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("status.json missing key %q", key)
@@ -4045,5 +4048,143 @@ func TestPausedChipIsNeutralAndOutsideTheHealthChipRow(t *testing.T) {
 	// absent on an agent whose only chip is this one.
 	if strings.Contains(body, `class="chips"`) {
 		t.Error("a pause raised the standing-health chip row")
+	}
+}
+
+// Bug fix: a POST answers before its operation has necessarily started, so
+// a script reading /status.json straight afterwards could not tell "not
+// started yet" from "finished". The id it hands back closes that gap.
+func TestPostImportHandsBackAnOperationIdAPollerCanWaitOn(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.importEnabled = true
+	release := agent.gated()
+	handler := New(agent)
+
+	rec := doRequest(t, handler, http.MethodPost, "/import", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	id := rec.Header().Get("X-GitOps-Op-Id")
+	if id != "1" {
+		t.Fatalf("X-GitOps-Op-Id = %q, want %q", id, "1")
+	}
+	agent.awaitStart(t)
+
+	running := operationView(t, handler)
+	if !running.Running {
+		t.Error("operation.running = false while the import is still held")
+	}
+	if running.Name != "import" {
+		t.Errorf("operation.name = %q, want %q", running.Name, "import")
+	}
+
+	release()
+	agent.awaitFinish(t)
+
+	done := operationView(t, handler)
+	if done.Running {
+		t.Error("operation.running = true after the import finished")
+	}
+	if done.Error != "" {
+		t.Errorf("operation.error = %q, want empty", done.Error)
+	}
+	if done.FinishedUTC == "" {
+		t.Error("operation.finished_utc is empty")
+	}
+}
+
+func TestAFailedOperationRecordsItsError(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.importEnabled = true
+	agent.importErr = errors.New("refusing to import: nothing importable")
+	handler := New(agent)
+
+	doRequest(t, handler, http.MethodPost, "/import", nil)
+	agent.awaitFinish(t)
+
+	got := operationView(t, handler)
+	if got.Running {
+		t.Error("operation.running = true after the operation returned")
+	}
+	if !strings.Contains(got.Error, "nothing importable") {
+		t.Errorf("operation.error = %q, want the agent's error", got.Error)
+	}
+}
+
+func TestARefusedOperationStartsNothingAndSaysSo(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.importEnabled = true
+	agent.busy = true
+	handler := New(agent)
+
+	rec := doRequest(t, handler, http.MethodPost, "/import", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-GitOps-Op-Id"); got != "" {
+		t.Errorf("X-GitOps-Op-Id = %q, want none on a refusal", got)
+	}
+	if got := rec.Header().Get("X-GitOps-Op-Refused"); got != "busy" {
+		t.Errorf("X-GitOps-Op-Refused = %q, want %q", got, "busy")
+	}
+	if got := operationView(t, handler); got.ID != 0 {
+		t.Errorf("operation.id = %d, want 0: nothing was started", got.ID)
+	}
+}
+
+// operationView reads /status.json's operation object.
+func operationView(t *testing.T, handler http.Handler) opView {
+	t.Helper()
+	rec := doRequest(t, handler, http.MethodGet, "/status.json", nil)
+	var body struct {
+		Operation opView `json:"operation"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	return body.Operation
+}
+
+func TestUnseededBannerNamesTheBranchAndTheImportButton(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.state = recon.StateUnseeded
+	agent.importEnabled = true
+	handler := New(agent)
+
+	body := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(body, "does not exist in this repository yet") {
+		t.Error("no unseeded banner on the page")
+	}
+	if !strings.Contains(body, "Press <strong>Import</strong>") {
+		t.Error("the banner does not point at the Import button")
+	}
+}
+
+func TestUnseededBannerExplainsAllowImportWhenImportIsOff(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.state = recon.StateUnseeded
+	agent.importEnabled = false
+	handler := New(agent)
+
+	body := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(body, "allow_import") {
+		t.Error("the banner does not say how to turn import on")
+	}
+}
+
+func TestImportRecordFailingChipRenders(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.importRecordFailing = true
+	handler := New(agent)
+
+	body := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(body, "import record not saved") {
+		t.Error("no chip for an import whose record could not be saved")
 	}
 }

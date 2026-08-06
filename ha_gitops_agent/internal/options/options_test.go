@@ -28,19 +28,20 @@ func writeOptions(t *testing.T, dir string, data map[string]any) string {
 func fakeOptionsFile(t *testing.T, dir string) string {
 	t.Helper()
 	return writeOptions(t, dir, map[string]any{
-		"repo_url":             "https://example.invalid/demo.git",
-		"branch":               "main",
-		"git_username":         "",
-		"git_token":            "",
-		"interval_minutes":     5,
-		"dry_run":              true,
-		"apply_after_pull":     "reload",
-		"commit_back":          false,
-		"allow_import":         false,
-		"webhook_secret":       "",
-		"age_key":              "",
-		"auto_update_addons":   []any{},
-		"track_addon_versions": false,
+		"repo_url":                     "https://example.invalid/demo.git",
+		"branch":                       "main",
+		"git_username":                 "",
+		"git_token":                    "",
+		"interval_minutes":             5,
+		"dry_run":                      true,
+		"apply_after_pull":             "reload",
+		"commit_back":                  false,
+		"allow_import":                 false,
+		"webhook_secret":               "",
+		"age_key":                      "",
+		"auto_update_addons":           []any{},
+		"auto_update_interval_minutes": 360,
+		"track_addon_versions":         false,
 		"reconcile": map[string]any{
 			"yaml_files":    true,
 			"registries":    false,
@@ -63,26 +64,27 @@ func TestLoadFullOptionsFile(t *testing.T) {
 	}
 
 	want := Options{
-		RepoURL:               "https://example.invalid/demo.git",
-		Branch:                "main",
-		GitUsername:           "",
-		GitToken:              "",
-		IntervalMinutes:       5,
-		DryRun:                true,
-		ApplyAfterPull:        "reload",
-		CommitBack:            false,
-		AllowImport:           false,
-		WebhookSecret:         "",
-		AgeKey:                "",
-		AutoUpdateAddons:      nil,
-		TrackAddonVersions:    false,
-		ReconcileYAMLFiles:    true,
-		ReconcileRegistries:   false,
-		ReconcileDashboards:   false,
-		ReconcileAddonOptions: false,
-		ReconcileIntegrations: false,
-		ReconcileSubentries:   false,
-		ReconcileHacs:         false,
+		RepoURL:                   "https://example.invalid/demo.git",
+		Branch:                    "main",
+		GitUsername:               "",
+		GitToken:                  "",
+		IntervalMinutes:           5,
+		DryRun:                    true,
+		ApplyAfterPull:            "reload",
+		CommitBack:                false,
+		AllowImport:               false,
+		WebhookSecret:             "",
+		AgeKey:                    "",
+		AutoUpdateAddons:          nil,
+		AutoUpdateIntervalMinutes: 360,
+		TrackAddonVersions:        false,
+		ReconcileYAMLFiles:        true,
+		ReconcileRegistries:       false,
+		ReconcileDashboards:       false,
+		ReconcileAddonOptions:     false,
+		ReconcileIntegrations:     false,
+		ReconcileSubentries:       false,
+		ReconcileHacs:             false,
 	}
 	// DeepEqual rather than ==: Options has a slice field, so it is not
 	// comparable.
@@ -101,26 +103,27 @@ func TestLoadMinimalOptionsFallsBackToDefaults(t *testing.T) {
 	}
 
 	want := Options{
-		RepoURL:               "",
-		Branch:                "main",
-		GitUsername:           "",
-		GitToken:              "",
-		IntervalMinutes:       5,
-		DryRun:                true,
-		ApplyAfterPull:        "reload",
-		CommitBack:            false,
-		AllowImport:           false,
-		WebhookSecret:         "",
-		AgeKey:                "",
-		AutoUpdateAddons:      nil,
-		TrackAddonVersions:    false,
-		ReconcileYAMLFiles:    true,
-		ReconcileRegistries:   false,
-		ReconcileDashboards:   false,
-		ReconcileAddonOptions: false,
-		ReconcileIntegrations: false,
-		ReconcileSubentries:   false,
-		ReconcileHacs:         false,
+		RepoURL:                   "",
+		Branch:                    "main",
+		GitUsername:               "",
+		GitToken:                  "",
+		IntervalMinutes:           5,
+		DryRun:                    true,
+		ApplyAfterPull:            "reload",
+		CommitBack:                false,
+		AllowImport:               false,
+		WebhookSecret:             "",
+		AgeKey:                    "",
+		AutoUpdateAddons:          nil,
+		AutoUpdateIntervalMinutes: 360,
+		TrackAddonVersions:        false,
+		ReconcileYAMLFiles:        true,
+		ReconcileRegistries:       false,
+		ReconcileDashboards:       false,
+		ReconcileAddonOptions:     false,
+		ReconcileIntegrations:     false,
+		ReconcileSubentries:       false,
+		ReconcileHacs:             false,
 	}
 	if !reflect.DeepEqual(opts, want) {
 		t.Fatalf("Load() = %+v, want %+v", opts, want)
@@ -591,5 +594,52 @@ func TestLoadAllowImportDefaultsToFalse(t *testing.T) {
 	}
 	if opts.AllowImport {
 		t.Error("AllowImport = true, want false (default) - import writes to the tracked branch, so it must be opt-in")
+	}
+}
+
+func TestLoadAutoUpdateIntervalMinutes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeOptions(t, dir, map[string]any{"auto_update_interval_minutes": 60})
+
+	opts, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if opts.AutoUpdateIntervalMinutes != 60 {
+		t.Errorf("AutoUpdateIntervalMinutes = %d, want 60", opts.AutoUpdateIntervalMinutes)
+	}
+}
+
+// Out of range falls back rather than erroring: this is the boot path, and
+// a bad number must not stop the agent starting.
+func TestLoadRejectsOutOfRangeAutoUpdateInterval(t *testing.T) {
+	for _, v := range []any{0, 14, 10081, -1} {
+		dir := t.TempDir()
+		path := writeOptions(t, dir, map[string]any{"auto_update_interval_minutes": v})
+
+		opts, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%v): %v", v, err)
+		}
+		if opts.AutoUpdateIntervalMinutes != defaultAutoUpdateIntervalMinutes {
+			t.Errorf("AutoUpdateIntervalMinutes for %v = %d, want %d",
+				v, opts.AutoUpdateIntervalMinutes, defaultAutoUpdateIntervalMinutes)
+		}
+	}
+}
+
+func TestLoadRejectsNonNumericAutoUpdateInterval(t *testing.T) {
+	for _, v := range []any{"soon", true, nil} {
+		dir := t.TempDir()
+		path := writeOptions(t, dir, map[string]any{"auto_update_interval_minutes": v})
+
+		opts, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%v): %v", v, err)
+		}
+		if opts.AutoUpdateIntervalMinutes != defaultAutoUpdateIntervalMinutes {
+			t.Errorf("AutoUpdateIntervalMinutes for %v = %d, want %d",
+				v, opts.AutoUpdateIntervalMinutes, defaultAutoUpdateIntervalMinutes)
+		}
 	}
 }

@@ -20,10 +20,12 @@ import (
 // rolled back. Own loop, own cadence, own status fields, and it never
 // moves the reconciler's state/lastError - see CheckAddonUpdates.
 
-// addonUpdateCheckInterval is how often RunAddonUpdateLoop asks Supervisor
-// what is available. A var so tests can shrink it. Six hours is paced to
-// Supervisor's own store refresh, which /addons/<slug>/info answers out
-// of - polling faster would only re-read the same cached numbers.
+// addonUpdateCheckInterval is the compiled-in fallback for how often
+// RunAddonUpdateLoop asks Supervisor what is available, used when
+// auto_update_interval_minutes is unset. A var so tests can shrink it.
+// Six hours is paced to Supervisor's own store refresh, which
+// /addons/<slug>/info answers out of - polling faster would only re-read
+// the same cached numbers.
 var addonUpdateCheckInterval = 6 * time.Hour
 
 // addonUpdateStartupDelay is how long RunAddonUpdateLoop waits before the
@@ -55,8 +57,19 @@ func (r *Reconciler) RunAddonUpdateLoop(ctx context.Context) {
 		case <-timer.C:
 		}
 		r.addonUpdateCycle(ctx)
-		timer.Reset(addonUpdateCheckInterval)
+		timer.Reset(r.addonCheckInterval())
 	}
+}
+
+// addonCheckInterval is how often this reconciler checks: the
+// auto_update_interval_minutes option when set, and addonUpdateCheckInterval
+// otherwise - a hand-built Options carries 0, and shrinking the var is how
+// the loop tests stay fast. No lock: opts is immutable after New.
+func (r *Reconciler) addonCheckInterval() time.Duration {
+	if r.opts.AutoUpdateIntervalMinutes > 0 {
+		return time.Duration(r.opts.AutoUpdateIntervalMinutes) * time.Minute
+	}
+	return addonUpdateCheckInterval
 }
 
 // addonUpdateCycle runs one CheckAddonUpdates, recovering from a panic so

@@ -203,6 +203,9 @@ h1 {
 .pill-applying { background: var(--tint-blue); color: var(--blue-fg); animation: pulse 1.4s ease-in-out infinite; }
 .pill-error { background: var(--tint-red); color: var(--red-fg); }
 .pill-disabled { background: var(--tint-gray); color: var(--gray-fg); }
+/* Blue rather than red: the branch is simply not there yet, and the next
+   move is the user's. */
+.pill-unseeded { background: var(--tint-blue); color: var(--blue-fg); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }

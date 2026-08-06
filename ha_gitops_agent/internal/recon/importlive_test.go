@@ -3,9 +3,11 @@ package recon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 )
@@ -405,5 +407,98 @@ func TestPreviewImportFailsLoudlyWhenTheFilterFails(t *testing.T) {
 
 	if _, err := r.PreviewImport(context.Background()); err == nil {
 		t.Fatal("PreviewImport succeeded, want the filter failure surfaced")
+	}
+}
+
+// Bug fix: importLive's own pushStatus used to republish the verdict the
+// import had just invalidated - on an unseeded repository, the very error
+// the seed resolved - for the whole of the chained reconcile.
+func TestASuccessfulImportClearsTheSyncVerdictItSuperseded(t *testing.T) {
+	f := newReconcilerFakes()
+	f.git.fetchErr = fmt.Errorf("%w: main", gitsync.ErrRemoteBranchMissing)
+	r := f.reconciler(importOpts())
+
+	r.ReconcileNow(context.Background())
+	if got := r.Status().State; got != StateUnseeded {
+		t.Fatalf("State = %q, want %q before the import", got, StateUnseeded)
+	}
+
+	// What the import does to the world: the branch now exists.
+	f.git.fetchErr = nil
+	if _, err := r.ImportLive(context.Background()); err != nil {
+		t.Fatalf("ImportLive: %v", err)
+	}
+
+	// The push importLive makes itself, before the chained reconcile's -
+	// the one the sensor and the next poll actually sat on.
+	if len(f.status.pushes) < 2 {
+		t.Fatalf("pushes = %d, want at least 2", len(f.status.pushes))
+	}
+	own := f.status.pushes[len(f.status.pushes)-2]
+	if own.state == StateError || own.state == StateUnseeded {
+		t.Errorf("importLive published state %q, want the superseded verdict retired", own.state)
+	}
+	if own.attrs["error"] != nil {
+		t.Errorf("importLive published error %v, want nil", own.attrs["error"])
+	}
+}
+
+// A drift_pending plan may still hold registry ops, which an import cannot
+// have changed: gitops/ is excluded from what it commits.
+func TestASuccessfulImportDoesNotOverwriteADriftPendingState(t *testing.T) {
+	f := newReconcilerFakes()
+	f.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "modified"}}
+	r := f.reconciler(importOpts())
+
+	r.ReconcileNow(context.Background())
+	if got := r.Status().State; got != StateDriftPending {
+		t.Fatalf("State = %q, want %q", got, StateDriftPending)
+	}
+
+	if _, err := r.ImportLive(context.Background()); err != nil {
+		t.Fatalf("ImportLive: %v", err)
+	}
+
+	if got := r.Status().State; got != StateDriftPending {
+		t.Errorf("State = %q, want %q left alone", got, StateDriftPending)
+	}
+}
+
+// Bug fix: the save failure was only logged, so a restart silently showed
+// the previous import and nothing on the page said why.
+func TestAnImportWhoseRecordCannotBeSavedRaisesAHealthFlag(t *testing.T) {
+	f := newReconcilerFakes()
+	f.applier.stateSaveErr = errors.New("/data is read-only")
+	r := f.reconciler(importOpts())
+
+	if _, err := r.ImportLive(context.Background()); err != nil {
+		t.Fatalf("ImportLive = %v, want success: the commit was pushed", err)
+	}
+
+	st := r.Status()
+	if !st.ImportRecordFailing {
+		t.Error("ImportRecordFailing = false, want true")
+	}
+	if !st.HasHealthWarnings() {
+		t.Error("HasHealthWarnings = false, want the chip row shown")
+	}
+	if st.LastImportUTC == "" {
+		t.Error("LastImportUTC is empty, want the in-memory value still correct")
+	}
+	if !eventLogged(st, "could not be saved") {
+		t.Error("no event explaining the unsaved record")
+	}
+}
+
+func TestTheImportRecordFlagStaysDownWhenTheSaveWorks(t *testing.T) {
+	f := newReconcilerFakes()
+	r := f.reconciler(importOpts())
+
+	if _, err := r.ImportLive(context.Background()); err != nil {
+		t.Fatalf("ImportLive: %v", err)
+	}
+
+	if r.Status().ImportRecordFailing {
+		t.Error("ImportRecordFailing = true after a save that worked")
 	}
 }

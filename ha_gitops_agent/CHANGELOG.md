@@ -67,6 +67,21 @@ for anything to have changed or been fixed against.
   import with `allow_import` off, an apply with no usable plan - is
   written to the activity feed instead of being dropped.
 
+  Answering immediately means the response cannot carry an outcome, which
+  a browser does not need and a script does. Every accepted POST returns
+  an `X-GitOps-Op-Id` header, and `GET /status.json` carries a matching
+  `operation` object with that id, whether it is still running, and what
+  it returned - so a script can poll for the result of the operation it
+  started rather than guessing from `busy`, which is false both before an
+  operation starts and after it ends. A POST refused because something
+  else is running returns `X-GitOps-Op-Refused: busy` and starts nothing.
+
+  Standing health warnings appear as chips for as long as they last,
+  rather than as a single line that scrolls out of the feed: history
+  writes failing, add-on version records failing, an import that was
+  pushed but whose record could not be saved, HACS missing while its
+  layer is on, and per-slug update-check failures.
+
   The diff and activity panes are focusable, so they can be scrolled from
   the keyboard, and state changes are announced through a live region for
   screen readers. The stylesheet is served as a static file behind a
@@ -138,7 +153,15 @@ for anything to have changed or been fixed against.
   under `/homeassistant` into the repository and pushes it as a single
   commit directly onto the tracked branch, so a repository can be seeded
   from a live install - something no other operation could do, since the
-  diff only ever walks paths the repository already tracks. The one
+  diff only ever walks paths the repository already tracks. A repository
+  with no commits at all is reported as its own state, `unseeded`, rather
+  than as an error: the branch does not exist yet, so there is nothing to
+  fetch and nothing to compare, and the dashboard says so and points at
+  Import instead of showing a git failure. It repeats every interval
+  without filling the activity feed or the run history, and an import (or
+  a first commit pushed by hand) is what leaves it. A branch name that is
+  merely mistyped reads the same way, which the banner says; credentials
+  that do not work and a host that cannot be reached are still errors. The one
   operation in this add-on that writes to the tracked branch: manual
   only, never on the interval, fast-forward only, never forced, and it
   never deletes anything from the repository or claims ownership of what
@@ -247,7 +270,10 @@ for anything to have changed or been fixed against.
 
 - `auto_update_addons` option: list an add-on's slug and the agent keeps
   that add-on updated for you, checking a couple of minutes after start
-  and then every 6 hours. Empty by default, which means no check runs at
+  and then every `auto_update_interval_minutes` - six hours by default,
+  configurable from 15 minutes to 7 days. That cadence is its own: it
+  never triggers a reconcile, and `interval_minutes` never triggers a
+  check. Empty by default, which means no check runs at
   all. Each install is preceded by a partial Supervisor backup of just
   that add-on, so a bad release can be restored from Settings > System >
   Backups - an update is the one change Rollback cannot undo, because
@@ -266,7 +292,7 @@ for anything to have changed or been fixed against.
   a failed image pull says nothing about whether the config matches it,
   and the next check tries again. A check that cannot reach Supervisor is
   logged when it starts failing and when it recovers, rather than once
-  every 6 hours for as long as the outage lasts. The "Add-on updates"
+  per check for as long as the outage lasts. The "Add-on updates"
   card carries one row per configured slug - including a slug that is not
   installed, which is what a typo looks like - and counts the updates
   waiting, not the add-ons watched. `sensor.gitops_agent_status` carries

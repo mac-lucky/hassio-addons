@@ -35,6 +35,9 @@ configuration:
   auto_update_addons:
     name: Auto-update apps
     description: Slugs of installed apps this agent is allowed to update on its own whenever the Supervisor reports an update for them. Leave the list empty to disable auto-updates entirely; the agent never updates itself, whatever the list says. An app's slug is the last part of its page URL in Home Assistant, for example a0d7b954_esphome in /hassio/addon/a0d7b954_esphome/info.
+  auto_update_interval_minutes:
+    name: App update check interval (minutes)
+    description: How often the agent asks the Supervisor whether any app listed above has an update, from 15 minutes to 10080 (7 days). Default 360 - six hours, paced to the Supervisor's own store refresh, which it answers version queries out of, so checking more often does not learn about a release any sooner. This is not the sync interval and never triggers a reconcile; the Check for updates button ignores it, and the dashboard uses it to decide when a row has gone stale. Takes effect on restart.
   track_addon_versions:
     name: Track app versions
     description: Records the version of every installed app in gitops/addon-versions.yaml on the tracked branch, and rewrites it whenever a version changes - however it changed, including a manual update from the Home Assistant UI. The file is machine-owned - edits made to it by hand are overwritten, nothing in it is ever installed from it, and it is never copied into your config. It is written once per reconcile interval at most, and git_token needs push rights. Works with dry run on, which only governs changes to Home Assistant itself.

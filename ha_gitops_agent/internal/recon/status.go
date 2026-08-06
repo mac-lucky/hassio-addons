@@ -13,6 +13,9 @@ const (
 	StateDriftPending = "drift_pending"
 	StateApplying     = "applying"
 	StateError        = "error"
+	// StateUnseeded is a remote with no such branch yet: nothing to compare
+	// against, so none of the states above applies and it is not a failure.
+	StateUnseeded = "unseeded"
 )
 
 // RollbackPreviewNothing marks an apply whose layers kept no stash.
@@ -349,12 +352,16 @@ type Status struct {
 	// executable add-on op whose slug declares restart_on_change. Sorted
 	// and deduplicated, so the confirmation names them stably.
 	PendingRestartSlugs []string `json:"pending_restart_slugs"`
-	// The five standing health flags, mirroring the reconciler's transition
+	// The standing health flags, mirroring the reconciler's transition
 	// guards. Each guard logs once entering failure and once recovering, so
 	// 200 events later the condition is true and invisible - these put it
 	// back on the page for as long as it lasts.
 	HistoryWriteFailing  bool `json:"history_write_failing"`
 	VersionRecordFailing bool `json:"version_record_failing"`
+	// ImportRecordFailing is an import that was pushed but not recorded, so
+	// a restart would show the previous import. Unlike its siblings nothing
+	// retries it; only a later successful import clears it.
+	ImportRecordFailing bool `json:"import_record_failing"`
 	// HacsUnavailable is whether the HACS layer is on but HACS is not
 	// installed. The only standing flag raised by a reconcile layer: every
 	// other layer failure ends the cycle and this one does not (see
@@ -407,8 +414,8 @@ func (s Status) RollbackRestoresNothing() bool {
 // gates the header's chip row, so it is absent rather than empty on a
 // healthy agent. Derived on read like AddonUpdatesAvailable.
 func (s Status) HasHealthWarnings() bool {
-	return s.HistoryWriteFailing || s.VersionRecordFailing || s.HacsUnavailable ||
-		s.AddonUpdateSelfSlugFailing || len(s.AddonCheckFailing) > 0
+	return s.HistoryWriteFailing || s.VersionRecordFailing || s.ImportRecordFailing ||
+		s.HacsUnavailable || s.AddonUpdateSelfSlugFailing || len(s.AddonCheckFailing) > 0
 }
 
 // ApplyableCount is how many pending items an apply would attempt: the

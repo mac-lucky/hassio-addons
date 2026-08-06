@@ -211,6 +211,11 @@ type Reconciler struct {
 	// so it is logged on the TRANSITION rather than once per run. See
 	// noteHistoryWriteFailure.
 	historyWriteFailed bool
+	// importRecordFailed records that an import was pushed but its record
+	// could not be saved, which a restart would silently undo. Same
+	// transition guard, but only a later import retires it - nothing
+	// retries the write. See noteImportRecordFailure.
+	importRecordFailed bool
 
 	// selfAddonSlug/selfAddonSlugResolved cache the Supervisor slug this
 	// agent runs as (see resolveSelfAddonSlug). A failed resolution is
@@ -758,6 +763,7 @@ func (r *Reconciler) Status() Status {
 	pendingRestarts := pendingRestartSlugs(pendingRegistry, r.pendingAddonRestartOnChange, r.addonRestartOnChange)
 	historyWriteFailing := r.historyWriteFailed
 	versionRecordFailing := r.versionRecordFailed
+	importRecordFailing := r.importRecordFailed
 	hacsUnavailable := r.hacsUnavailable
 	addonCheckFailing := sortedTrueKeys(r.addonCheckFailed)
 	addonUpdateSelfSlugFailing := r.addonUpdateSelfSlugFailed
@@ -812,7 +818,7 @@ func (r *Reconciler) Status() Status {
 		// process. Seconds because the client compares it against an age in
 		// milliseconds; a test-shrunk interval truncating to 0 means "no
 		// stale marker".
-		AddonCheckIntervalSeconds: int(addonUpdateCheckInterval.Seconds()),
+		AddonCheckIntervalSeconds: int(r.addonCheckInterval().Seconds()),
 
 		LastVersionRecordUTC: lastVersionRecordUTC,
 		NextCheckUTC:         nextTickUTC,
@@ -828,6 +834,7 @@ func (r *Reconciler) Status() Status {
 
 		HistoryWriteFailing:        historyWriteFailing,
 		VersionRecordFailing:       versionRecordFailing,
+		ImportRecordFailing:        importRecordFailing,
 		HacsUnavailable:            hacsUnavailable,
 		AddonCheckFailing:          addonCheckFailing,
 		AddonUpdateSelfSlugFailing: addonUpdateSelfSlugFailing,
@@ -979,6 +986,38 @@ func (r *Reconciler) failCycle(run *runRecorder, err error) []differ.Change {
 	return nil
 }
 
+// unseededCycle ends a cycle that found no such branch on the remote.
+// Clears the stale plan like failCycle but also clears lastError, because
+// nothing is wrong: the state carries the condition instead.
+//
+// The event fires only on the transition in, and no history row is written
+// at all (run.discard), because this repeats every interval until somebody
+// seeds the repository - a row per tick is how a card stops being read.
+//
+// lastCycleFailed is still set: there is no plan, so an apply must refuse
+// rather than apply nothing and end by declaring in_sync.
+func (r *Reconciler) unseededCycle(run *runRecorder) []differ.Change {
+	var first bool
+	r.withMu(func() {
+		first = r.state != StateUnseeded
+		r.state = StateUnseeded
+		r.lastError = ""
+		r.pending = nil
+		r.pendingRegistry = nil
+		r.pendingAddonRestartOnChange = nil
+		r.pendingHacsRestartPending = nil
+		r.lastCycleFailed = true
+	})
+	if first {
+		r.logEvent(fmt.Sprintf(
+			"nothing to sync yet: branch %s does not exist in the repository - import to seed it, or check the branch name",
+			r.opts.Branch))
+	}
+	run.discard()
+	r.pushStatus()
+	return nil
+}
+
 // ReconcileNow runs one fetch + diff cycle immediately: fetch, guard
 // against tracked secrets (on the RAW list, never TrackedFiles), check
 // out, diff against ConfigRoot, plan each enabled registry layer, then
@@ -1010,6 +1049,9 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	}
 	sha, err := r.git.Fetch(ctx)
 	if err != nil {
+		if errors.Is(err, gitsync.ErrRemoteBranchMissing) {
+			return r.unseededCycle(run)
+		}
 		return r.failCycle(run, err)
 	}
 	// From here on every exit knows its commit. The two failures above
@@ -1509,6 +1551,7 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 	// cannot catch a cycle halfway through deciding its outcome.
 	r.mu.Lock()
 	cycleFailed := r.lastCycleFailed
+	unseeded := r.state == StateUnseeded
 	r.mu.Unlock()
 	if cycleFailed {
 		// The plan is empty, so this would apply nothing and then clear
@@ -1516,6 +1559,9 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 		// as resolved. Rollback is not gated this way - it needs no plan,
 		// and is the recovery path from exactly this state.
 		msg := "the last reconcile failed, so there is nothing planned to apply; fix the reported error and check again"
+		if unseeded {
+			msg = "the tracked branch does not exist on the remote yet, so there is nothing planned to apply; import to seed the repository first"
+		}
 		r.logEvent("apply skipped: " + msg)
 		return applier.Result{OK: false, Error: msg}
 	}
