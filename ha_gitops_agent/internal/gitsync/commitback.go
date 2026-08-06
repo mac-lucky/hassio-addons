@@ -24,13 +24,27 @@ const (
 	commitAuthorEmail = "gitops-agent@localhost"
 )
 
-// driftBranchTimeFormat is the UTC timestamp CommitBack embeds in its
-// branch name: yyyymmddTHHMMSSZ, sortable and (to the second) unique.
+// driftBranchTimeFormat is the UTC timestamp CommitBack and ParkConflicts
+// embed in their branch names: yyyymmddTHHMMSSZ, sortable and (to the
+// second) unique.
 const driftBranchTimeFormat = "20060102T150405Z"
 
 // DriftCommitMessage is the fixed commit message CommitBack uses for
 // every drift-capture commit.
 const DriftCommitMessage = "drift: capture live changes from home assistant"
+
+// ConflictCommitMessage is the fixed commit message ParkConflicts uses.
+const ConflictCommitMessage = "conflict: preserve live copies the agent will not sync"
+
+// commitIdentityEnv is the fixed identity every commit this package makes
+// carries. A function rather than a package var because each caller hands
+// it to a subprocess that may append to it.
+func commitIdentityEnv() []string {
+	return []string{
+		"GIT_AUTHOR_NAME=" + commitAuthorName, "GIT_AUTHOR_EMAIL=" + commitAuthorEmail,
+		"GIT_COMMITTER_NAME=" + commitAuthorName, "GIT_COMMITTER_EMAIL=" + commitAuthorEmail,
+	}
+}
 
 // DriftFile is one path CommitBack should consider, plus differ's Kind for
 // it. A local type because internal/differ already imports this package for
@@ -57,47 +71,80 @@ type DriftFile struct {
 // Workdir is left back at its detached baseSHA either way. Callers
 // serialize this against every other GitSync method (recon's opLock).
 func (g *GitSync) CommitBack(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+	branch := "gitops/drift-" + now.UTC().Format(driftBranchTimeFormat)
+	if _, err := g.commitLiveOnto(ctx, "commit-back", branch, DriftCommitMessage, files, configRoot, baseSHA); err != nil {
+		return "", err
+	}
+	return branch, nil
+}
+
+// ParkConflicts captures the CURRENT LIVE state of every path in files into
+// a new "gitops/conflict-<timestamp>" branch based on baseSHA and pushes it,
+// returning the branch name. opts.Branch is never touched.
+//
+// CommitBack's machinery with a different prefix and a different meaning.
+// Commit-back captures drift a human may want to merge; this preserves work
+// the agent has decided it may not touch in EITHER direction, because the
+// repository and the live config both moved since the merge base and there
+// is no way to tell which one is meant. So the branch is a safety net rather
+// than a proposal, and a failure to park does not change that verdict: the
+// refusal is the protection, this is only the copy.
+func (g *GitSync) ParkConflicts(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+	branch := "gitops/conflict-" + now.UTC().Format(driftBranchTimeFormat)
+	if _, err := g.commitLiveOnto(ctx, "park-conflicts", branch, ConflictCommitMessage, files, configRoot, baseSHA); err != nil {
+		return "", err
+	}
+	return branch, nil
+}
+
+// commitLiveOnto builds branch at baseSHA holding the current live state of
+// every path in files, commits it with message and pushes it under its own
+// name, returning the paths the commit carries. The shared body of
+// CommitBack and ParkConflicts, which differ only in what their branch
+// MEANS. Both leave opts.Branch alone, and neither needs the fast-forward
+// dance Import, RecordFile and CaptureFiles go through: the ref is new every
+// time, so there is nothing on the remote to race.
+//
+// op names the operation in every error, so a failure says which button or
+// which verdict produced it.
+func (g *GitSync) commitLiveOnto(
+	ctx context.Context, op, branch, message string, files []DriftFile, configRoot, baseSHA string,
+) ([]string, error) {
 	if len(files) == 0 {
-		return "", fmt.Errorf("gitsync: commit-back: no files given")
+		return nil, fmt.Errorf("gitsync: %s: no files given", op)
 	}
 	if baseSHA == "" {
-		return "", fmt.Errorf("gitsync: commit-back: no base commit to branch from")
+		return nil, fmt.Errorf("gitsync: %s: no base commit to branch from", op)
 	}
 
-	branch := "gitops/drift-" + now.UTC().Format(driftBranchTimeFormat)
-
 	if _, err := g.runGit(ctx, []string{"checkout", "-B", branch, baseSHA}, "", nil); err != nil {
-		return "", err
+		return nil, err
 	}
 	defer g.restoreDetachedCheckout(ctx, baseSHA, branch)
 
-	staged, err := g.stageDrift(ctx, files, configRoot)
+	staged, err := g.stageDrift(ctx, op, files, configRoot)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if !staged {
-		return "", fmt.Errorf("gitsync: commit-back: nothing to stage among %v", files)
+	if len(staged.Paths) == 0 {
+		return nil, fmt.Errorf("gitsync: %s: nothing to stage among %v", op, files)
 	}
 
-	commitEnv := []string{
-		"GIT_AUTHOR_NAME=" + commitAuthorName, "GIT_AUTHOR_EMAIL=" + commitAuthorEmail,
-		"GIT_COMMITTER_NAME=" + commitAuthorName, "GIT_COMMITTER_EMAIL=" + commitAuthorEmail,
-	}
-	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", DriftCommitMessage}, "", commitEnv); err != nil {
+	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", message}, "", commitIdentityEnv()); err != nil {
 		if isNothingToCommitError(err) {
 			// Everything staged is byte-identical to baseSHA. Named
 			// explicitly rather than reported as success with an empty
 			// branch name, which would set LastDriftBranch to "".
-			return "", fmt.Errorf("gitsync: commit-back: nothing to commit (live content already matches the repository)")
+			return nil, fmt.Errorf("gitsync: %s: nothing to commit (live content already matches the repository)", op)
 		}
-		return "", err
+		return nil, err
 	}
 
 	if _, err := g.runGit(ctx, []string{"push", g.Opts.RepoURL, branch}, "", g.credentialEnv()); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return branch, nil
+	return staged.Paths, nil
 }
 
 // isNothingToCommitError matches git commit's "nothing to commit, working
@@ -106,49 +153,74 @@ func isNothingToCommitError(err error) bool {
 	return strings.Contains(err.Error(), "nothing to commit")
 }
 
-// stageDrift stages the live version of each path (git add), or its removal
-// (git rm) when genuinely gone, and reports whether anything was staged so
-// CommitBack can refuse an empty commit. Every path is re-checked against
-// Excluded/secretShapedDisallowed and guardDriftPath here, whatever the
-// caller already filtered.
-func (g *GitSync) stageDrift(ctx context.Context, files []DriftFile, configRoot string) (bool, error) {
-	// Written first, so a branch carrying a newly encrypted secrets.yaml
-	// also carries the config to decrypt it. Not counted as staged work: a
-	// .sops.yaml refresh alone is not drift.
-	if err := g.stageSopsConfig(ctx); err != nil {
-		return false, fmt.Errorf("gitsync: commit-back: %w", err)
-	}
+// stagedSet is what one staging pass put in the index.
+type stagedSet struct {
+	// Paths is the content staged from live. A .sops.yaml refresh is
+	// deliberately NOT in here: it is not drift, and an operation whose only
+	// change is that config must still refuse as "nothing to stage".
+	Paths []string
+	// SopsConfig records that this pass also refreshed the managed
+	// .sops.yaml. Kept separate for the reason above, but a "commit --only"
+	// pathspec has to name it as well, or a commit carrying a newly
+	// encrypted secrets.yaml would leave behind the config to decrypt it.
+	SopsConfig bool
+}
 
-	staged := false
+// pathspec is every path this pass staged, for a commit that names them
+// rather than trusting the index.
+func (s stagedSet) pathspec() []string {
+	if s.SopsConfig {
+		return append(append([]string{}, s.Paths...), sopscrypt.ConfigFile)
+	}
+	return s.Paths
+}
+
+// stageDrift stages the live version of each path (git add), or its removal
+// (git rm) when genuinely gone, and reports what it staged so a caller can
+// refuse an empty commit and so one committing by pathspec knows the names.
+// Every path is re-checked against Excluded/secretShapedDisallowed and
+// guardDriftPath here, whatever the caller already filtered. op names the
+// operation in the errors and the skip logs.
+func (g *GitSync) stageDrift(ctx context.Context, op string, files []DriftFile, configRoot string) (stagedSet, error) {
+	var set stagedSet
+
+	// Written first, so a branch carrying a newly encrypted secrets.yaml
+	// also carries the config to decrypt it.
+	wroteConfig, err := g.stageSopsConfig(ctx, op)
+	if err != nil {
+		return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
+	}
+	set.SopsConfig = wroteConfig
+
 	for _, f := range files {
 		p := f.Path
 		if err := refuseUnsyncablePath(p); err != nil {
-			return false, fmt.Errorf("gitsync: commit-back: %w", err)
+			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 
 		copied, err := g.copyLiveIntoWorkdir(ctx, configRoot, p)
 		if err != nil {
-			return false, fmt.Errorf("gitsync: commit-back: %w", err)
+			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 		if copied {
-			added, err := g.gitAddSkippingIgnored(ctx, p)
+			added, err := g.gitAddSkippingIgnored(ctx, op, p)
 			if err != nil {
-				return false, err
+				return stagedSet{}, err
 			}
 			if added {
-				staged = true
+				set.Paths = append(set.Paths, p)
 			}
 			continue
 		}
 
 		gone, err := liveFileIsGone(configRoot, p)
 		if err != nil {
-			return false, fmt.Errorf("gitsync: commit-back: %w", err)
+			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 		if !gone {
 			// Still there, just not capturable (unreadable, or no longer a
 			// regular file). A removal would delete what nobody deleted.
-			slog.Info("gitsync: commit-back: live path still exists but could not be captured, not staging a removal", "path", p)
+			slog.Info("gitsync: "+op+": live path still exists but could not be captured, not staging a removal", "path", p)
 			continue
 		}
 
@@ -156,18 +228,18 @@ func (g *GitSync) stageDrift(ctx context.Context, files []DriftFile, configRoot 
 		// untracked path is an error.
 		repoPath, err := guardDriftPath(g.Workdir, p)
 		if err != nil {
-			return false, fmt.Errorf("gitsync: commit-back: %w", err)
+			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 		if _, err := os.Stat(repoPath); err != nil {
-			slog.Info("gitsync: commit-back: live path is gone but the repository does not track it, nothing to remove", "path", p)
+			slog.Info("gitsync: "+op+": live path is gone but the repository does not track it, nothing to remove", "path", p)
 			continue
 		}
 		if _, err := g.runGit(ctx, []string{"rm", "--quiet", "--", p}, "", nil); err != nil {
-			return false, err
+			return stagedSet{}, err
 		}
-		staged = true
+		set.Paths = append(set.Paths, p)
 	}
-	return staged, nil
+	return set, nil
 }
 
 // liveFileIsGone reports whether p is genuinely absent from configRoot;
@@ -293,30 +365,28 @@ func (g *GitSync) ensureSopsConfig() (bool, error) {
 }
 
 // stageSopsConfig is ensureSopsConfig plus the explicit "git add" stageDrift
-// needs, since commit-back stages path by path rather than in one bulk call.
-func (g *GitSync) stageSopsConfig(ctx context.Context) error {
+// needs, since it stages path by path rather than in one bulk call, and
+// reports whether the config was actually staged.
+func (g *GitSync) stageSopsConfig(ctx context.Context, op string) (bool, error) {
 	written, err := g.ensureSopsConfig()
 	if err != nil || !written {
-		return err
+		return false, err
 	}
-	if _, err := g.gitAddSkippingIgnored(ctx, sopscrypt.ConfigFile); err != nil {
-		return err
-	}
-	return nil
+	return g.gitAddSkippingIgnored(ctx, op, sopscrypt.ConfigFile)
 }
 
 // gitAddSkippingIgnored stages p, tolerating the one failure a gitignored
 // path produces: "git add" without "-f" is fatal, which would abort the
-// whole commit-back over one ignored path. Any other add failure still
+// whole operation over one ignored path. Any other add failure still
 // propagates. Returns whether p was staged, so a skip never counts toward
 // "something was staged".
-func (g *GitSync) gitAddSkippingIgnored(ctx context.Context, p string) (bool, error) {
+func (g *GitSync) gitAddSkippingIgnored(ctx context.Context, op, p string) (bool, error) {
 	_, err := g.runGit(ctx, []string{"add", "--", p}, "", nil)
 	if err == nil {
 		return true, nil
 	}
 	if isIgnoredPathError(err) {
-		slog.Info("gitsync: commit-back: skipping gitignored path", "path", p)
+		slog.Info("gitsync: "+op+": skipping gitignored path", "path", p)
 		return false, nil
 	}
 	return false, err
@@ -365,6 +435,35 @@ func guardDriftPath(root, path string) (string, error) {
 		}
 	}
 	return full, nil
+}
+
+// enterThrowawayBranch force-creates branch at tip, cleans the tree, and
+// returns the restore the caller must defer. Shared by the two tracked-branch
+// writers that build a commit on top of a freshly fetched tip (RecordFile and
+// CaptureFiles); CommitBack and ParkConflicts do not use it, because they
+// restore to the base they branched from rather than to wherever the worktree
+// happened to be.
+//
+// That distinction is the whole point of the helper: these two run INSIDE a
+// reconcile cycle, whose detached checkout the differ and applier are reading
+// between calls, so the worktree has to go back exactly where it was and not
+// to the tip just fetched. A workdir with nothing checked out has nowhere to
+// go back to, so it lands on that tip. The restore is returned rather than
+// deferred here so it covers the clean below as well.
+func (g *GitSync) enterThrowawayBranch(ctx context.Context, branch, tip string) (restore func(), err error) {
+	restoreSHA := g.CurrentSHA(ctx)
+	if restoreSHA == "" {
+		restoreSHA = tip
+	}
+	if _, err := g.runGit(ctx, []string{"checkout", "-B", branch, tip}, "", nil); err != nil {
+		return nil, err
+	}
+	restore = func() { g.restoreDetachedCheckout(ctx, restoreSHA, branch) }
+	if _, err := g.runGit(ctx, []string{"clean", "-fdx"}, "", nil); err != nil {
+		restore()
+		return nil, err
+	}
+	return restore, nil
 }
 
 // restoreDetachedCheckout puts Workdir back into the detached checkout at

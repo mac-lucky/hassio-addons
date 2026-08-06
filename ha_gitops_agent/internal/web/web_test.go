@@ -4188,3 +4188,56 @@ func TestImportRecordFailingChipRenders(t *testing.T) {
 		t.Error("no chip for an import whose record could not be saved")
 	}
 }
+
+// The conflicts card is the only place a path the agent refuses to sync in
+// either direction is visible. Driven from a persisted state, since New
+// hydrates the mirror at startup.
+func TestDashboardRendersTheConflictsCard(t *testing.T) {
+	devEnv(t)
+	state := applier.State{
+		Manifest:           []string{},
+		ConflictedPaths:    []string{"scenes.yaml", "packages/climate.yaml"},
+		LastConflictBranch: "gitops/conflict-20260806T091500Z",
+		LastConflictUTC:    "2026-08-06T09:15:00Z",
+	}
+	agent := recon.New(
+		options.Options{RepoURL: "https://example.invalid/demo.git", Branch: "main", IntervalMinutes: 5, CaptureLiveChanges: true},
+		recon.Deps{Applier: &stateOnlyApplier{state: state}, History: noHistory{}},
+	)
+	handler := New(agent)
+
+	body := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+
+	for _, want := range []string{"Needs your decision", "scenes.yaml", "packages/climate.yaml", "gitops/conflict-20260806T091500Z"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard does not render %q", want)
+		}
+	}
+
+	// The fragment is polled every few seconds and compared byte for byte,
+	// so an unsorted conflict list would re-swap the page on every poll.
+	second := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+	if body != second {
+		t.Error("two identical renders differ: something in the conflicts card is unstable across polls")
+	}
+}
+
+// A conflict whose live copies could not be parked is still a conflict, and
+// the card must say so rather than naming a branch that does not exist.
+func TestDashboardSaysWhenAConflictCouldNotBeParked(t *testing.T) {
+	devEnv(t)
+	state := applier.State{Manifest: []string{}, ConflictedPaths: []string{"scenes.yaml"}}
+	agent := recon.New(
+		options.Options{RepoURL: "https://example.invalid/demo.git", Branch: "main", IntervalMinutes: 5, CaptureLiveChanges: true},
+		recon.Deps{Applier: &stateOnlyApplier{state: state}, History: noHistory{}},
+	)
+
+	body := doRequest(t, New(agent), http.MethodGet, "/", nil).Body.String()
+
+	if !strings.Contains(body, "could not be pushed to a branch") {
+		t.Error("the card does not say the live copies were not parked")
+	}
+	if strings.Contains(body, "Live copies preserved on <code></code>") {
+		t.Error("the card names an empty branch")
+	}
+}

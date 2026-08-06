@@ -66,6 +66,23 @@ type Options struct {
 	// not a change to the box, so it ignores DryRun as AllowImport and
 	// CommitBack do, but it needs GitToken to have push rights.
 	TrackAddonVersions bool
+	// CaptureLiveChanges turns the file layer two-way. Each cycle classifies
+	// every drifting path three-way against a merge base: one the repository
+	// did not move is pushed to opts.Branch as a "capture" commit and kept
+	// out of the apply, one live did not move is applied as always, and one
+	// both moved is refused in either direction and parked (recon's
+	// capture.go). Off by default, since it is the only setting under which
+	// an unattended cycle rewrites the tracked branch with config.
+	//
+	// A repository write, not a change to the box, so it ignores DryRun as
+	// AllowImport, CommitBack and TrackAddonVersions do - with DryRun on it
+	// is arguably the safest mode there is, live edits flowing to git and
+	// nothing ever flowing back. It needs GitToken to have push rights on
+	// opts.Branch; a protected branch makes every cycle fail the push.
+	//
+	// Supersedes CommitBack's automatic half, which would otherwise push a
+	// throwaway branch for the same drift this commits.
+	CaptureLiveChanges bool
 
 	ReconcileYAMLFiles  bool
 	ReconcileRegistries bool
@@ -158,6 +175,7 @@ func Load(path string) (Options, error) {
 		AutoUpdateAddons:          asStringSlice(raw["auto_update_addons"]),
 		AutoUpdateIntervalMinutes: autoUpdateIntervalMinutes,
 		TrackAddonVersions:        truthy(raw["track_addon_versions"], false),
+		CaptureLiveChanges:        truthy(raw["capture_live_changes"], false),
 
 		ReconcileYAMLFiles:    truthy(reconcile["yaml_files"], true),
 		ReconcileRegistries:   truthy(reconcile["registries"], false),

@@ -6,7 +6,7 @@ ARG BUILD_FROM=alpine:3.24
 
 # Keep in sync with config.yaml's version (which has a comment pointing back
 # here) - stamped into the binary as main.version below.
-ARG BUILD_VERSION=0.5.0
+ARG BUILD_VERSION=0.6.0
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG BUILD_VERSION

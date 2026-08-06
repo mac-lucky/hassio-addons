@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 )
 
 // errBusy is the single "another operation is already running" refusal
@@ -84,12 +83,7 @@ func (r *Reconciler) commitDriftBack(ctx context.Context, changes []differ.Chang
 		return "", errNoFetchedTip
 	}
 
-	files := make([]gitsync.DriftFile, len(changes))
-	for i, c := range changes {
-		files[i] = gitsync.DriftFile{Path: c.Path, Kind: c.Kind}
-	}
-
-	branch, err := r.git.CommitBack(ctx, files, ConfigRoot, lastSHA, time.Now())
+	branch, err := r.git.CommitBack(ctx, driftFiles(changes), ConfigRoot, lastSHA, time.Now())
 	if err != nil {
 		r.logEvent("commit-back failed: " + err.Error())
 		return "", err

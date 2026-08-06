@@ -42,6 +42,7 @@ func fakeOptionsFile(t *testing.T, dir string) string {
 		"auto_update_addons":           []any{},
 		"auto_update_interval_minutes": 360,
 		"track_addon_versions":         false,
+		"capture_live_changes":         false,
 		"reconcile": map[string]any{
 			"yaml_files":    true,
 			"registries":    false,
@@ -78,6 +79,7 @@ func TestLoadFullOptionsFile(t *testing.T) {
 		AutoUpdateAddons:          nil,
 		AutoUpdateIntervalMinutes: 360,
 		TrackAddonVersions:        false,
+		CaptureLiveChanges:        false,
 		ReconcileYAMLFiles:        true,
 		ReconcileRegistries:       false,
 		ReconcileDashboards:       false,
@@ -117,6 +119,7 @@ func TestLoadMinimalOptionsFallsBackToDefaults(t *testing.T) {
 		AutoUpdateAddons:          nil,
 		AutoUpdateIntervalMinutes: 360,
 		TrackAddonVersions:        false,
+		CaptureLiveChanges:        false,
 		ReconcileYAMLFiles:        true,
 		ReconcileRegistries:       false,
 		ReconcileDashboards:       false,
@@ -442,6 +445,37 @@ func TestLoadTrackAddonVersions(t *testing.T) {
 			}
 			if opts.TrackAddonVersions != tc.want {
 				t.Errorf("TrackAddonVersions = %v, want %v", opts.TrackAddonVersions, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadCaptureLiveChanges(t *testing.T) {
+	// Off unless the option says otherwise, for TrackAddonVersions' reason
+	// and more so: this is the one setting under which an unattended cycle
+	// rewrites the tracked branch with config, so every ambiguous value has
+	// to resolve to "do not".
+	cases := []struct {
+		name string
+		raw  map[string]any
+		want bool
+	}{
+		{name: "missing key", raw: map[string]any{}, want: false},
+		{name: "explicit false", raw: map[string]any{"capture_live_changes": false}, want: false},
+		{name: "explicit true", raw: map[string]any{"capture_live_changes": true}, want: true},
+		{name: "null reads as the default", raw: map[string]any{"capture_live_changes": nil}, want: false},
+		{name: "a non-empty string is truthy", raw: map[string]any{"capture_live_changes": "true"}, want: true},
+		{name: "an empty string is not", raw: map[string]any{"capture_live_changes": ""}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := Load(writeOptions(t, t.TempDir(), tc.raw))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if opts.CaptureLiveChanges != tc.want {
+				t.Errorf("CaptureLiveChanges = %v, want %v", opts.CaptureLiveChanges, tc.want)
 			}
 		})
 	}

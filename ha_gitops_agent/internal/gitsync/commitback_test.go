@@ -756,10 +756,10 @@ func TestCommitBackNothingToCommitIsACleanError(t *testing.T) {
 
 // driftClone seeds a bare remote, a clone checked out at its tip, and an
 // empty live config dir.
-func driftClone(t *testing.T, files map[string]string) (gs *GitSync, bare, configRoot, sha string) {
+func driftClone(t *testing.T, files map[string]string) (gs *GitSync, bare, work, configRoot, sha string) {
 	t.Helper()
 	tmp := t.TempDir()
-	bare, work := makeRemote(t, tmp, "remote")
+	bare, work = makeRemote(t, tmp, "remote")
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
@@ -786,7 +786,7 @@ func driftClone(t *testing.T, files map[string]string) (gs *GitSync, bare, confi
 	if err := os.MkdirAll(configRoot, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	return gs, bare, configRoot, sha
+	return gs, bare, work, configRoot, sha
 }
 
 func writeLiveFile(t *testing.T, configRoot, rel, content string) {
@@ -804,7 +804,7 @@ func TestCommitBackCapturesLiveDeletionOfTrackedFileReportedAsAdd(t *testing.T) 
 	// The e2e shape: one tracked path, gone from live, and the only drift -
 	// which is what turned the silent skip into a failure every cycle.
 	const card = "www/community/gitops-e2e-fake-card/gitops-e2e-fake-card.js"
-	gs, bare, configRoot, sha := driftClone(t, map[string]string{card: "console.log('card');\n"})
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{card: "console.log('card');\n"})
 
 	branch, err := gs.CommitBack(context.Background(), []DriftFile{{Path: card, Kind: "add"}}, configRoot, sha, fixedDriftTime)
 	if err != nil {
@@ -824,7 +824,7 @@ func TestCommitBackKeepsPathWhoseLiveFileExistsButCannotBeStatted(t *testing.T) 
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permission bits do not apply")
 	}
-	gs, bare, configRoot, sha := driftClone(t, map[string]string{
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{
 		"locked/still-there.yaml": "- id: repo\n",
 		"automations.yaml":        "- id: demo\n",
 	})
@@ -860,7 +860,7 @@ func TestCommitBackKeepsPathWhoseLiveFileExistsButCannotBeStatted(t *testing.T) 
 }
 
 func TestCommitBackCapturesDeletionAndContentDriftInOneCommit(t *testing.T) {
-	gs, bare, configRoot, sha := driftClone(t, map[string]string{
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{
 		"scripts.yaml":     "- id: script\n",
 		"automations.yaml": "- id: demo\n",
 	})
@@ -887,7 +887,7 @@ func TestCommitBackCapturesDeletionAndContentDriftInOneCommit(t *testing.T) {
 func TestCommitBackDeletionOfUntrackedPathDoesNotSinkTheRest(t *testing.T) {
 	// "git rm" on an untracked path is a hard git error, so it is passed
 	// over rather than costing the drift that is capturable beside it.
-	gs, bare, configRoot, sha := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
 	liveEdit := "- id: demo\n  alias: Hand-edited live\n"
 	writeLiveFile(t, configRoot, "automations.yaml", liveEdit)
 
@@ -900,6 +900,83 @@ func TestCommitBackDeletionOfUntrackedPathDoesNotSinkTheRest(t *testing.T) {
 	}
 	if pushed, ok := showAtRef(t, bare, branch, "automations.yaml"); !ok || pushed != liveEdit {
 		t.Errorf("automations.yaml on the drift branch = %q (ok=%v), want the live edit", pushed, ok)
+	}
+}
+
+// --- ParkConflicts --------------------------------------------------------
+
+// The safety net for a path the classifier refuses to sync in either
+// direction: the live copy has to survive somewhere, and the tracked branch
+// must not move, since refusing to decide is the whole point.
+func TestParkConflictsPreservesLiveCopiesWithoutTouchingTheTrackedBranch(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "remote")
+	const repoContent = "- id: demo\n  alias: Edited in git\n"
+	commitFile(t, work, "automations.yaml", repoContent, "commit")
+
+	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
+	ctx := context.Background()
+	if err := gs.EnsureClone(ctx); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	sha, err := gs.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if err := gs.Checkout(ctx, sha); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+
+	configRoot := filepath.Join(tmp, "homeassistant")
+	const liveContent = "- id: demo\n  alias: Edited in the HA UI\n"
+	writeLiveFile(t, configRoot, "automations.yaml", liveContent)
+
+	branch, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	if err != nil {
+		t.Fatalf("ParkConflicts: %v", err)
+	}
+	if want := "gitops/conflict-20260802T120000Z"; branch != want {
+		t.Errorf("branch = %q, want %q", branch, want)
+	}
+
+	if parked, ok := showAtRef(t, bare, branch, "automations.yaml"); !ok || parked != liveContent {
+		t.Errorf("parked content = %q (ok=%v), want the live copy %q", parked, ok, liveContent)
+	}
+	if onMain, ok := showAtRef(t, bare, "main", "automations.yaml"); !ok || onMain != repoContent {
+		t.Errorf("main content = %q (ok=%v), want the repository's own version untouched", onMain, ok)
+	}
+	if got := gs.CurrentSHA(ctx); got != sha {
+		t.Errorf("CurrentSHA() after ParkConflicts = %q, want %q (detached checkout must be restored)", got, sha)
+	}
+}
+
+// A conflict branch is a copy, never a proposal, so it must not be able to
+// reach opts.Branch even by accident.
+func TestParkConflictsRefusesWithNothingToPark(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "remote")
+	commitFile(t, work, "automations.yaml", "- id: demo\n", "commit")
+
+	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
+	ctx := context.Background()
+	if err := gs.EnsureClone(ctx); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	sha, err := gs.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	if _, err := gs.ParkConflicts(ctx, nil, filepath.Join(tmp, "homeassistant"), sha, fixedDriftTime); err == nil {
+		t.Error("ParkConflicts(nil) error = nil, want a refusal")
+	}
+	if _, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "a.yaml"}}, filepath.Join(tmp, "homeassistant"), "", fixedDriftTime); err == nil {
+		t.Error("ParkConflicts with no base error = nil, want a refusal")
+	}
+	for _, name := range listRemoteBranches(t, bare) {
+		if name != "main" {
+			t.Errorf("remote grew branch %q, want main only", name)
+		}
 	}
 }
 

@@ -39,6 +39,12 @@ func (r *Reconciler) refreshStateMirrors(state applier.State) {
 		managedRestart[strings.TrimPrefix(key, "addon:")] = restart
 	}
 
+	// Sorted for hacsRestartPending's reason: the fragment holding it is
+	// polled and compared byte for byte, so an unsorted list would re-swap
+	// the page on every poll.
+	conflicts := append([]string{}, state.ConflictedPaths...)
+	sort.Strings(conflicts)
+
 	managed := managedInventory(state)
 	// A sorted copy, since the slice is on its way back into state.json.
 	// Narrowed by hacsLoaded, because the disk copy lags this process's
@@ -58,6 +64,11 @@ func (r *Reconciler) refreshStateMirrors(state applier.State) {
 		r.addonRestartOnChange = managedRestart
 		r.managed = managed
 		r.hacsRestartPending = hacsRestartPending
+		r.conflicts = conflicts
+		r.lastConflictBranch = state.LastConflictBranch
+		r.lastConflictUTC = state.LastConflictUTC
+		r.lastCaptureSHA = state.LastCaptureSHA
+		r.lastCaptureUTC = state.LastCaptureUTC
 	})
 }
 

@@ -41,6 +41,9 @@ configuration:
   track_addon_versions:
     name: Track app versions
     description: Records the version of every installed app in gitops/addon-versions.yaml on the tracked branch, and rewrites it whenever a version changes - however it changed, including a manual update from the Home Assistant UI. The file is machine-owned - edits made to it by hand are overwritten, nothing in it is ever installed from it, and it is never copied into your config. It is written once per reconcile interval at most, and git_token needs push rights. Works with dry run on, which only governs changes to Home Assistant itself.
+  capture_live_changes:
+    name: Capture live changes
+    description: Sync edits made on this machine back to the tracked branch instead of letting the next apply overwrite them. Every cycle each changed file is compared three ways - against the repository, against the live config, and against what this agent last wrote - so a file only you changed here is committed to git, a file only changed in git is applied here as usual, and a file changed in both places is left alone in both directions, with a copy of the live version pushed to a gitops/conflict branch and flagged in the web UI. Only files the repository already tracks are covered - new files still need Import, and things Home Assistant keeps in .storage (helpers, most dashboards) are not files and are not included. git_token needs push rights on the tracked branch. Works with dry run on, which only governs changes to Home Assistant itself, and replaces the automatic half of commit back.
   reconcile:
     name: Reconcile
     description: Which categories of config this add-on manages.

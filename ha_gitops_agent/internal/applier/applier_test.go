@@ -1332,6 +1332,92 @@ func TestStateSaveThenLoadRoundtripsHacsFields(t *testing.T) {
 	}
 }
 
+func TestStateSaveThenLoadRoundtripsCaptureAndConflictFields(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.StatePath = filepath.Join(t.TempDir(), "state.json")
+
+	if err := StateSave(cfg, State{
+		Manifest: []string{},
+		// Written out of order, so the save's own sort is what the load
+		// reads back rather than the caller having remembered.
+		ConflictedPaths:    []string{"scripts.yaml", "automations.yaml"},
+		LastConflictBranch: "gitops/conflict-20260806T120000Z",
+		LastConflictUTC:    "2026-08-06T12:00:00Z",
+		LastCaptureSHA:     "cap123",
+		LastCaptureUTC:     "2026-08-06T12:05:00Z",
+		LastCapturePaths:   []string{"scenes.yaml", "packages/demo.yaml"},
+	}); err != nil {
+		t.Fatalf("StateSave: %v", err)
+	}
+	loaded := StateLoad(cfg)
+
+	if !reflect.DeepEqual(loaded.ConflictedPaths, []string{"automations.yaml", "scripts.yaml"}) {
+		t.Errorf("conflicted_paths = %+v, want it sorted", loaded.ConflictedPaths)
+	}
+	if !reflect.DeepEqual(loaded.LastCapturePaths, []string{"packages/demo.yaml", "scenes.yaml"}) {
+		t.Errorf("last_capture_paths = %+v, want it sorted", loaded.LastCapturePaths)
+	}
+	if loaded.LastConflictBranch != "gitops/conflict-20260806T120000Z" || loaded.LastConflictUTC != "2026-08-06T12:00:00Z" {
+		t.Errorf("conflict scalars = %q / %q", loaded.LastConflictBranch, loaded.LastConflictUTC)
+	}
+	// The merge-base override has to survive a restart, or the first cycle
+	// after one reads the agent's own capture as a repository change.
+	if loaded.LastCaptureSHA != "cap123" || loaded.LastCaptureUTC != "2026-08-06T12:05:00Z" {
+		t.Errorf("capture scalars = %q / %q", loaded.LastCaptureSHA, loaded.LastCaptureUTC)
+	}
+}
+
+// Both lists steer what an apply may touch and what a capture writes into a
+// commit, so they get Manifest's guard, not the looser list sanitizer.
+func TestStateLoadDropsUnsafeConflictedAndCapturedPaths(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ConfigRoot = filepath.Join(t.TempDir(), "config")
+	writeText(t, cfg.StatePath, `{
+		"manifest": [],
+		"conflicted_paths": ["good.yaml", "../outside.yaml", "/etc/passwd", 42, ""],
+		"last_capture_paths": ["kept.yaml", "../../escape.yaml", null]
+	}`)
+
+	state := StateLoad(cfg)
+
+	if !reflect.DeepEqual(state.ConflictedPaths, []string{"good.yaml"}) {
+		t.Errorf("conflicted_paths = %+v, want [good.yaml]", state.ConflictedPaths)
+	}
+	if !reflect.DeepEqual(state.LastCapturePaths, []string{"kept.yaml"}) {
+		t.Errorf("last_capture_paths = %+v, want [kept.yaml]", state.LastCapturePaths)
+	}
+}
+
+// A null would come back as a nil slice on the next load, which reads the
+// same but makes the file itself ambiguous about whether anything was ever
+// recorded.
+func TestStateSaveEmitsEmptyPathListsRatherThanNull(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.StatePath = filepath.Join(t.TempDir(), "state.json")
+
+	if err := StateSave(cfg, State{Manifest: []string{}}); err != nil {
+		t.Fatalf("StateSave: %v", err)
+	}
+	data, err := os.ReadFile(cfg.StatePath) // #nosec G304 -- t.TempDir() fixture path this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("state.json does not parse: %v", err)
+	}
+	for _, field := range []string{"conflicted_paths", "last_capture_paths"} {
+		list, ok := raw[field].([]any)
+		if !ok {
+			t.Errorf("%s = %#v, want an empty list", field, raw[field])
+			continue
+		}
+		if len(list) != 0 {
+			t.Errorf("%s = %v, want it empty", field, list)
+		}
+	}
+}
+
 func TestStateLoadDefaultsWhenMissing(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.StatePath = filepath.Join(t.TempDir(), "does_not_exist.json")

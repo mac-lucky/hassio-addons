@@ -239,6 +239,8 @@ func devHealthStatus() recon.Status {
 	status.PendingRestartSlugs = nil
 	status.HistoryWriteFailing = true
 	status.VersionRecordFailing = true
+	status.ImportRecordFailing = true
+	status.CaptureFailing = true
 	status.AddonUpdateSelfSlugFailing = true
 	status.AddonCheckFailing = []string{"a0d7b954_esphome", "core_samba"}
 	// The only flag a reconcile layer raises: HACS is on and cannot run.

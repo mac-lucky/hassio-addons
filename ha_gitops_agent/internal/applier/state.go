@@ -120,6 +120,38 @@ type State struct {
 	// earned by an apply writing a file, never by copying one in.
 	LastImportSHA string
 	LastImportUTC string
+	// ConflictedPaths are the paths internal/recon's three-way classifier
+	// found moved on BOTH sides since the merge base, which the agent
+	// refuses to sync in either direction until they agree again: applying
+	// would destroy a live edit, capturing would destroy a push, and nothing
+	// here can tell which was meant. Sorted. A path leaves the list on the
+	// first cycle that finds the repository and live saying the same thing -
+	// by a push, by an edit, or by a human merging the parked branch - so
+	// none of this has to be cleared by hand.
+	ConflictedPaths []string
+	// LastConflictBranch is the "gitops/conflict-<timestamp>" branch the last
+	// conflict parked its LIVE copies on (gitsync.ParkConflicts), shown in
+	// the UI so the work stays recoverable; "" if none has been parked.
+	LastConflictBranch string
+	LastConflictUTC    string
+	// LastCaptureSHA is the commit gitsync.CaptureFiles last pushed and
+	// LastCapturePaths are the paths it carries. Together they are a MERGE
+	// BASE OVERRIDE rather than display: a capture moves the tracked branch,
+	// so from the next cycle on the live copy of those paths is what THAT
+	// commit holds, not what LastGoodSHA holds. Classifying them against
+	// LastGoodSHA would read the agent's own capture as "the repository
+	// moved" and call the user's next edit to the same file a conflict.
+	//
+	// They are deliberately not folded into LastGoodSHA at capture time,
+	// which would be the tidier shape and is wrong: LastGoodSHA means "the
+	// tree the agent last wrote live", and moving it to a commit nothing has
+	// applied yet would make the next cycle read a pending repository change
+	// as a live one and push stale live content back over the user's push.
+	// They are cleared only once LastGoodSHA advances to a commit that
+	// already contains them.
+	LastCaptureSHA   string
+	LastCaptureUTC   string
+	LastCapturePaths []string
 }
 
 // StateLoad loads the agent's persisted sync state from cfg.StatePath,
@@ -138,6 +170,7 @@ func StateLoad(cfg Config) State {
 		SubentryAttempts: map[string]map[string]any{},
 		HacsManaged:      map[string]string{}, HacsAttempts: map[string]map[string]any{},
 		HacsRestartPending: []string{},
+		ConflictedPaths:    []string{}, LastCapturePaths: []string{},
 	}
 
 	data, err := os.ReadFile(cfg.StatePath) // #nosec G304 -- cfg.StatePath is the fixed Supervisor-managed state path in production
@@ -157,7 +190,7 @@ func StateLoad(cfg Config) State {
 	if v, ok := raw["last_apply_utc"]; ok {
 		state.LastApplyUTC = asString(v)
 	}
-	state.Manifest = sanitizeManifest(cfg, raw["manifest"])
+	state.Manifest = sanitizePathList(cfg, raw["manifest"], "manifest")
 	state.RegistryManaged = sanitizeManagedMap(raw["registry_managed"], "registry_managed")
 	state.EntityOriginals = sanitizeFieldOriginals(raw["entity_originals"], "entity_originals")
 	state.DashboardManaged = sanitizeManagedMap(raw["dashboard_managed"], "dashboard_managed")
@@ -185,6 +218,24 @@ func StateLoad(cfg Config) State {
 	if v, ok := raw["last_import_utc"]; ok {
 		state.LastImportUTC = asString(v)
 	}
+	// Both lists go through guardChangePath, not sanitizeStringList: one
+	// gates whether a path may be applied and the other names paths a
+	// capture writes into a commit, so a hand-edited "../outside.txt" has to
+	// be dropped here exactly as Manifest's is.
+	state.ConflictedPaths = sanitizePathList(cfg, raw["conflicted_paths"], "conflicted_paths")
+	state.LastCapturePaths = sanitizePathList(cfg, raw["last_capture_paths"], "last_capture_paths")
+	if v, ok := raw["last_conflict_branch"]; ok {
+		state.LastConflictBranch = asString(v)
+	}
+	if v, ok := raw["last_conflict_utc"]; ok {
+		state.LastConflictUTC = asString(v)
+	}
+	if v, ok := raw["last_capture_sha"]; ok {
+		state.LastCaptureSHA = asString(v)
+	}
+	if v, ok := raw["last_capture_utc"]; ok {
+		state.LastCaptureUTC = asString(v)
+	}
 	return state
 }
 
@@ -201,10 +252,12 @@ func asString(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// sanitizeManifest drops any entry guardChangePath would reject, so a
+// sanitizePathList drops any entry guardChangePath would reject, so a
 // hand-edited state.json (say "../outside.txt") can never resurface as a
-// delete change reaching outside cfg.ConfigRoot.
-func sanitizeManifest(cfg Config, raw any) []string {
+// delete change reaching outside cfg.ConfigRoot, as a path an apply is told
+// to skip, or as one a capture would write into a commit. field names the
+// log messages after the raw JSON key.
+func sanitizePathList(cfg Config, raw any, field string) []string {
 	list, ok := raw.([]any)
 	if !ok {
 		return []string{}
@@ -218,7 +271,7 @@ func sanitizeManifest(cfg Config, raw any) []string {
 			continue
 		}
 		if err := guardChangePath(cfg, entry, configRootReal); err != nil {
-			slog.Warn("applier: state_load dropping unsafe manifest entry", "entry", entry)
+			slog.Warn("applier: state_load dropping unsafe "+field+" entry", "entry", entry)
 			continue
 		}
 		clean = append(clean, entry)
@@ -398,6 +451,10 @@ func StateSave(cfg Config, state State) error {
 	// writer having remembered to keep it sorted.
 	hacsRestartPending := append([]string{}, state.HacsRestartPending...)
 	sort.Strings(hacsRestartPending)
+	conflictedPaths := append([]string{}, state.ConflictedPaths...)
+	sort.Strings(conflictedPaths)
+	lastCapturePaths := append([]string{}, state.LastCapturePaths...)
+	sort.Strings(lastCapturePaths)
 
 	payload := map[string]any{
 		"last_good_sha":           nullableString(state.LastGoodSHA),
@@ -422,6 +479,12 @@ func StateSave(cfg Config, state State) error {
 		"last_drift_back_hash":    nullableString(state.LastDriftBackHash),
 		"last_import_sha":         nullableString(state.LastImportSHA),
 		"last_import_utc":         nullableString(state.LastImportUTC),
+		"conflicted_paths":        conflictedPaths,
+		"last_conflict_branch":    nullableString(state.LastConflictBranch),
+		"last_conflict_utc":       nullableString(state.LastConflictUTC),
+		"last_capture_sha":        nullableString(state.LastCaptureSHA),
+		"last_capture_utc":        nullableString(state.LastCaptureUTC),
+		"last_capture_paths":      lastCapturePaths,
 	}
 
 	data, err := json.Marshal(payload)

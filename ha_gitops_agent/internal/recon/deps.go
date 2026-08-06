@@ -59,6 +59,24 @@ type Git interface {
 	// error (already correct) is the ordinary outcome. Used only by
 	// recordAddonVersions, always under opLock.
 	RecordFile(ctx context.Context, relPath string, content []byte, message string) (committed bool, err error)
+	// CaptureFiles is the gitsync.CaptureFiles seam: push the live copy of
+	// these paths onto the tracked branch. A zero CommitSHA with a nil error
+	// means nothing was capturable. Used only by captureLiveChanges, always
+	// under opLock and always across the apply that follows it.
+	CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error)
+	// ParkConflicts is the gitsync.ParkConflicts seam, used only when the
+	// classifier refuses a path in both directions.
+	ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error)
+	// CommitReachable, IsAncestor, ChangedBetween and LiveFactsAt are the
+	// three-way classifier's reads. None of them touches the working tree, so
+	// the detached checkout the differ and applier share is safe across a
+	// whole classification pass (internal/gitsync's threeway.go). The live
+	// read lives behind LiveFactsAt rather than here, so it happens beside
+	// guardDriftPath instead of in a caller joining paths by hand.
+	CommitReachable(ctx context.Context, sha string) (bool, error)
+	IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error)
+	ChangedBetween(ctx context.Context, base, tip string) ([]string, error)
+	LiveFactsAt(ctx context.Context, sha, configRoot, path string) (gitsync.LiveFacts, error)
 }
 
 // realGit adapts *gitsync.GitSync to Git.
@@ -101,6 +119,30 @@ func (r *realGit) PreviewIgnored(ctx context.Context, configRoot string, files [
 
 func (r *realGit) RecordFile(ctx context.Context, relPath string, content []byte, message string) (bool, error) {
 	return r.g.RecordFile(ctx, relPath, content, message)
+}
+
+func (r *realGit) CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error) {
+	return r.g.CaptureFiles(ctx, files, configRoot)
+}
+
+func (r *realGit) ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+	return r.g.ParkConflicts(ctx, files, configRoot, baseSHA, now)
+}
+
+func (r *realGit) CommitReachable(ctx context.Context, sha string) (bool, error) {
+	return r.g.CommitReachable(ctx, sha)
+}
+
+func (r *realGit) IsAncestor(ctx context.Context, ancestor, descendant string) (bool, error) {
+	return r.g.IsAncestor(ctx, ancestor, descendant)
+}
+
+func (r *realGit) ChangedBetween(ctx context.Context, base, tip string) ([]string, error) {
+	return r.g.ChangedBetween(ctx, base, tip)
+}
+
+func (r *realGit) LiveFactsAt(ctx context.Context, sha, configRoot, path string) (gitsync.LiveFacts, error) {
+	return r.g.LiveFactsAt(ctx, sha, configRoot, path)
 }
 
 var _ Git = (*realGit)(nil)

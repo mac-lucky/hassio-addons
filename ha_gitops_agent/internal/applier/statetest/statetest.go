@@ -113,6 +113,26 @@ func PoisonedState(t *testing.T) applier.State {
 			state.LastImportSHA = "9d3b7c1a5e2f8046b3c9d7e1a2f5084b6c3d9e17"
 		case "LastImportUTC":
 			state.LastImportUTC = "2026-08-03T14:12:07+00:00"
+		case "ConflictedPaths":
+			// Exempt for Manifest's reason: the entries ARE config-relative
+			// paths, and naming the ones the agent refuses to sync is the
+			// whole point of the card. Out of order, to give a sort
+			// assertion something to sort.
+			state.ConflictedPaths = []string{"scenes.yaml", "packages/climate.yaml"}
+		case "LastConflictBranch":
+			state.LastConflictBranch = "gitops/conflict-20260804T091500Z"
+		case "LastConflictUTC":
+			state.LastConflictUTC = "2026-08-04T09:15:00+00:00"
+		case "LastCaptureSHA":
+			state.LastCaptureSHA = "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d"
+		case "LastCaptureUTC":
+			state.LastCaptureUTC = "2026-08-04T09:20:11+00:00"
+		case "LastCapturePaths":
+			// Poisoned, unlike ConflictedPaths beside it: this half of the
+			// merge-base override is bookkeeping the classifier reads and
+			// nothing renders, so a sentinel here is what proves no display
+			// path picked it up.
+			state.LastCapturePaths = []string{Sentinel}
 		default:
 			t.Fatalf("applier.State.%s is new and unclassified: poison its values here, "+
 				"or exempt it with the reason - a secret test over a state that zero-values "+

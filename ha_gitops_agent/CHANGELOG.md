@@ -8,7 +8,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
-## [0.5.0] - Unreleased
+## [0.6.0] - 2026-08-07
+
+### Added
+
+- `capture_live_changes`, off by default. With it on the file layer stops
+  being one-way: an edit you make on the machine itself, in the Home
+  Assistant UI or over SSH, is committed back to the tracked branch
+  instead of being overwritten by the next apply.
+
+  Every cycle each drifting file is compared three ways rather than two -
+  against the repository, against the live config, and against the commit
+  this agent last wrote live. That third reference is what makes the
+  decision possible: a file only the repository moved is applied here as
+  before, one only this machine moved is pushed to the tracked branch as
+  a `capture:` commit, and one that moved in both places is left untouched
+  in both directions. The push is fast-forward only and never forced, the
+  same rule imports and the version record already follow; a concurrent
+  push costs one retry on the new tip, and a rejection holds those files
+  back from the apply rather than overwriting the edits it just failed to
+  save.
+
+  A file that moved on both sides is a conflict, and conflicts are not
+  guessed at. The live copy is preserved on a `gitops/conflict-<UTC
+  timestamp>` branch, the path appears under "Needs your decision" in the
+  dashboard, and nothing touches it until the two sides agree again - by
+  a merge, a push, or an edit here - at which point it clears itself. The
+  branch is pushed once per distinct conflict set rather than once per
+  cycle, so a conflict left standing does not fill the repository with
+  branches or the activity feed with repeats.
+
+  Four things it deliberately does not cover. A file the repository has
+  never tracked is invisible to the comparison in both directions, so
+  bringing a new one in is still Import's job. What Home Assistant keeps
+  in `.storage/` - UI-created helpers, most dashboards, the entity
+  registry - is not files and stays with the `reconcile.*` layers.
+  `gitops/` is never captured, since those manifests are input to the
+  agent rather than config it syncs. And a file is only ever captured as
+  deleted if this agent's own last apply put it there: a repository holds
+  things that are not meant to live in `/homeassistant` at all, such as
+  `README.md` and `.github/`, and to the comparison those look exactly
+  like something you deleted.
+
+  `dry_run` does not gate it, the line `allow_import`, `commit_back` and
+  `track_addon_versions` already draw: that option governs writes to Home
+  Assistant, and this writes to the repository. With `dry_run` on it is
+  the most cautious mode the add-on has - live edits flow into git and
+  nothing ever flows back. It does need a merge base to compare against,
+  and one run of Import or one apply is what creates one, so under
+  `dry_run` an import has to come first. `git_token` needs push rights on
+  the tracked branch; without them the failure is reported and the
+  affected files are held out of the apply, so nothing is lost while it
+  is broken.
+
+- `conflicts` on `sensor.gitops_agent_status`, counting the paths held
+  back in both directions. Conflicts are in no plan, so they are absent
+  from `pending_changes`, and without their own count the one thing that
+  actually needs a person was invisible to automations.
+
+### Changed
+
+- `commit_back`'s automatic half no longer fires while
+  `capture_live_changes` is on. Both would act on the same drift, one
+  pushing a throwaway branch proposing exactly what the other has already
+  committed to the tracked branch. The "Commit Back" button is
+  unaffected: parking a set for review on purpose is still worth having.
+
+## [0.5.0] - 2026-08-06
 
 The first version. Nothing shipped before it, so everything the add-on does
 is described here once, in the state it is in - there is no earlier release

@@ -244,6 +244,27 @@ type Status struct {
 	// LastDriftBranch is the most recent commit-back branch name, or "" if
 	// commit-back has not run this process (Reconciler.lastDriftBranch).
 	LastDriftBranch string `json:"last_drift_branch"`
+	// CaptureEnabled mirrors opts.CaptureLiveChanges, so the web UI can say
+	// which direction the file layer is running in.
+	CaptureEnabled bool `json:"capture_enabled"`
+	// LastCaptureUTC/LastCaptureSHA describe the most recent capture pushed
+	// to the tracked branch, or "" if none has been. Like the import pair
+	// these survive a restart.
+	LastCaptureUTC      string `json:"last_capture_utc"`
+	LastCaptureSHA      string `json:"last_capture_sha"`
+	LastCaptureSHAShort string `json:"last_capture_sha_short"`
+	// Conflicts are the paths the three-way classifier refuses to sync in
+	// either direction, because the repository and the live config both
+	// moved since the merge base (see capture.go). Sorted. Rendered as their
+	// own card: unlike drift, nothing the agent does clears these on its own.
+	//
+	// ConflictBranch is the one "gitops/conflict-<timestamp>" branch holding
+	// every live copy - one branch per parking, not per path, which is why
+	// it sits here rather than beside each entry. "" if parking failed; the
+	// refusal stands either way.
+	Conflicts      []string `json:"conflicts"`
+	ConflictBranch string   `json:"conflict_branch"`
+	ConflictUTC    string   `json:"conflict_utc"`
 	// ImportEnabled mirrors opts.AllowImport, so the web UI can decide
 	// whether to show the import buttons at all.
 	ImportEnabled bool `json:"import_enabled"`
@@ -358,6 +379,11 @@ type Status struct {
 	// back on the page for as long as it lasts.
 	HistoryWriteFailing  bool `json:"history_write_failing"`
 	VersionRecordFailing bool `json:"version_record_failing"`
+	// CaptureFailing is whether the last capture could not push or park.
+	// It carries a consequence the others do not: the paths it failed to
+	// save are held out of the apply until it succeeds, so live edits are
+	// preserved but repository changes to those files are not arriving.
+	CaptureFailing bool `json:"capture_failing"`
 	// ImportRecordFailing is an import that was pushed but not recorded, so
 	// a restart would show the previous import. Unlike its siblings nothing
 	// retries it; only a later successful import clears it.
@@ -415,7 +441,8 @@ func (s Status) RollbackRestoresNothing() bool {
 // healthy agent. Derived on read like AddonUpdatesAvailable.
 func (s Status) HasHealthWarnings() bool {
 	return s.HistoryWriteFailing || s.VersionRecordFailing || s.ImportRecordFailing ||
-		s.HacsUnavailable || s.AddonUpdateSelfSlugFailing || len(s.AddonCheckFailing) > 0
+		s.CaptureFailing || s.HacsUnavailable || s.AddonUpdateSelfSlugFailing ||
+		len(s.AddonCheckFailing) > 0
 }
 
 // ApplyableCount is how many pending items an apply would attempt: the

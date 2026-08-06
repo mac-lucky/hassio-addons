@@ -161,6 +161,22 @@ type Reconciler struct {
 	// versionRecordFailed records that the previous record attempt failed,
 	// so it is logged on the TRANSITION (see noteVersionRecordFailure).
 	versionRecordFailed bool
+	// captureFailed records that the previous capture could not push or
+	// park, on the same transition guard and for a sharper version of its
+	// reason: capture runs every cycle, so an unpushable repository would
+	// otherwise fill the feed within hours (see noteCaptureFailure).
+	captureFailed bool
+	// lastCaptureUTC/lastCaptureSHA mirror applier.State's fields for
+	// display, hydrated in New like lastImportSHA/lastImportUTC so the last
+	// capture survives a restart.
+	lastCaptureUTC string
+	lastCaptureSHA string
+	// conflicts mirrors applier.State's ConflictedPaths, sorted, with the
+	// branch their live copies were parked on beside it - one branch per
+	// parking, not per path. refreshStateMirrors is the only writer.
+	conflicts          []string
+	lastConflictBranch string
+	lastConflictUTC    string
 	// hacsUnavailable records that HACS is not installed - the one layer
 	// failure that skips its layer instead of ending the cycle (see
 	// planHacsLayer). Guarded on the transition, and a dashboard chip.
@@ -486,6 +502,10 @@ func (r *Reconciler) pushStatus() {
 		"error":                   nullable(r.lastError),
 		"warnings":                nullable(r.lastWarnings),
 		"last_drift_branch":       nullable(r.lastDriftBranch),
+		// Conflicts are held out of pending_changes - they are in no plan -
+		// so without their own count the one thing that actually needs a
+		// person would publish drift_pending with pending_changes 0.
+		"conflicts": len(r.conflicts),
 		// The one durable, automatable fact about an import; the SHA is
 		// redundant once the next reconcile moves last_sha onto it.
 		"last_import_utc": nullable(r.lastImportUTC),
@@ -755,6 +775,13 @@ func (r *Reconciler) Status() Status {
 	copy(addonUpdates, r.addonUpdates)
 	blocked := make([]BlockedItem, len(r.blocked))
 	copy(blocked, r.blocked)
+	conflicts := make([]string, len(r.conflicts))
+	copy(conflicts, r.conflicts)
+	lastConflictBranch := r.lastConflictBranch
+	lastConflictUTC := r.lastConflictUTC
+	lastCaptureSHA := r.lastCaptureSHA
+	lastCaptureUTC := r.lastCaptureUTC
+	captureFailing := r.captureFailed
 	managed := r.managed.clone()
 	hacsRestartPending := make([]string, len(r.hacsRestartPending))
 	copy(hacsRestartPending, r.hacsRestartPending)
@@ -786,31 +813,38 @@ func (r *Reconciler) Status() Status {
 	}
 
 	return Status{
-		State:              state,
-		Busy:               r.busy(),
-		Configured:         r.opts.RepoURL != "",
-		DryRun:             r.opts.DryRun,
-		RepoURL:            r.opts.RepoURL,
-		Branch:             r.opts.Branch,
-		IntervalMinutes:    r.opts.IntervalMinutes,
-		LastSHA:            lastSHA,
-		LastSHAShort:       lastSHAShort,
-		LastApplyUTC:       lastApplyUTC,
-		LastStashDir:       lastStashDir,
-		RollbackPreview:    lastStashSummary,
-		LastError:          lastError,
-		LastBackupError:    lastBackupError,
-		Warnings:           lastWarnings,
-		CommitBackEnabled:  r.opts.CommitBack,
-		LastDriftBranch:    lastDriftBranch,
-		ImportEnabled:      r.opts.AllowImport,
-		LastImportSHA:      lastImportSHA,
-		LastImportSHAShort: history.ShortSHA(lastImportSHA),
-		LastImportUTC:      lastImportUTC,
-		LastImportError:    lastImportError,
-		ImportPreview:      lastImportPreview,
-		AutoUpdateEnabled:  len(r.opts.AutoUpdateAddons) > 0,
-		AddonUpdates:       addonUpdates,
+		State:               state,
+		Busy:                r.busy(),
+		Configured:          r.opts.RepoURL != "",
+		DryRun:              r.opts.DryRun,
+		RepoURL:             r.opts.RepoURL,
+		Branch:              r.opts.Branch,
+		IntervalMinutes:     r.opts.IntervalMinutes,
+		LastSHA:             lastSHA,
+		LastSHAShort:        lastSHAShort,
+		LastApplyUTC:        lastApplyUTC,
+		LastStashDir:        lastStashDir,
+		RollbackPreview:     lastStashSummary,
+		LastError:           lastError,
+		LastBackupError:     lastBackupError,
+		Warnings:            lastWarnings,
+		CommitBackEnabled:   r.opts.CommitBack,
+		LastDriftBranch:     lastDriftBranch,
+		ImportEnabled:       r.opts.AllowImport,
+		CaptureEnabled:      r.opts.CaptureLiveChanges,
+		LastCaptureUTC:      lastCaptureUTC,
+		LastCaptureSHA:      lastCaptureSHA,
+		LastCaptureSHAShort: history.ShortSHA(lastCaptureSHA),
+		Conflicts:           conflicts,
+		ConflictBranch:      lastConflictBranch,
+		ConflictUTC:         lastConflictUTC,
+		LastImportSHA:       lastImportSHA,
+		LastImportSHAShort:  history.ShortSHA(lastImportSHA),
+		LastImportUTC:       lastImportUTC,
+		LastImportError:     lastImportError,
+		ImportPreview:       lastImportPreview,
+		AutoUpdateEnabled:   len(r.opts.AutoUpdateAddons) > 0,
+		AddonUpdates:        addonUpdates,
 		// Outside the locked block, beside Busy: both are lock inspectors,
 		// and TryLock-ing another mutex under r.mu would order the two.
 		AddonCheckRunning: r.checkRunning(),
@@ -834,6 +868,7 @@ func (r *Reconciler) Status() Status {
 
 		HistoryWriteFailing:        historyWriteFailing,
 		VersionRecordFailing:       versionRecordFailing,
+		CaptureFailing:             captureFailing,
 		ImportRecordFailing:        importRecordFailing,
 		HacsUnavailable:            hacsUnavailable,
 		AddonCheckFailing:          addonCheckFailing,
@@ -1082,9 +1117,10 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	}
 
 	state := r.applier.StateLoad()
-	// Nothing in this cycle writes state.json, so the mirrors refresh here
-	// - from the copy this cycle plans against - rather than at the end,
-	// where a failCycle return would skip them.
+	// Refreshed here - from the copy this cycle plans against - rather than
+	// at the end, where a failCycle return would skip them. The capture
+	// phase is the one thing in this cycle that DOES write state.json, and
+	// it refreshes them again from what it wrote.
 	r.refreshStateMirrors(state)
 	changes, skippedContainment, decryptFailures := r.differ.Compute(r.git.Workdir(), ConfigRoot, tracked, state.Manifest)
 	if len(decryptFailures) > 0 {
@@ -1176,9 +1212,22 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 		registryOps = append(registryOps, planned...)
 	}
 
+	// The capture phase, after every layer that can failCycle and before the
+	// plan is published. After, so a cycle cannot push a capture and then
+	// discard the plan describing it; before, so what lands in r.pending is
+	// already the apply's plan by construction - a captured or conflicted
+	// path was never published, and ApplyNow's snapshot needs no filter of
+	// its own. With capture_live_changes off this returns changes unchanged.
+	changes, unresolved := r.captureLiveChanges(ctx, sha, changes, state)
+
 	// Decided once and used for the state, the event line and the history
-	// row: recomputing it is three chances to disagree with itself.
-	drifted := len(changes) > 0 || len(registryOps) > 0
+	// row: recomputing it is three chances to disagree with itself. Computed
+	// from the RESIDUAL, so a cycle that captured everything reports in sync
+	// rather than drift it has already resolved - but counting what capture
+	// held back without resolving (a conflict, a defer, a push that failed),
+	// or a failed capture would leave the page saying "in sync" over an edit
+	// still waiting to be saved.
+	drifted := len(changes) > 0 || len(registryOps) > 0 || unresolved > 0
 
 	r.mu.Lock()
 	r.pending = changes
@@ -1214,8 +1263,14 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	outcome := history.OutcomeInSync
 	if drifted {
 		outcome = history.OutcomeDrift
+		held := ""
+		if unresolved > 0 {
+			// Named separately from the pending counts, which are the APPLY
+			// plan: these are paths capture will not let an apply touch.
+			held = fmt.Sprintf(", %d held back by capture", unresolved)
+		}
 		r.logEvent(fmt.Sprintf(
-			"drift detected: %d file change(s), %d registry change(s) pending", len(changes), len(registryOps)))
+			"drift detected: %d file change(s), %d registry change(s) pending%s", len(changes), len(registryOps), held))
 	} else {
 		r.logEvent("in sync: no changes detected")
 	}
@@ -1231,7 +1286,13 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	// Automatic half of commit_back: only under dry_run, since a real apply
 	// already writes the drift live, and only on file drift. See
 	// maybeAutoCommitDriftBack for the once-per-drift-set dedup.
-	if r.opts.CommitBack && r.opts.DryRun && len(changes) > 0 {
+	//
+	// Superseded by capture_live_changes, which has just written the same
+	// live content to the tracked branch: both firing would push a throwaway
+	// branch proposing a change that is already merged. The manual Commit
+	// Drift Back button is untouched - an explicit request to park a set for
+	// review is still worth having.
+	if r.opts.CommitBack && r.opts.DryRun && !r.opts.CaptureLiveChanges && len(changes) > 0 {
 		r.maybeAutoCommitDriftBack(ctx, changes)
 	}
 
@@ -1547,6 +1608,14 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 	}
 	defer r.opLock.Unlock()
 
+	return r.applyNow(ctx)
+}
+
+// applyNow is ApplyNow's body without the lock or the dry_run refusal, for
+// ReconcileNow/reconcileNow's reason: runCycle composes a cycle's capture
+// and its apply under ONE opLock hold, and an inner method that took the
+// lock again would deadlock. Callers hold opLock.
+func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// Read under opLock, not just mu: no reconcile can be running, so this
 	// cannot catch a cycle halfway through deciding its outcome.
 	r.mu.Lock()
@@ -1572,7 +1641,18 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 	defer run.abandon()
 
 	r.mu.Lock()
-	pending := append([]differ.Change(nil), r.pending...)
+	// Second line of defence for the conflict verdict: the capture phase
+	// already kept these out of r.pending, and this makes a conflicted path
+	// unapplyable even from a plan built before it was one - a hand-seeded
+	// status, a future caller - the same posture stageDrift takes by
+	// re-checking every path whatever its caller already filtered.
+	//
+	// From the mirror rather than a StateLoad: it is refreshed from every
+	// write of the record and hydrated at startup, so it is as current as
+	// the file, and a second load here would re-run guardChangePath -
+	// filepath.EvalSymlinks per manifest entry - over ~191 paths for a
+	// result that is empty on every install with the option off.
+	pending := dropConflicted(append([]differ.Change(nil), r.pending...), r.conflicts)
 	registryOps := append([]registries.RegOp(nil), r.pendingRegistry...)
 	addonRestartOnChange := r.pendingAddonRestartOnChange
 	hacsRestartPending := r.pendingHacsRestartPending
@@ -1634,6 +1714,12 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 	state.LastGoodSHA = r.git.CurrentSHA(ctx)
 	state.Manifest = sortedStringKeys(manifest)
 	state.LastApplyUTC = utcNowISO()
+	// A path this apply just wrote is the repository's again, so LastGoodSHA
+	// describes it better than an older capture commit does. Deliberately
+	// NOT the reverse - LastGoodSHA is never set to a capture commit, since
+	// that would claim the agent wrote the whole of that tree live when a
+	// conflicted or deferred path in the same cycle was written nowhere.
+	dropCapturedPaths(&state, changePaths(pending))
 
 	// The one piece of state a PLAN can change (see
 	// pendingHacsRestartPending): this is where the cycle's observation of
@@ -2412,7 +2498,26 @@ func (r *Reconciler) tick(ctx context.Context) {
 		}
 	}()
 
-	changes := r.ReconcileNow(ctx)
+	r.runCycle(ctx)
+}
+
+// runCycle is the unattended loop's whole cycle under ONE opLock hold:
+// reconcile, which captures at its tail, then apply. One hold rather than
+// tick's former two, because with opts.CaptureLiveChanges on those are two
+// halves of a single decision - between them the agent has concluded that a
+// path's live copy is the truth, pushed it, and taken it out of the plan,
+// and an operation slipping into that gap would act on half of it. The same
+// composition ImportLive makes over its import and the reconcile after it.
+//
+// The refusal is silent, as ReconcileNow's is: the caller is a timer, not
+// somebody waiting on a page.
+func (r *Reconciler) runCycle(ctx context.Context) {
+	if !r.opLock.TryLock() {
+		return
+	}
+	defer r.opLock.Unlock()
+
+	changes := r.reconcileNow(ctx)
 
 	r.mu.Lock()
 	pendingRegistry := append([]registries.RegOp(nil), r.pendingRegistry...)
@@ -2433,9 +2538,9 @@ func (r *Reconciler) tick(ctx context.Context) {
 		// Detached like web.opContext: RunLoop's ctx cancels on SIGTERM, and
 		// a restart mid-apply must not make applier.Apply read a validated
 		// change as a failed check_config, nor cut short regapply's redial.
-		// ReconcileNow keeps the cancelable ctx - only the apply, which
-		// mutates live state, needs a clean stopping point.
-		r.ApplyNow(context.WithoutCancel(ctx), false)
+		// The reconcile above keeps the cancelable ctx - only the apply,
+		// which mutates live state, needs a clean stopping point.
+		r.applyNow(context.WithoutCancel(ctx))
 	}
 }
 

@@ -5,10 +5,11 @@ repository: dry-run diff, validate-then-apply, and rollback on
 failure. Optionally also reconciles, from a `gitops/` directory in the
 same repository: floors, areas, labels, and helper entities; entity
 customizations; Lovelace dashboards; other apps' options; and
-config-flow integrations. Can also push detected live drift back to a
-review branch (`commit_back`), seed a fresh repository from an existing
-config (`allow_import`), and be triggered on demand over a secret-gated
-webhook, instead of only ever polling on an interval.
+config-flow integrations. Can also sync live edits back to the tracked
+branch (`capture_live_changes`) or to a review branch (`commit_back`),
+seed a fresh repository from an existing config (`allow_import`), and be
+triggered on demand over a secret-gated webhook, instead of only ever
+polling on an interval.
 
 With an age key configured (`age_key`), secret values are encrypted with
 SOPS before they reach git and decrypted again on apply, so `secrets.yaml`

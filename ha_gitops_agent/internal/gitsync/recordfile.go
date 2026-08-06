@@ -23,11 +23,6 @@ import (
 // a leftover from a crashed run is replaced rather than colliding.
 const recordBranch = "gitops/record"
 
-// errRecordRejected reports the one push failure RecordFile handles itself:
-// the tracked branch moved between this call's fetch and its push. It never
-// leaves this file - it only decides whether the retry is worth making.
-var errRecordRejected = errors.New("push rejected: the tracked branch moved on the remote")
-
 // RecordFile commits content to relPath on the TRACKED branch and pushes
 // it, reporting whether it had to commit anything. A false with a nil error
 // is the ordinary outcome: the blob already matches, so nothing was
@@ -68,7 +63,7 @@ func (g *GitSync) RecordFile(ctx context.Context, relPath string, content []byte
 		return false, err
 	}
 	committed, err := g.recordFileAt(ctx, tip, relPath, content, message)
-	if !errors.Is(err, errRecordRejected) {
+	if !errors.Is(err, errTrackedPushRejected) {
 		return committed, err
 	}
 
@@ -82,7 +77,7 @@ func (g *GitSync) RecordFile(ctx context.Context, relPath string, content []byte
 		return false, err
 	}
 	committed, err = g.recordFileAt(ctx, newTip, relPath, content, message)
-	if errors.Is(err, errRecordRejected) {
+	if errors.Is(err, errTrackedPushRejected) {
 		return false, fmt.Errorf(
 			"gitsync: record: %s moved on the remote twice while recording %s - giving up rather than racing it again",
 			g.Opts.Branch, relPath)
@@ -92,7 +87,7 @@ func (g *GitSync) RecordFile(ctx context.Context, relPath string, content []byte
 
 // recordFileAt is one attempt at recording content on the commit tip.
 // Returns (false, nil) when the tip already holds these bytes, and an error
-// wrapping errRecordRejected when the push lost a race.
+// wrapping errTrackedPushRejected when the push lost a race.
 func (g *GitSync) recordFileAt(ctx context.Context, tip, relPath string, content []byte, message string) (bool, error) {
 	same, err := g.blobMatches(ctx, tip, relPath, content)
 	if err != nil {
@@ -102,21 +97,11 @@ func (g *GitSync) recordFileAt(ctx context.Context, tip, relPath string, content
 		return false, nil
 	}
 
-	// Where to put the worktree back: normally wherever it already was,
-	// which is not necessarily the tip just fetched. A workdir with nothing
-	// checked out has nowhere to go back to, so it lands on that tip.
-	restoreSHA := g.CurrentSHA(ctx)
-	if restoreSHA == "" {
-		restoreSHA = tip
-	}
-
-	if _, err := g.runGit(ctx, []string{"checkout", "-B", recordBranch, tip}, "", nil); err != nil {
+	restore, err := g.enterThrowawayBranch(ctx, recordBranch, tip)
+	if err != nil {
 		return false, err
 	}
-	defer g.restoreDetachedCheckout(ctx, restoreSHA, recordBranch)
-	if _, err := g.runGit(ctx, []string{"clean", "-fdx"}, "", nil); err != nil {
-		return false, err
-	}
+	defer restore()
 
 	full, err := guardDriftPath(g.Workdir, relPath)
 	if err != nil {
@@ -132,16 +117,12 @@ func (g *GitSync) recordFileAt(ctx context.Context, tip, relPath string, content
 		return false, err
 	}
 
-	commitEnv := []string{
-		"GIT_AUTHOR_NAME=" + commitAuthorName, "GIT_AUTHOR_EMAIL=" + commitAuthorEmail,
-		"GIT_COMMITTER_NAME=" + commitAuthorName, "GIT_COMMITTER_EMAIL=" + commitAuthorEmail,
-	}
 	// "--only -- <path>" commits that path and nothing else, whatever is in
 	// the index. Not belt-and-braces: this can be reached with a dirty
 	// index, and a bare commit would carry the leftover onto the tracked
 	// branch. Enforced here rather than at the "git add" above, so the
 	// one-path guarantee is true by construction.
-	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", message, "--only", "--", relPath}, "", commitEnv); err != nil {
+	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", message, "--only", "--", relPath}, "", commitIdentityEnv()); err != nil {
 		if isNothingToCommitError(err) {
 			// blobMatches said the tip differs, yet the staged content does
 			// not - a mode change, say. Reporting a commit that did not
@@ -154,7 +135,7 @@ func (g *GitSync) recordFileAt(ctx context.Context, tip, relPath string, content
 	refspec := recordBranch + ":refs/heads/" + g.Opts.Branch
 	if _, err := g.runGit(ctx, []string{"push", g.Opts.RepoURL, refspec}, "", g.credentialEnv()); err != nil {
 		if isNonFastForwardError(err) {
-			return false, fmt.Errorf("gitsync: record: %w: %s", errRecordRejected, g.Opts.Branch)
+			return false, fmt.Errorf("gitsync: record: %w: %s", errTrackedPushRejected, g.Opts.Branch)
 		}
 		return false, err
 	}

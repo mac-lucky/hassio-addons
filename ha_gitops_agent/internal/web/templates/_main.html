@@ -38,6 +38,10 @@
   <div class="chips">
     {{if .Status.HistoryWriteFailing}}<span class="chip">history writes failing</span>{{end}}
     {{if .Status.VersionRecordFailing}}<span class="chip">version record failing</span>{{end}}
+    {{/* The one chip with a consequence: the paths it could not save are
+         held out of the apply, so live edits survive but repository
+         changes to those files are not arriving. */}}
+    {{if .Status.CaptureFailing}}<span class="chip">capture failing: live edits not saved to git</span>{{end}}
     {{if .Status.ImportRecordFailing}}<span class="chip">import record not saved</span>{{end}}
     {{if .Status.AddonUpdateSelfSlugFailing}}<span class="chip">update check cannot resolve own slug</span>{{end}}
     {{/* The one chip raised by a reconcile layer: planHacsLayer skips
@@ -154,6 +158,10 @@
 <p class="meta-line">Last import: <span title="{{.Status.LastImportUTC}}" data-utc="{{.Status.LastImportUTC}}" data-utc-zone>{{humanTime .Status.LastImportUTC}} UTC</span> onto <code>{{.Status.Branch}}</code>{{if .Status.LastImportSHAShort}} at <code>{{.Status.LastImportSHAShort}}</code>{{end}} - review that commit in your repository.</p>
 {{end}}
 
+{{if .Status.LastCaptureUTC}}
+<p class="meta-line">Last capture: <span title="{{.Status.LastCaptureUTC}}" data-utc="{{.Status.LastCaptureUTC}}" data-utc-zone>{{humanTime .Status.LastCaptureUTC}} UTC</span> onto <code>{{.Status.Branch}}</code>{{if .Status.LastCaptureSHAShort}} at <code>{{.Status.LastCaptureSHAShort}}</code>{{end}} - live changes made here, saved to your repository.</p>
+{{end}}
+
 {{if .Status.LastImportError}}
 {{template "callout" (callout "error" "Last import error" .Status.LastImportError "")}}
 {{end}}
@@ -219,6 +227,32 @@
 this add-on's own per-file copies under /data/backup/. What did not happen
 is the separate Supervisor backup the agent asks for before every apply, so
 there is no restore point outside this add-on for that change.`)}}
+{{end}}
+
+{{/* Paths the three-way classifier refuses to sync in either direction.
+     Its own card rather than a drift row, because nothing the agent does on
+     its own clears these: the repository and the live config both moved, and
+     only a person can say which was meant. */}}
+{{if .Status.Conflicts}}
+<section class="card">
+  <h2>Needs your decision <span class="count">{{len .Status.Conflicts}}</span></h2>
+  <p class="meta-line">These files changed both in the repository and here on this machine since the agent last wrote them, so it will not overwrite either side. The live copy of each is preserved on the branch below. Resolve one by making the two sides agree - merge the branch, or edit one side to match - and it clears itself on the next check.</p>
+  <div class="changes">
+    {{range .Status.Conflicts}}
+    <div class="change change-error">
+      <div class="change-summary">
+        <span class="badge badge-error">conflict</span>
+        <span class="path">{{.}}</span>
+      </div>
+    </div>
+    {{end}}
+  </div>
+  {{if .Status.ConflictBranch}}
+  <p class="meta-line">Live copies preserved on <code>{{.Status.ConflictBranch}}</code>{{if .Status.ConflictUTC}} at {{.Status.ConflictUTC}}{{end}}.</p>
+  {{else}}
+  <p class="meta-line">The live copies could not be pushed to a branch, but nothing was overwritten: both sides are still where they were.</p>
+  {{end}}
+</section>
 {{end}}
 
 {{/* The failure memory in /data/state.json - the only place a record whose

@@ -325,6 +325,15 @@ func (g *GitSync) encryptedCopyIsCurrent(ctx context.Context, configRoot, p stri
 	return sopscrypt.SemanticallyEqual(plaintext, live), nil
 }
 
+// errTrackedPushRejected reports the one push failure the tracked-branch
+// writers handle themselves: opts.Branch moved between a call's fetch and
+// its push. Shared by RecordFile and CaptureFiles, which both retry once on
+// a freshly fetched tip; it never leaves this package, since it only decides
+// whether that retry is worth making. Import deliberately does not use it -
+// re-scanning a whole config tree to race again is not worth it - and
+// reports ErrImportRejected to the user instead.
+var errTrackedPushRejected = errors.New("push rejected: the tracked branch moved on the remote")
+
 // isNonFastForwardError matches a push the remote refused as not a
 // fast-forward. Text matching, safe because gitEnv pins LC_ALL=C.
 func isNonFastForwardError(err error) bool {

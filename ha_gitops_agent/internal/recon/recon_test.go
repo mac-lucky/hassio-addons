@@ -106,6 +106,38 @@ type fakeGit struct {
 	// fake keeps RecordFile's contract: the same bytes twice commit once.
 	recorded map[string][]byte
 
+	captureResult gitsync.CaptureResult
+	captureErr    error
+	captureCalls  []captureCall
+
+	parkBranch string
+	parkErr    error
+	parkCalls  []captureCall
+
+	// commitReachable answers CommitReachable per sha; nil means every
+	// non-empty sha resolves, which is what a repository nobody rewrote
+	// looks like.
+	commitReachable map[string]bool
+	// ancestorOf answers IsAncestor, keyed "ancestor->descendant". The zero
+	// value says no for every pair, which leaves LastGoodSHA the fallback
+	// base unless a test deliberately puts an import after it.
+	ancestorOf map[string]bool
+	// changedBetween is what ChangedBetween reports for any pair of
+	// commits; nil means nothing in the repository moved, so every drifting
+	// path is the live side's. changedBetweenByBase overrides it per base,
+	// which is what lets a test say that a path moved since LastGoodSHA but
+	// not since the agent's own capture commit - the whole point of the
+	// merge-base override.
+	changedBetween       []string
+	changedBetweenByBase map[string][]string
+	changedBetweenErr    error
+	// liveFacts is LiveFactsAt's answer per path. An absent path answers
+	// "tracked by the base, and live does not match it" - which, paired
+	// with the changedBetween default above, classifies as a capture, the
+	// case most tests here are about.
+	liveFacts    map[string]gitsync.LiveFacts
+	liveFactsErr map[string]error
+
 	// workdir is what Workdir() returns: "/data/repo" for tests that only
 	// assert the path, a real temp dir for those driving a real layer.
 	workdir string
@@ -115,6 +147,12 @@ type recordFileCall struct {
 	relPath string
 	content []byte
 	message string
+}
+
+type captureCall struct {
+	files      []gitsync.DriftFile
+	configRoot string
+	baseSHA    string
 }
 
 func newFakeGit() *fakeGit {
@@ -232,6 +270,84 @@ func (f *fakeGit) RecordFile(_ context.Context, relPath string, content []byte, 
 	}
 	f.recorded[relPath] = append([]byte(nil), content...)
 	return true, nil
+}
+
+func (f *fakeGit) CaptureFiles(_ context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error) {
+	f.captureCalls = append(f.captureCalls, captureCall{
+		files: append([]gitsync.DriftFile(nil), files...), configRoot: configRoot,
+	})
+	if f.captureErr != nil {
+		return gitsync.CaptureResult{}, f.captureErr
+	}
+	result := f.captureResult
+	if result.CommitSHA == "" && result.Paths == nil {
+		// Default: everything asked for lands, on a commit named after how
+		// many captures have happened, so two cycles get two distinct bases.
+		result = gitsync.CaptureResult{
+			CommitSHA: fmt.Sprintf("capture%d", len(f.captureCalls)),
+			BaseSHA:   f.sha,
+		}
+		for _, file := range files {
+			result.Paths = append(result.Paths, file.Path)
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeGit) ParkConflicts(
+	_ context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, _ time.Time,
+) (string, error) {
+	f.parkCalls = append(f.parkCalls, captureCall{
+		files: append([]gitsync.DriftFile(nil), files...), configRoot: configRoot, baseSHA: baseSHA,
+	})
+	if f.parkErr != nil {
+		return "", f.parkErr
+	}
+	if f.parkBranch == "" {
+		return "gitops/conflict-20260806T120000Z", nil
+	}
+	return f.parkBranch, nil
+}
+
+func (f *fakeGit) CommitReachable(_ context.Context, sha string) (bool, error) {
+	if sha == "" {
+		return false, nil
+	}
+	if f.commitReachable == nil {
+		return true, nil
+	}
+	return f.commitReachable[sha], nil
+}
+
+func (f *fakeGit) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {
+	if ancestor == "" || descendant == "" {
+		return false, nil
+	}
+	return f.ancestorOf[ancestor+"->"+descendant], nil
+}
+
+func (f *fakeGit) ChangedBetween(_ context.Context, base, tip string) ([]string, error) {
+	if f.changedBetweenErr != nil {
+		return nil, f.changedBetweenErr
+	}
+	if base == tip {
+		return nil, nil
+	}
+	if moved, ok := f.changedBetweenByBase[base]; ok {
+		return moved, nil
+	}
+	return f.changedBetween, nil
+}
+
+func (f *fakeGit) LiveFactsAt(_ context.Context, _, _, path string) (gitsync.LiveFacts, error) {
+	if err := f.liveFactsErr[path]; err != nil {
+		return gitsync.LiveFacts{}, err
+	}
+	answer, ok := f.liveFacts[path]
+	if !ok {
+		return gitsync.LiveFacts{BaseTracks: true}, nil
+	}
+	return answer, nil
 }
 
 var _ Git = (*fakeGit)(nil)

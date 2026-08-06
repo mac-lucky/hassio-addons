@@ -23,11 +23,13 @@ e.g. `https://github.com/you/ha-config.git`. Required.
 ### `branch`
 
 Branch to track. Default `main`. The agent only ever fast-forwards to
-the tip of this branch, and never force-updates your repo. Exactly one
-operation writes to this branch: the manual Import button, and only
-while `allow_import` is on - that push is fast-forward only and is
-never forced, so a branch that moved on the remote is never clobbered.
-See "Importing an existing config" below.
+the tip of this branch, and never force-updates your repo. Three
+operations write to it, each behind its own option and all off by
+default: the manual Import button (`allow_import`), the add-on version
+record (`track_addon_versions`), and capturing live edits
+(`capture_live_changes`). Every one of those pushes is fast-forward only
+and never forced, so a branch that moved on the remote is never
+clobbered - the push is refused instead, and the agent says so.
 
 ### `git_username`
 
@@ -204,6 +206,38 @@ needs the other.
 `git_token` needs push rights, the way it does for an import. Nothing
 else about the agent changes: the file is never read back, never applied,
 and never copied into `/homeassistant`.
+
+### `capture_live_changes`
+
+`false` by default. Turn it on and the file layer becomes two-way: an
+edit you make here, in the Home Assistant UI or over SSH, is committed
+back to the tracked branch instead of being overwritten by the next
+apply. See "Capturing live changes" below for the whole mechanism, the
+conflict rules and the three things it does not cover.
+
+`git_token` needs push rights on the branch in `branch`. A protected
+branch makes the push fail every cycle - the agent reports it and holds
+those files back from the apply rather than overwriting them, so nothing
+is lost, but nothing syncs either until the push can land.
+
+`dry_run` does not gate it, the line `allow_import`, `commit_back` and
+`track_addon_versions` already draw: that option governs writes to Home
+Assistant, and this writes to the repository. With `dry_run` on it is
+arguably the safest mode the agent has - live edits flow into git and
+nothing ever flows back.
+
+**It needs a merge base to work, and one run of Import or one apply is
+what creates one.** Every decision here is made against the commit the
+agent last knew the repository and `/homeassistant` to agree on, so until
+one of those two has happened there is nothing to compare against and the
+agent stays one-way. That matters most under `dry_run`, where no apply
+ever runs: turn capture on there without importing first and it will sit
+at "in sync" forever without capturing anything. Run **Preview Import**,
+then **Import**, and the next cycle starts capturing.
+
+It supersedes the automatic half of `commit_back`, which would otherwise
+push a throwaway branch proposing changes this has already merged. The
+manual **Commit Back** button is unaffected.
 
 ### `reconcile`
 
@@ -1213,6 +1247,12 @@ There are two ways to trigger it:
   shown whenever `commit_back` is enabled and there is pending file
   drift - regardless of `dry_run`.
 
+`capture_live_changes` supersedes the automatic trigger. Both would fire
+on the same drift, one pushing a throwaway branch proposing exactly what
+the other has already committed to the tracked branch. The button stays:
+parking a set for review on purpose is still worth having. See "Capturing
+live changes" below.
+
 Either way, the agent creates a new branch named
 `gitops/drift-<UTC timestamp>` from the tip it last fetched, writes the
 CURRENT live content of every drifted file into that branch (a file
@@ -1257,6 +1297,93 @@ retry) surfaces as a normal error in the recent-activity log; it does
 not affect the sync state shown by the state pill, since a commit-back
 failure has no bearing on whether your live config still matches the
 repository.
+
+## Capturing live changes
+
+Enabled by `capture_live_changes` (default `false`). Without it the file
+layer is one-way: the repository is the truth, and an edit you make on
+this machine is drift for the next apply to overwrite. With it on, every
+drifting file is asked a second question - which SIDE moved - and routed
+accordingly.
+
+### How it decides
+
+The agent already knows the repository and the live config disagree; what
+it needs is a third reference point. That is the commit it last wrote
+live, recorded as `last_good_sha`, or the commit an import made when no
+apply has ever run. Reading a file out of that commit gives exactly what
+the agent put on disk, so:
+
+| Since that commit | What happens |
+|---|---|
+| only the repository changed | applied here, as always |
+| only this machine changed | committed to the tracked branch |
+| both changed | refused in both directions |
+| neither, but they differ | left for the next check |
+
+The capture is one commit per cycle, message `capture: sync live home
+assistant changes`, pushed to `branch` fast-forward only. It is never
+forced. If someone pushed between the agent's fetch and its push, it
+re-reads your live files and tries once more on the new tip; if it loses
+again it gives up until the next cycle, and their commit survives either
+way.
+
+### Conflicts
+
+A file that changed in both places is not something the agent will guess
+at. It is skipped entirely - not applied, not captured - its live copy is
+pushed to a `gitops/conflict-<UTC timestamp>` branch so nothing is
+stranded, and it appears under **Needs your decision** in the web UI.
+Every other file in the same cycle proceeds normally.
+
+Resolve one by making the two sides agree: merge the conflict branch,
+push the version you want, or edit this machine to match. The next check
+notices they agree and clears it. There is no button - clearing a
+conflict without resolving it would just move the problem.
+
+### Why this cannot race
+
+A captured file is removed from the apply plan before that plan is
+published, so there is no moment where an edit has been decided as yours
+and an apply is about to overwrite it. The unattended cycle additionally
+holds one lock across both halves, but it is the plan filtering, not the
+lock, that makes this true for the web and webhook paths as well. A
+capture that fails to push holds those files back too, so a bad token
+means "not saved yet" rather than "saved nowhere and then overwritten".
+
+Against someone else pushing to the branch, the fast-forward-only push is
+the guarantee - the same rule imports and add-on version records already
+follow. Against Home Assistant rewriting a file mid-capture, the commit
+re-reads live at the moment it stages, so the repository ends up holding
+whatever was actually there.
+
+### What it does not cover
+
+Four limits, none of them incidental:
+
+- **New files are not captured.** The agent compares what the repository
+  tracks against what is live. A file you create here that git has never
+  seen is invisible to that comparison in both directions. Import is
+  still the way to bring one in.
+- **`.storage/` is not files.** UI-created helpers, most dashboards and
+  the entity registry live there, and it is excluded from syncing
+  entirely. Those belong to the `reconcile.*` layers, which stay one-way.
+  What this DOES cover is the set Home Assistant writes as real files:
+  `automations.yaml`, `scripts.yaml`, `scenes.yaml`, `configuration.yaml`,
+  `packages/`, ESPHome configs.
+- **`gitops/` is never captured.** The manifests are inputs to the agent,
+  not config it syncs.
+- **Only a file the agent itself put here can be captured as deleted.** A
+  repository holds things that are not meant to live in
+  `/homeassistant` - `README.md`, `LICENSE`, `.github/` - and to the
+  comparison those look exactly like a file you deleted. Deleting one from
+  the branch on that basis would be wrong, so the agent requires that its
+  own last apply wrote the file before it will remove it from git.
+
+Encrypted files are handled the same as everywhere else: a captured
+`secrets.yaml` is encrypted before it is committed, and the comparison
+looks at what a file MEANS rather than its bytes, so SOPS re-encrypting
+identical content is not mistaken for an edit.
 
 ## Importing an existing config
 
@@ -2345,11 +2472,12 @@ it never applies. Nothing reaches your Home Assistant configuration
 through it, paused or not.
 
 One thing pause does **not** cover: **a repository write from a check
-that something asked for.** With `commit_back` (plus `dry_run`) or
-`track_addon_versions` on, any reconcile that still runs while paused -
-one you pressed, or one a webhook triggered - can push a drift branch or
-an add-on version commit at the end of it. Those go to the repository.
-Nothing reaches your Home Assistant configuration.
+that something asked for.** With `commit_back` (plus `dry_run`),
+`track_addon_versions` or `capture_live_changes` on, any reconcile that
+still runs while paused - one you pressed, or one a webhook triggered -
+can push a drift branch, an add-on version commit or a capture at the end
+of it. Those go to the repository. Nothing reaches your Home Assistant
+configuration.
 
 **Pause survives a restart.** The flag lives in the add-on's own data
 volume, at `/data/paused` - present means paused - so an add-on restart,

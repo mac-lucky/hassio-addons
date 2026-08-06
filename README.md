@@ -30,8 +30,9 @@ cluster in sync.
   dashboards, other add-ons' options, config-flow integrations and HACS installs
 - Secret values encrypted with SOPS and age, so `secrets.yaml` can live in the
   repository without living there in the clear
-- Pushes live drift back to a review branch, seeds a repository from an existing
-  config, and can be triggered by webhook instead of only polling
+- Syncs live edits back to the tracked branch or to a review branch, seeds a
+  repository from an existing config, and can be triggered by webhook instead
+  of only polling
 
 ## Installation
 
