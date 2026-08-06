@@ -54,3 +54,24 @@ without a real repository or a real Home Assistant behind it.
 
 The add-on image builds with a multi-stage `Dockerfile`, so installing it
 needs no local Go toolchain at all.
+
+### Testing a build on a real box
+
+`config.yaml` sets `image:`, so Supervisor pulls the prebuilt image from
+GHCR rather than building on the box - which is what you want for an
+install, and a trap for local development. Copying the source into
+`/addons` and pressing Rebuild still builds `local/<arch>-addon-...`, but
+Supervisor then tries to start `ghcr.io/...` and the add-on fails with
+`Image ... does not exist`.
+
+Two ways round it, on the box:
+
+```sh
+# Test what CI published (what a user would install)
+docker pull ghcr.io/mac-lucky/hassio-addon-ha-gitops-agent-amd64:<version>
+
+# Test an uncommitted local build: rebuild, then give it the name
+# Supervisor is going to look for
+docker tag local/amd64-addon-ha_gitops_agent:<version> \
+  ghcr.io/mac-lucky/hassio-addon-ha-gitops-agent-amd64:<version>
+```
