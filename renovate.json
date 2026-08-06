@@ -19,6 +19,27 @@
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "vectordotdev/vector",
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^ha_gitops_agent/Dockerfile$/",
+        "/^ha_gitops_agent/build\\.yaml$/"
+      ],
+      "matchStrings": [
+        "ARG GO_VERSION=(?<currentValue>[0-9.]+)",
+        "GO_VERSION: \"(?<currentValue>[0-9.]+)\""
+      ],
+      "datasourceTemplate": "golang-version",
+      "depNameTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci-gitops-agent\\.yaml$/"],
+      "matchStrings": ["GITLEAKS_VERSION: \"(?<currentValue>[0-9.]+)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "gitleaks/gitleaks",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     }
   ]
 }

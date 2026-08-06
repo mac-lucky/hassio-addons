@@ -1,0 +1,65 @@
+configuration:
+  repo_url:
+    name: Repository URL
+    description: HTTPS URL of the git repository holding your Home Assistant config.
+  branch:
+    name: Branch
+    description: Branch to track. The agent only fast-forwards to its tip.
+  git_username:
+    name: Git username
+    description: Username for HTTPS authentication, if the repository is private.
+  git_token:
+    name: Git token
+    description: Personal access token or app password used for HTTPS authentication.
+  interval_minutes:
+    name: Sync interval (minutes)
+    description: How often to fetch the remote branch and reconcile, from 1 to 1440 minutes.
+  dry_run:
+    name: Dry run
+    description: When enabled, changes are only computed and shown, never applied automatically.
+  apply_after_pull:
+    name: Apply action
+    description: What to do after a successful apply - reload YAML config, restart Home Assistant, or do nothing.
+  commit_back:
+    name: Commit drift back
+    description: While dry run is also on, automatically pushes detected live drift to a new gitops/drift-<timestamp> branch as soon as it is found, with no button click - it never touches the tracked branch, but git_token must have push rights or every push will fail. With dry run off, this only enables the manual "commit drift back" button instead.
+  allow_import:
+    name: Allow import
+    description: Enables the "Preview Import" and "Import from Home Assistant" buttons, which copy every non-excluded file under /homeassistant into the repository and push them as a single commit directly onto the tracked branch. This is the only thing the add-on ever writes to that branch - it never runs on its own, only on a button click, the push is fast-forward only and is never forced, and it never deletes anything from the repository. Secrets, databases, backups, .storage and anything the repository's .gitignore matches are skipped. git_token needs push rights. Leave this off unless you are seeding a repository.
+  webhook_secret:
+    name: Webhook secret
+    description: Set to enable a POST /webhook trigger (on port 8098) that reconciles immediately, gated by this shared secret. Leave empty to disable.
+  age_key:
+    name: Age private key
+    description: An age private key (AGE-SECRET-KEY-1...) used to encrypt secret values with SOPS before they are pushed to git, and to decrypt them when applying. secrets.yaml is encrypted whole; in every other YAML, JSON or dotenv file only the values of secret-shaped keys are encrypted, so the file stays readable and reviewable. Generate one with age-keygen and keep a copy somewhere safe - if you lose it, the encrypted values cannot be recovered. Leave empty to keep secrets out of git entirely, which is the previous behavior.
+  auto_update_addons:
+    name: Auto-update apps
+    description: Slugs of installed apps this agent is allowed to update on its own whenever the Supervisor reports an update for them. Leave the list empty to disable auto-updates entirely; the agent never updates itself, whatever the list says. An app's slug is the last part of its page URL in Home Assistant, for example a0d7b954_esphome in /hassio/addon/a0d7b954_esphome/info.
+  track_addon_versions:
+    name: Track app versions
+    description: Records the version of every installed app in gitops/addon-versions.yaml on the tracked branch, and rewrites it whenever a version changes - however it changed, including a manual update from the Home Assistant UI. The file is machine-owned - edits made to it by hand are overwritten, nothing in it is ever installed from it, and it is never copied into your config. It is written once per reconcile interval at most, and git_token needs push rights. Works with dry run on, which only governs changes to Home Assistant itself.
+  reconcile:
+    name: Reconcile
+    description: Which categories of config this add-on manages.
+    fields:
+      yaml_files:
+        name: YAML files
+        description: Sync plain YAML config files such as automations, scripts, and packages.
+      registries:
+        name: Registries
+        description: Sync floors, areas, labels, and helper entities declared under gitops/ in the repository.
+      dashboards:
+        name: Dashboards
+        description: Sync Lovelace dashboards (metadata and view config) declared under gitops/ in the repository.
+      addon_options:
+        name: App options
+        description: Sync other apps' options declared under gitops/ in the repository.
+      integrations:
+        name: Integrations
+        description: Sync config-entry-based integrations declared under gitops/ in the repository.
+      subentries:
+        name: Integration subentries
+        description: Sync integration subentries (a calendar, a room, a zone added under an existing integration) declared under gitops/ in the repository.
+      hacs:
+        name: HACS integrations
+        description: Install the custom integrations declared in gitops/hacs.yaml through HACS, which has to be installed already. Only installs and adopts - removing an entry never uninstalls anything, and an installed integration is never updated or downgraded from here. A downloaded integration needs a Home Assistant restart before it can be set up. Anyone who can commit to the tracked branch can install code this way, so treat push access as equivalent to shell access.

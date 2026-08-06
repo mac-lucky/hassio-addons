@@ -1,0 +1,13 @@
+build_from:
+  amd64: ghcr.io/hassio-addons/base:17.2.5
+  aarch64: ghcr.io/hassio-addons/base:17.2.5
+
+args:
+  GO_VERSION: "1.26.5"
+
+labels:
+  org.opencontainers.image.title: GitOps Agent for Home Assistant
+  org.opencontainers.image.description: Keeps /config in sync with a git repository - dry-run diff, validate-then-apply, rollback
+  org.opencontainers.image.vendor: Mac Lucky
+  org.opencontainers.image.licenses: MIT
+  org.opencontainers.image.source: https://github.com/mac-lucky/hassio-addons

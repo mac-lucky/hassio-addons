@@ -1,0 +1,34 @@
+<section class="card firstrun">
+  <div class="firstrun-icon">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <line x1="6" y1="3" x2="6" y2="15"></line>
+      <circle cx="18" cy="6" r="3"></circle>
+      <circle cx="6" cy="18" r="3"></circle>
+      <path d="M18 9a9 9 0 0 1-9 9"></path>
+    </svg>
+  </div>
+  <h1>GitOps Agent</h1>
+  <p class="firstrun-sub">This add-on is not configured yet. Point it at a git
+  repository and it will keep your Home Assistant configuration in sync.</p>
+  <ol class="steps">
+    <li>
+      <span class="step-n">1</span>
+      <div>Open this add-on's <strong>Configuration</strong> tab and set
+      <code>repo_url</code> to the git URL of your Home Assistant config
+      repository.</div>
+    </li>
+    <li>
+      <span class="step-n">2</span>
+      <div>Optionally set <code>branch</code> (defaults to <code>main</code>)
+      and <code>git_username</code> / <code>git_token</code> for a private
+      repository.</div>
+    </li>
+    <li>
+      <span class="step-n">3</span>
+      <div>Save the configuration and restart the add-on.</div>
+    </li>
+  </ol>
+  <p class="firstrun-note">The agent starts in <strong>dry run</strong> mode:
+  once configured it only reports differences here until dry run is turned
+  off.</p>
+</section>

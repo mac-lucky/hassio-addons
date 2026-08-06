@@ -1,0 +1,94 @@
+#include <tunables/global>
+
+profile ha_gitops_agent flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Capabilities
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+
+  # The agent binary itself: statically linked (CGO_ENABLED=0), so it
+  # needs no shared-library grants of its own to run - just read+execute
+  # on the one file. `rix`, not just `ix`: this is the container's PID 1
+  # entrypoint, not a script an already-running confined process execs.
+  /ha-gitops-agent rix,
+
+  # Name resolution and the TLS trust store, needed for git clone over
+  # HTTPS (arbitrary remotes) and any HTTPS the agent's own HTTP client
+  # makes. abstractions/base does not cover these paths - the Supervisor's
+  # own profile grants /etc/resolv.conf explicitly for the same reason.
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/ssl/certs{,/**} r,
+  /etc/ssl/openssl.cnf r,
+
+  # Alpine builds libcurl with --enable-ares, so git's HTTPS transport
+  # resolves through c-ares instead of musl's getaddrinfo, and c-ares reads
+  # /etc/nsswitch.conf to decide its lookup order. Denying it is not the
+  # same as the file being absent: AppArmor answers EACCES where a missing
+  # file answers ENOENT, and c-ares treats that as a hard config error,
+  # ending up with no usable nameserver and failing every lookup in
+  # milliseconds with ARES_ECONNREFUSED - which git reports as the
+  # misleading "Could not resolve host: <host> (Could not contact DNS
+  # servers)" even though the container's DNS is fine. Go's own resolver
+  # reads the same file, so the agent's direct HTTPS calls need it too.
+  /etc/nsswitch.conf r,
+
+  # git copies this template directory into every repository it creates.
+  # The clone succeeds without it, but each invocation prepends "warning:
+  # templates not found in /usr/share/git-core/templates" to git's stderr,
+  # which this add-on surfaces verbatim in the dashboard's error card.
+  /usr/share/git-core/templates{,/**} r,
+
+  # Go runtime startup: the cgroup lookup behind GOMAXPROCS, and the
+  # default listen backlog for the ingress and webhook listeners.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/sys/net/core/somaxconn r,
+
+  # Data and config access. The agent walks these trees (git clone
+  # contents under /data/repo, the live config tree under
+  # /homeassistant), so, again, both the bare directories and everything
+  # under them need to be listable, not just individually openable -
+  # `path{,/**}`, not just `path/**`, throughout this profile: a glob
+  # ending in /** never matches the bare directory itself (zero extra path
+  # components), only something one or more levels under it.
+  /data{,/**} rw,
+  /homeassistant{,/**} rw,
+  /tmp{,/**} rw,
+
+  # Access to options.json specifically, alongside the broader /data grant
+  # above.
+  /data/options.json r,
+
+  # Git needs to run as a subprocess against /data/repo. Alpine's git is a
+  # normal dynamically linked binary (unlike the agent itself), so it
+  # needs musl libc and its own shared library dependencies (libcurl,
+  # openssl, zlib, ...) resolvable too.
+  /usr/bin/git rix,
+  /usr/libexec/git-core{,/**} rix,
+  # sops encrypts and decrypts secret values (see internal/sopscrypt). Like
+  # git, it is dynamically linked against musl and covered by the library
+  # rules below. It only ever reads and rewrites files under /data/repo,
+  # including the temporary file --in-place writes next to its target, and
+  # both are already covered by the /data grant above.
+  /usr/bin/sops rix,
+  /lib/ld-musl-*.so* mr,
+  /usr/lib/*.so* mr,
+
+  # Deny access to sensitive files that must never be touched. /config
+  # is a symlink to /homeassistant on HAOS and AppArmor mediates the
+  # resolved path, so these rules target /homeassistant directly. Deny
+  # rules cover the bare directory too, so listing .storage's contents
+  # is blocked, not just reading/writing what's inside it.
+  #
+  # secrets.yaml is deliberately NOT denied here any more: with an age_key
+  # configured the agent reads it to encrypt it on the way into git, and
+  # writes it back on apply. What keeps it out of the repository when no
+  # key is configured is gitsync's own rules (ExcludedPatterns and
+  # SecretPatterns), not this profile - and those still refuse it in the
+  # clear.
+  deny /homeassistant/.storage{,/**} rw,
+  deny /homeassistant/.cloud{,/**} rw,
+}

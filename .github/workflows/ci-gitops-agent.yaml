@@ -1,0 +1,262 @@
+name: GitOps Agent CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ha_gitops_agent/**"
+      - ".github/workflows/ci-gitops-agent.yaml"
+  pull_request:
+    paths:
+      - "ha_gitops_agent/**"
+      - ".github/workflows/ci-gitops-agent.yaml"
+  workflow_dispatch:
+
+env:
+  ADDON_SLUG: ha_gitops_agent
+  GITLEAKS_VERSION: "8.30.1"
+
+jobs:
+  information:
+    name: Gather Information
+    runs-on: ubuntu-latest
+    outputs:
+      architectures: ${{ steps.info.outputs.architectures }}
+      build_date: ${{ steps.info.outputs.build_date }}
+      description: ${{ steps.info.outputs.description }}
+      name: ${{ steps.info.outputs.name }}
+      version: ${{ steps.info.outputs.version }}
+      go_version: ${{ steps.info.outputs.go_version }}
+      base_images: ${{ steps.info.outputs.base_images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Get add-on information
+        id: info
+        run: |
+          architectures=$(yq -o=json -I=0 '.arch' ha_gitops_agent/config.yaml)
+          echo "architectures=${architectures}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "description=$(yq -r '.description' ha_gitops_agent/config.yaml)" >> $GITHUB_OUTPUT
+          echo "name=$(yq -r '.name' ha_gitops_agent/config.yaml)" >> $GITHUB_OUTPUT
+          echo "version=$(yq -r '.version' ha_gitops_agent/config.yaml)" >> $GITHUB_OUTPUT
+          echo "go_version=$(yq -r '.args.GO_VERSION' ha_gitops_agent/build.yaml)" >> $GITHUB_OUTPUT
+          echo "base_images=$(yq -o=json -I=0 '.build_from' ha_gitops_agent/build.yaml)" >> $GITHUB_OUTPUT
+
+      # config.yaml's version and the Dockerfile's BUILD_VERSION default are
+      # two copies of the same number, each carrying a comment pointing at the
+      # other. Nothing but this step stops them drifting apart.
+      - name: Check version is in sync with the Dockerfile
+        run: |
+          config_version=$(yq -r '.version' ha_gitops_agent/config.yaml)
+          docker_version=$(sed -n 's/^ARG BUILD_VERSION=//p' ha_gitops_agent/Dockerfile)
+          if [ "${config_version}" != "${docker_version}" ]; then
+            echo "config.yaml version (${config_version}) != Dockerfile BUILD_VERSION (${docker_version})" >&2
+            exit 1
+          fi
+          echo "both say ${config_version}"
+
+  lint-addon:
+    name: Addon Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run addon lint
+        uses: frenck/action-addon-linter@f995494fd84fae6310d23617e66d0e37de4f14eb # v2.21.0
+        with:
+          path: "./ha_gitops_agent"
+
+  lint-hadolint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
+        with:
+          dockerfile: ha_gitops_agent/Dockerfile
+          failure-threshold: warning
+          ignore: DL3018
+
+  lint-yaml:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # line-length is off rather than raised: translations/en.yaml holds the
+      # option descriptions Home Assistant renders in the config form, and
+      # those are prose paragraphs on a single line by design.
+      - name: Run yamllint
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
+        with:
+          file_or_dir: ha_gitops_agent/
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              truthy:
+                allowed-values: ['true', 'false', 'on', 'off']
+              comments:
+                min-spaces-from-content: 1
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The add-on encrypts secrets, so its tests are full of secret-shaped
+      # fixtures. .gitleaks.toml allowlists those by value, not by excluding
+      # test files, so a real credential in a test still fails here.
+      - name: Run gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks dir ha_gitops_agent \
+            --config ha_gitops_agent/.gitleaks.toml \
+            --redact --no-banner --exit-code 1
+
+  test-go:
+    name: Go Test
+    needs:
+      - information
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ha_gitops_agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.information.outputs.go_version }}
+          cache-dependency-path: ha_gitops_agent/go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "${unformatted}" ]; then
+            echo "gofmt would change these files:" >&2
+            echo "${unformatted}" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race ./...
+
+      # The web dashboard's preview fixtures only compile under -tags dev, so
+      # the lane above never sees them. See internal/web/dev.go.
+      - name: Test (dev tag)
+        run: go test -race -tags dev ./internal/web/
+
+  lint-go:
+    name: golangci-lint
+    needs:
+      - information
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.information.outputs.go_version }}
+          cache-dependency-path: ha_gitops_agent/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          working-directory: ha_gitops_agent
+
+  build:
+    name: Build (${{ matrix.architecture }})
+    needs:
+      - information
+      - lint-addon
+      - lint-hadolint
+      - lint-yaml
+      - secret-scan
+      - test-go
+      - lint-go
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: ${{ fromJson(needs.information.outputs.architectures) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set platform
+        id: platform
+        run: |
+          case "${{ matrix.architecture }}" in
+            amd64) platform="linux/amd64" ;;
+            aarch64) platform="linux/arm64" ;;
+          esac
+          echo "platform=${platform}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ha_gitops_agent
+          file: ha_gitops_agent/Dockerfile
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-ha-gitops-agent-${{ matrix.architecture }}:${{ needs.information.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-ha-gitops-agent-${{ matrix.architecture }}:latest
+          build-args: |
+            BUILD_ARCH=${{ matrix.architecture }}
+            BUILD_DATE=${{ needs.information.outputs.build_date }}
+            BUILD_DESCRIPTION=${{ needs.information.outputs.description }}
+            BUILD_FROM=${{ fromJSON(needs.information.outputs.base_images)[matrix.architecture] }}
+            BUILD_NAME=${{ needs.information.outputs.name }}
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=${{ needs.information.outputs.version }}
+            GO_VERSION=${{ needs.information.outputs.go_version }}
+          cache-from: type=gha,scope=build-gitops-agent-${{ matrix.architecture }}
+          cache-to: type=gha,scope=build-gitops-agent-${{ matrix.architecture }},mode=max
+          labels: |
+            org.opencontainers.image.title=${{ needs.information.outputs.name }}
+            org.opencontainers.image.description=${{ needs.information.outputs.description }}
+            org.opencontainers.image.created=${{ needs.information.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.information.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}

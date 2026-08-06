@@ -1,0 +1,44 @@
+# gitleaks configuration for the GitOps Agent add-on.
+#
+# This add-on encrypts secrets, so its tests are full of secret-shaped
+# fixtures and gitleaks flags every one of them. The allowlist below names
+# those fixtures by value rather than excluding the test files wholesale -
+# a real credential committed into a test would still fail the scan.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "no-real-age-key"
+description = "An age identity that is not one of the two known test identities"
+regex = '''AGE-SECRET-KEY-1[0-9A-Z]{58}'''
+[rules.allowlist]
+regexes = [
+  # Throwaway identities generated for the encryption tests. They protect
+  # nothing: every ciphertext they decrypt is created inside the test run.
+  '''AGE-SECRET-KEY-1QUUCUYTP2443EWJWQKK6LCAAUGS09XXGDHLVQV82Z2Y6200NDGAQJ8SUFT''',
+  '''AGE-SECRET-KEY-1ZVEXNYJ990KE6NVCUYJE0YS5XHLTEY4ALPTT7P3AX3CM56ZDYNXQVEX4EM''',
+]
+
+[allowlist]
+description = "Test fixtures - placeholder values that are not credentials"
+regexes = [
+  # Test age identities, as above.
+  '''AGE-SECRET-KEY-1QUUCUYTP2443EWJWQKK6LCAAUGS09XXGDHLVQV82Z2Y6200NDGAQJ8SUFT''',
+  '''AGE-SECRET-KEY-1ZVEXNYJ990KE6NVCUYJE0YS5XHLTEY4ALPTT7P3AX3CM56ZDYNXQVEX4EM''',
+  # Deliberately malformed identities, used to assert the key parser rejects
+  # them and that SOPS_AGE_KEY inheritance is refused.
+  '''AGE-SECRET-KEY-1NOTVALID''',
+  '''AGE-SECRET-KEY-1INHERITED''',
+  '''AGE-SECRET-KEY-EXAMPLE''',
+  # Fake token values asserted on by the redaction tests.
+  '''ghp_SUPERSECRETTOKENVALUE''',
+  '''S3CRET-resolved''',
+  # Stand-in for a SOPS MAC, which is a hex digest, not a credential.
+  '''00112233445566778899AABBCCDDEEFF''',
+  # PEM headers with obviously synthetic bodies. The tests assert these
+  # strings never reach a diff, a log line or the history store.
+  '''KEYMATERIAL(ONE|TWO)''',
+  '''JSONSECRET''',
+  '''-----BEGIN (OPENSSH )?PRIVATE KEY-----\\n"''',
+]

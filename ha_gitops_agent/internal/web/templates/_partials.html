@@ -1,0 +1,66 @@
+{{/* Markup _main.html renders from more than one place. Definitions only -
+     this file is never executed as a page itself. */}}
+
+{{/* diff renders one unified diff from the diff text. The newline in the
+     else branch is load bearing: coloured lines end themselves in CSS. */}}
+{{define "diff"}}<div class="diff-wrap" tabindex="0"><pre class="diff">{{range diffLines .}}{{if .Class}}<span class="{{.Class}}">{{.Text}}</span>{{else}}{{.Text}}
+{{end}}{{end}}</pre></div>{{end}}
+
+{{/* callout renders an error/warning card. Takes a calloutView: (callout
+     variant heading body hint), variant "error" or "warning", hint "". */}}
+{{define "callout"}}
+<section class="card card-{{.Variant}}">
+  <h2>{{.Heading}}</h2>
+  {{if .Hint}}<p>{{.Hint}}</p>
+  {{end}}<pre class="{{.Variant}}-text" tabindex="0">{{.Body}}</pre>
+</section>
+{{end}}
+
+{{/* runrow renders one run-history row (history.Record) for both pages.
+     Whitespace is pinned by web_test.go; times stay absolute (204). */}}
+{{define "runrow"}}
+    <li>
+      <span class="ts" title="{{.StartedUTC}}" data-utc="{{.StartedUTC}}">{{humanTime .StartedUTC}}</span>
+      <span class="badge badge-{{.Kind}}">{{.Kind}}</span>
+      <span class="sha" title="{{.SHA}}">{{with .ShortSHA}}{{.}}{{else}}-{{end}}</span>
+      <span class="outcome outcome-{{.Outcome}}">{{humanState .Outcome}}</span>
+      <span class="counts">{{.Counts}}</span>
+      <span class="dur">{{humanDuration .Duration}}</span>
+      {{/* Its own full-width row, not a seventh column: check_config
+           output is never short enough to sit inline. */}}
+      {{if .Error}}<p class="run-error"{{if .StashDir}} title="{{.StashDir}}"{{end}}>{{.Error}}</p>{{end}}
+    </li>
+    {{end}}
+
+{{/* inventory renders one managed-inventory group from inventoryGroup;
+     empty renders nothing. Real count, list capped at inventoryMax. */}}
+{{define "inventory"}}{{if .Items}}
+<details class="change">
+  <summary>
+    <span class="chevron"></span>
+    <span class="path">{{.Label}}</span>
+    <span class="count">{{.Total}}<span class="sr-only"> items</span></span>
+  </summary>
+  <ul class="inventory" tabindex="0">
+    {{range .Items}}<li><code>{{.}}</code></li>
+    {{end}}{{if .More}}<li class="more">... and {{.More}} more, listed in full by status.json</li>
+    {{end}}
+  </ul>
+</details>
+{{end}}{{end}}
+
+{{/* addonrow renders one add-on updates row (AddonUpdateStatus) for the
+     list and the fold. Times stay absolute; data-utc-rel marks checked. */}}
+{{define "addonrow"}}
+    <div class="change">
+      <div class="change-summary">
+        {{if .UpdateAvailable}}<span class="badge badge-update">update</span>
+        {{else if .Version}}<span class="badge badge-add">current</span>
+        {{else}}<span class="badge badge-restore">unknown</span>{{end}}
+        <span class="path" title="{{.Slug}}">{{if .Name}}{{.Name}}{{else}}{{.Slug}}{{end}}</span>
+      </div>
+      {{/* Versions and result line live here, not on the summary, which
+           stays scannable. */}}
+      <p class="meta-line">{{if .Version}}<code>{{.Version}}{{if .UpdateAvailable}} -&gt; {{.LatestVersion}}{{end}}</code> &middot; {{end}}{{.LastResult}}{{if .LastCheckedUTC}} &middot; checked <span title="{{.LastCheckedUTC}}" data-utc="{{.LastCheckedUTC}}" data-utc-rel>{{humanTime .LastCheckedUTC}} UTC</span>{{end}}{{if .LastUpdatedUTC}} &middot; updated <span title="{{.LastUpdatedUTC}}" data-utc="{{.LastUpdatedUTC}}">{{humanTime .LastUpdatedUTC}} UTC</span>{{end}}</p>
+    </div>
+    {{end}}

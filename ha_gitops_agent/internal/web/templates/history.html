@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run history - GitOps Agent</title>
+<link rel="stylesheet" href="static/app.css?v={{.AssetVer}}">
+{{/* No htmx and no polling: a snapshot of HistoryAll, far more rows than
+     the card and static under the reader. Hence no banner, no countdown. */}}
+</head>
+<body>
+{{/* One heading with the count beside it; the card below has no h2, which
+     would be the same words twice. Gated on rows, so no "0" over empty. */}}
+<header class="page-head">
+  <div class="title-row">
+    <h1>Run history</h1>
+    {{if .Records}}<span class="count">{{len .Records}}</span>{{end}}
+  </div>
+  {{/* Relative like every URL here, so the ingress prefix stays unknown.
+       The preview name travels back, or the link leaves the preview. */}}
+  <p class="meta-line"><a href="./{{if .Preview}}?preview={{.Preview}}{{end}}">&larr; Dashboard</a></p>
+</header>
+
+<section class="card">
+  {{if .Records}}
+  {{/* No tabindex, unlike the dashboard's copy: here the list scrolls with
+       the document (see .runs-page), not inside a 300px region. */}}
+  <ul class="runs runs-page">
+    {{range .Records}}{{template "runrow" .}}{{end}}
+  </ul>
+  {{else}}
+  <p class="empty">No runs recorded yet - the first reconcile after startup writes the first row.</p>
+  {{end}}
+</section>
+
+<script>
+(function () {
+  // The same rewrite index.html does, cut to this page: row timestamps,
+  // never re-rendered, so one pass on load is the whole job.
+  var timeFmt = null;
+  try {
+    timeFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+  } catch (e) {
+    timeFmt = null;
+  }
+  if (!timeFmt) { return; }
+  document.querySelectorAll('[data-utc]').forEach(function (el) {
+    var ms = Date.parse(el.getAttribute('data-utc'));
+    // Unparseable keeps the server's own text - never "Invalid Date".
+    if (isNaN(ms)) { return; }
+    el.textContent = timeFmt.format(new Date(ms));
+  });
+})();
+</script>
+</body>
+</html>

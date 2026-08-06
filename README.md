@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A collection of Home Assistant add-ons focused on observability and monitoring.
+A collection of Home Assistant add-ons focused on observability and configuration management.
 
 ## Add-ons
 
@@ -17,6 +17,21 @@ High-performance log collector that sends Home Assistant logs to VictoriaLogs.
 - Collects systemd journal logs (HA Core, Supervisor, add-ons, host services)
 - Low memory footprint (~30-50MB)
 - Configurable filtering and labeling
+
+### GitOps Agent
+
+[![GitOps Agent CI](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci-gitops-agent.yaml/badge.svg)](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci-gitops-agent.yaml)
+
+Keeps `/config` in sync with a git repository, the way Flux or Argo CD keeps a
+cluster in sync.
+
+- Dry-run diff, validate-then-apply, and rollback if Home Assistant refuses the result
+- Optionally reconciles floors, areas, labels, helpers, entity customizations,
+  dashboards, other add-ons' options, config-flow integrations and HACS installs
+- Secret values encrypted with SOPS and age, so `secrets.yaml` can live in the
+  repository without living there in the clear
+- Pushes live drift back to a review branch, seeds a repository from an existing
+  config, and can be triggered by webhook instead of only polling
 
 ## Installation
 
@@ -31,7 +46,8 @@ High-performance log collector that sends Home Assistant logs to VictoriaLogs.
 
 2. Find the add-on in the Add-on Store and click Install
 
-3. Configure the add-on with your VictoriaLogs endpoint
+3. Configure it on the add-on's Configuration tab - a VictoriaLogs endpoint for
+   Vector, a repository URL for the GitOps Agent
 
 4. Start the add-on
 

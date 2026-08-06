@@ -1,0 +1,397 @@
+{{/* Dashboard fragment. #app carries the swap attrs buttons inherit; the
+     hash lets /fragment answer 204, hx-sync aborts a racing poll. */}}
+{{/* data-assets lets the page notice its own staleness: the shell's script
+     reloads when this hash moves under an add-on update. */}}
+<main id="app"
+      data-assets="{{.AssetVer}}"
+      hx-get="fragment?h={{.FragmentHash}}{{if .Preview}}&amp;preview={{.Preview}}{{end}}"
+      hx-trigger="every {{if .Status.Busy}}2s{{else}}5s{{end}}"
+      hx-target="#app"
+      hx-swap="outerHTML"
+      hx-sync="this:replace">
+{{if not .Status.Configured}}
+{{template "_firstrun.html" .}}
+{{else}}
+
+<header class="page-head">
+  <div class="title-row">
+    <h1>GitOps Agent</h1>
+    {{/* Decorative: this pill is swapped away, so index.html keeps a
+         permanent live region outside #app and copies the text into it. */}}
+    <span class="pill pill-{{.Status.State}}"><span class="dot"></span>{{humanState .Status.State}}</span>
+    {{/* Beside the pill: paused is orthogonal to the sync state. Neutral
+         keeps it out of the health set; chip-paused is its key. */}}
+    {{if .Status.Paused}}<span class="chip chip-neutral chip-paused">paused</span>{{end}}
+    {{/* Neutral too, but ACTIONABLE: its own sentinel, its own
+         announcement. A restart alone does not make HA report it loaded. */}}
+    {{if .Status.HacsRestartPending}}<span class="chip chip-neutral chip-restart">downloaded, not loaded yet: {{join .Status.HacsRestartPending ", "}} &middot; restart Home Assistant, then set it up (or declare its entry in gitops/integrations.yaml)</span>{{end}}
+  </div>
+  <p class="repo-line">
+    <span class="repo">{{.Status.RepoURL}}</span><span class="sep">&middot;</span><span class="branch">{{.Status.Branch}}</span>{{if .Status.LastSHAShort}}<span class="sep">@</span><span class="sha" title="{{.Status.LastSHA}}">{{.Status.LastSHAShort}}</span>{{end}}
+  </p>
+  {{/* data-utc feeds index.html's localizeTimes; the text here stays
+       absolute UTC for the 204. data-utc-zone names the reader's zone. */}}
+  <p class="meta-line">{{if .Status.Paused}}Checks paused &middot; {{else if .Status.IntervalMinutes}}Checks every {{.Status.IntervalMinutes}} min &middot; {{end}}Last applied {{if .Status.LastApplyUTC}}<span title="{{.Status.LastApplyUTC}}" data-utc="{{.Status.LastApplyUTC}}" data-utc-zone>{{humanTime .Status.LastApplyUTC}} UTC</span>{{else}}never{{end}}{{if .Status.NextCheckUTC}} &middot; <span class="next-check" data-next-utc="{{.Status.NextCheckUTC}}" title="{{.Status.NextCheckUTC}}">next check by {{humanTime .Status.NextCheckUTC}} UTC</span>{{end}}</p>
+  {{/* Standing health warnings: the feed logs each condition once, a chip
+       stays up as long as the flag. Not errors - nothing is stopped. */}}
+  {{if .Status.HasHealthWarnings}}
+  <div class="chips">
+    {{if .Status.HistoryWriteFailing}}<span class="chip">history writes failing</span>{{end}}
+    {{if .Status.VersionRecordFailing}}<span class="chip">version record failing</span>{{end}}
+    {{if .Status.AddonUpdateSelfSlugFailing}}<span class="chip">update check cannot resolve own slug</span>{{end}}
+    {{/* The one chip raised by a reconcile layer: planHacsLayer skips
+         itself, so without this the option is on and nothing happens. */}}
+    {{if .Status.HacsUnavailable}}<span class="chip">hacs layer: HACS is not installed</span>{{end}}
+    {{range .Status.AddonCheckFailing}}<span class="chip">update check failing: {{.}}</span>{{end}}
+  </div>
+  {{end}}
+</header>
+
+{{/* #app supplies the swap target; each button adds only its post URL and
+     confirm text. hx-disabled-elt must be per-button, not the toolbar. */}}
+<div class="toolbar">
+  <button
+    class="btn btn-primary"
+    hx-post="apply"
+    hx-disabled-elt="this"
+    {{if or (eq .Status.ApplyableCount 0) .Status.Busy}}disabled{{end}}
+    {{/* The restart sentence is in BOTH wordings: restarting an add-on is
+         the most disruptive thing an apply does (PendingRestartSlugs). */}}
+    {{if .Status.DryRun}}hx-confirm="Dry run is ON. Write {{.Status.ApplyableCount}} change(s) to the live Home Assistant config anyway?{{if .Status.PendingRestartSlugs}} This will restart add-on(s): {{join .Status.PendingRestartSlugs ", "}}.{{end}}"{{else}}hx-confirm="Apply {{.Status.ApplyableCount}} change(s) to the live Home Assistant config now?{{if .Status.PendingRestartSlugs}} This will restart add-on(s): {{join .Status.PendingRestartSlugs ", "}}.{{end}}"{{end}}
+  >Apply<span class="spinner" aria-hidden="true"></span></button>
+
+  <button
+    class="btn btn-secondary"
+    hx-post="reconcile"
+    hx-disabled-elt="this"
+    {{if .Status.Busy}}disabled{{end}}
+  >Check Now<span class="spinner" aria-hidden="true"></span></button>
+
+  {{/* Never disabled during an operation and no hx-confirm: pressing it
+       mid-apply is the case it exists for, and it reverses in one press. */}}
+  {{if .Status.Paused}}
+  <button
+    class="btn btn-secondary"
+    hx-post="resume"
+    hx-disabled-elt="this"
+    title="Resume automatic checks"
+  >Resume<span class="spinner" aria-hidden="true"></span></button>
+  {{else}}
+  <button
+    class="btn btn-secondary"
+    hx-post="pause"
+    hx-disabled-elt="this"
+    title="Pause automatic checks"
+  >Pause<span class="spinner" aria-hidden="true"></span></button>
+  {{end}}
+
+  {{if .Status.LastStashDir}}
+  <button
+    class="btn btn-destructive"
+    hx-post="rollback"
+    hx-disabled-elt="this"
+    {{/* One wording per RollbackPreview value: rollback also DELETES what
+         the apply created, and a stash-less apply changes nothing. */}}
+    {{if .Status.RollbackRestoresNothing}}hx-confirm="The last apply left nothing this add-on can restore; rolling back will not change your configuration."{{else if .Status.RollbackPreview}}hx-confirm="Roll back the last apply? This puts {{.Status.RollbackPreview}} back as they were before it - files the apply created are removed."{{else}}hx-confirm="Roll back the last apply? This restores the files and registry objects touched by the most recent apply."{{end}}
+    {{if .Status.Busy}}disabled{{end}}
+  >Roll Back<span class="spinner" aria-hidden="true"></span></button>
+  {{end}}
+
+  {{if and .Status.CommitBackEnabled .Status.Pending}}
+  <button
+    class="btn btn-secondary"
+    hx-post="commitback"
+    hx-disabled-elt="this"
+    hx-confirm="Commit the current live drift to a new branch for review? This never touches the {{.Status.Branch}} branch."
+    {{if .Status.Busy}}disabled{{end}}
+    title="Commit the live drift back to a review branch"
+  >Commit Back<span class="spinner" aria-hidden="true"></span></button>
+  {{end}}
+
+  {{if .Status.ImportEnabled}}
+  <button
+    class="btn btn-secondary"
+    hx-post="import/preview"
+    hx-disabled-elt="this"
+    {{if .Status.Busy}}disabled{{end}}
+    title="Preview what an import would copy"
+  >Preview<span class="spinner" aria-hidden="true"></span></button>
+
+  <button
+    class="btn btn-destructive"
+    hx-post="import"
+    hx-disabled-elt="this"
+    {{/* No timestamp: confirm text is server-rendered and cannot be
+         localized like the "Last import" line, which is right there. */}}
+    {{if .Status.LastImportUTC}}hx-confirm="This repository was already seeded. Import again and push another full snapshot directly onto the {{.Status.Branch}} branch?"{{else}}hx-confirm="Copy every file under /homeassistant - excluding secrets, databases, backups and .storage - into the repository and push them as one commit directly onto the {{.Status.Branch}} branch?"{{end}}
+    {{if .Status.Busy}}disabled{{end}}
+    title="Import from Home Assistant"
+  >Import<span class="spinner" aria-hidden="true"></span></button>
+  {{end}}
+
+  {{if .Status.Busy}}
+  <p class="busy-note">An operation is already running. Please wait for it to finish.</p>
+  {{end}}
+</div>
+
+{{/* Above every card: "nothing pending" under a pause is from before it.
+     Naming what still works stops this reading as a kill switch. */}}
+{{if .Status.Paused}}
+<div class="banner">
+  <strong>Automatic checks are paused.</strong> The agent will not check,
+  apply or update add-ons on its own until you resume. Check Now, Apply and
+  Roll Back still work.{{if .Status.AutoUpdateEnabled}} So does Check for updates on the add-on card{{if not .Status.DryRun}}, and it still installs what it finds{{end}}.{{end}} Anything shown below is
+  from the last check before the pause.
+</div>
+{{end}}
+
+{{if .Status.LastDriftBranch}}
+<p class="meta-line">Last drift branch: <code>{{.Status.LastDriftBranch}}</code> - open a pull request from it to review.</p>
+{{end}}
+
+{{if .Status.LastImportUTC}}
+<p class="meta-line">Last import: <span title="{{.Status.LastImportUTC}}" data-utc="{{.Status.LastImportUTC}}" data-utc-zone>{{humanTime .Status.LastImportUTC}} UTC</span> onto <code>{{.Status.Branch}}</code>{{if .Status.LastImportSHAShort}} at <code>{{.Status.LastImportSHAShort}}</code>{{end}} - review that commit in your repository.</p>
+{{end}}
+
+{{if .Status.LastImportError}}
+{{template "callout" (callout "error" "Last import error" .Status.LastImportError "")}}
+{{end}}
+
+{{/* The file list is COLLAPSED through the inventory partial: 191 rows
+     inline cost 7600px, re-hashed every poll. Dismiss only discards. */}}
+{{with .Status.ImportPreview}}
+<section class="card">
+  <h2>Import preview <span class="count">{{len .Files}}</span>
+    <button
+      class="btn btn-secondary btn-small"
+      hx-post="import/preview/dismiss"
+      hx-disabled-elt="this"
+      title="Hide this preview"
+    >Dismiss<span class="spinner" aria-hidden="true"></span></button>
+  </h2>
+  <p class="meta-line">{{humanBytes .TotalBytes}} would be pushed onto <code>{{$.Status.Branch}}</code>. Skipped: {{.SkippedExcluded}} excluded{{if .SkippedGitignored}}, {{.SkippedGitignored}} gitignored{{end}}, {{.SkippedSecret}} secret-shaped, {{.SkippedNonRegular}} symlinks or other non-regular entries{{if .SkippedUnreadable}}, {{.SkippedUnreadable}} unreadable{{end}}.</p>
+  {{if .Files}}
+  <div class="changes">
+    {{template "inventory" (inventoryGroup "files" .Files)}}
+  </div>
+  {{else}}
+  <p class="empty">Nothing to import - every file under /homeassistant is excluded or secret-shaped.</p>
+  {{end}}
+</section>
+{{end}}
+
+{{if .Status.DryRun}}
+<div class="banner">
+  <strong>Dry run is on.</strong> Detected changes are shown below but nothing
+  is written to /homeassistant automatically. Use the Apply button to write a
+  change anyway, or turn dry run off in this add-on's Configuration tab.
+</div>
+{{end}}
+
+{{if and (eq .Status.State "error") .Status.LastError}}
+{{template "callout" (callout "error" "Last error" .Status.LastError "")}}
+{{end}}
+
+{{if .Status.Warnings}}
+{{template "callout" (callout "warning" "Configuration warnings" .Status.Warnings "")}}
+{{end}}
+
+{{if .Status.LastBackupError}}
+{{template "callout" (callout "warning" "Pre-apply backup did not run" .Status.LastBackupError `The last apply went through, and Roll Back still works - it restores from
+this add-on's own per-file copies under /data/backup/. What did not happen
+is the separate Supervisor backup the agent asks for before every apply, so
+there is no restore point outside this add-on for that change.`)}}
+{{end}}
+
+{{/* The failure memory in /data/state.json - the only place a record whose
+     item is no longer declared is visible. Names and reasons only. */}}
+{{if .Status.Blocked}}
+<section class="card">
+  <h2>Recorded failures <span class="count">{{len .Status.Blocked}}</span></h2>
+  <p class="meta-line">The agent remembers failed integration, subentry and HACS attempts. An item still declared with the same data is not attempted again on its own: it retries once its declared data changes, or immediately when you press Retry. An item no longer declared keeps its record until you clear it here.</p>
+  <div class="changes">
+    {{range .Status.Blocked}}
+    <div class="change change-error">
+      <div class="change-summary">
+        <span class="badge badge-error">{{.RType}}</span>
+        <span class="path">{{.Name}}</span>
+        {{/* Per item: each failed for its own reason. The key rides
+             hx-vals via retryVals; the name repeats for screen readers. */}}
+        <button
+          class="btn btn-secondary btn-small"
+          hx-post="retry"
+          hx-vals="{{retryVals .Key}}"
+          hx-disabled-elt="this"
+          {{if $.Status.Busy}}disabled{{end}}
+        >Retry<span class="sr-only"> {{.Name}}</span><span class="spinner" aria-hidden="true"></span></button>
+      </div>
+      <pre class="op-error">{{.Error}}</pre>
+    </div>
+    {{end}}
+  </div>
+</section>
+{{end}}
+
+{{/* One row per WATCHED add-on: a missing row is how a typo'd slug hides.
+     The button really installs and restarts, hence the confirm. */}}
+{{if .Status.AutoUpdateEnabled}}
+{{/* The check interval in SECONDS, on the card because index.html reads
+     it off the nearest ancestor. 0 means no threshold and no marker. */}}
+<section class="card" data-stale-after="{{.Status.AddonCheckIntervalSeconds}}">
+  {{/* The count is updates WAITING, not add-ons watched - the same meaning
+       it carries on every other card. */}}
+  <h2>Add-on updates <span class="count">{{.Status.AddonUpdatesAvailable}}</span>
+    {{/* Disabled while a check runs: CheckAddonUpdates refuses a second
+         caller. Not gated on Busy - checkLock is not opLock. */}}
+    <button
+      class="btn btn-secondary btn-small"
+      hx-post="addons/check"
+      hx-disabled-elt="this"
+      {{if .Status.AddonCheckRunning}}disabled{{end}}
+      {{if not .Status.DryRun}}hx-confirm="Check every add-on in auto_update_addons for updates now? Any update found is installed straight away, which restarts that add-on."{{end}}
+      title="Check the watched add-ons for updates now"
+    >Check for updates<span class="spinner" aria-hidden="true"></span></button>
+  </h2>
+  {{if .Status.AddonCheckRunning}}
+  {{/* The button's spinner only covers the press - the check runs in its
+       own goroutine, and an install has a 30-minute budget. */}}
+  <p class="meta-line">Checking for updates now - this can take a while when an update is being installed.</p>
+  {{end}}
+  {{if .Status.AddonUpdates}}
+  {{/* View-only fold; addonUpdatesFunc keeps source order so the 204 holds.
+       Inside the branch that reads it; the empty card never needs it. */}}
+  {{$updates := addonUpdates .Status.AddonUpdates}}
+  {{if not $updates.Rows}}
+  {{/* The third empty state: there ARE results, just none above the fold -
+       otherwise the card reads as if the check found nothing. */}}
+  <p class="empty">Nothing here this agent can update - see below.</p>
+  {{end}}
+  <div class="changes">
+    {{range $updates.Rows}}{{template "addonrow" .}}{{end}}
+    {{if $updates.Folded}}
+    {{/* Last row of the same list, not a second box. Summary shape lifted
+         from the inventory partial, unit spelled out for screen readers. */}}
+    <details class="change">
+      <summary>
+        <span class="chevron"></span>
+        <span class="path">not updatable by this agent</span>
+        <span class="count">{{len $updates.Folded}}<span class="sr-only"> add-ons</span></span>
+      </summary>
+      <div class="folded">
+        {{/* Says why these rows exist (still watched, still checked) and
+             the one thing the reader can do to empty the fold. */}}
+        <p class="meta-line">Still watched and still checked every cycle - folded because neither verdict can change on its own, so neither can ever add to the count above. This agent refuses to update itself, and a slug Supervisor does not have installed has nothing to update. Install the add-on, or take the slug out of <code>auto_update_addons</code>, and its row moves back up.</p>
+        {{range $updates.Folded}}{{template "addonrow" .}}{{end}}
+      </div>
+    </details>
+    {{end}}
+  </div>
+  {{else}}
+  {{/* True of both empty cases: the first check has not run, or it ended
+       before recording anything (the self-slug guard). */}}
+  <p class="empty">No results yet - the first check runs about two minutes after startup. If this persists, see Recent activity below.</p>
+  {{end}}
+</section>
+{{end}}
+
+<section class="card">
+  <h2>Pending changes <span class="count">{{len .Status.Pending}}</span></h2>
+  {{if .Status.Pending}}
+  <div class="changes">
+    {{range .Status.Pending}}
+    <details class="change">
+      <summary>
+        <span class="chevron"></span>
+        <span class="badge badge-{{.Kind}}">{{.Kind}}</span>
+        <span class="path">{{.Path}}</span>
+      </summary>
+      {{template "diff" .DiffText}}
+    </details>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="empty"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.6"></circle><path d="M5.2 8.2l2 2 3.6-4.2"></path></svg>No pending changes. Config matches the repository.</p>
+  {{end}}
+</section>
+
+{{if .Status.PendingRegistry}}
+<section class="card">
+  <h2>Registry changes <span class="count">{{len .Status.PendingRegistry}}</span></h2>
+  <div class="changes">
+    {{range .Status.PendingRegistry}}
+    {{if eq .Kind "error"}}
+    <div class="change change-error">
+      <div class="change-summary">
+        <span class="badge badge-error">error</span>
+        <span class="path">{{.RType}}:{{.Key}}</span>
+      </div>
+      <pre class="op-error">{{.Error}}</pre>
+    </div>
+    {{else}}
+    <details class="change">
+      <summary>
+        <span class="chevron"></span>
+        <span class="badge badge-{{.Kind}}">{{.Kind}}</span>
+        <span class="path">{{.RType}}:{{.Key}}</span>
+      </summary>
+      {{template "diff" .DiffText}}
+    </details>
+    {{end}}
+    {{end}}
+  </div>
+</section>
+{{end}}
+
+{{/* Rows come from the runrow partial, which history.html renders too. The
+     heading links on rather than appending rows every poll re-renders. */}}
+<section class="card">
+  {{/* The space before the link sits INSIDE the {{if}}: a screen reader
+       reads the heading as one string ("Run historyall 200") without it. */}}
+  <h2>Run history{{if gt .Status.HistoryTotal (len .Status.History)}} <a class="view-all" href="history{{if .Preview}}?preview={{.Preview}}{{end}}">all {{.Status.HistoryTotal}} &rarr;</a>{{end}}</h2>
+  {{if .Status.History}}
+  <ul class="runs" tabindex="0">
+    {{range .Status.History}}{{template "runrow" .}}{{end}}
+  </ul>
+  {{else}}
+  <p class="empty">No runs recorded yet - the first reconcile after startup writes the first row.</p>
+  {{end}}
+</section>
+
+{{/* What this agent owns, from /data/state.json: only what is listed is
+     ever deleted or restored. Read-only, names and keys only. */}}
+<section class="card">
+  <h2>Managed by this agent <span class="count">{{.Status.Managed.Total}}</span></h2>
+  {{if .Status.Managed.Total}}
+  <p class="meta-line">Only what is listed here is ever deleted or restored by this agent when the repository stops declaring it - files come under management the first time an apply writes them, not when they are imported. Objects recorded by a layer that is now switched off stay listed and are not acted on until it is turned back on.</p>
+  <div class="changes">
+    {{template "inventory" (inventoryGroup "files" .Status.Managed.Files)}}
+    {{template "inventory" (inventoryGroup "floors, areas, labels and helpers" .Status.Managed.Registry)}}
+    {{template "inventory" (inventoryGroup "entities" .Status.Managed.Entities)}}
+    {{template "inventory" (inventoryGroup "dashboards" .Status.Managed.Dashboards)}}
+    {{template "inventory" (inventoryGroup "add-on options" .Status.Managed.Addons)}}
+    {{template "inventory" (inventoryGroup "integrations" .Status.Managed.Integrations)}}
+    {{template "inventory" (inventoryGroup "subentries" .Status.Managed.Subentries)}}
+    {{/* The HACS layer installs and adopts but never removes; listed all
+         the same, as the only sign this add-on put it there. */}}
+    {{template "inventory" (inventoryGroup "HACS integrations" .Status.Managed.Hacs)}}
+  </div>
+  {{else}}
+  <p class="empty">Nothing written yet - files come under management the first time an apply writes them.</p>
+  {{end}}
+</section>
+
+<section class="card">
+  <h2>Recent activity</h2>
+  {{if .Status.Events}}
+  <ul class="activity" tabindex="0">
+    {{range reverseEvents .Status.Events}}
+    <li><span class="ts" title="{{.TS}}" data-utc="{{.TS}}">{{humanTime .TS}}</span><span class="msg">{{.Message}}</span></li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="empty">Nothing logged yet.</p>
+  {{end}}
+</section>
+
+{{end}}
+</main>

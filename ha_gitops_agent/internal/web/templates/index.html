@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitOps Agent</title>
+<link rel="stylesheet" href="static/app.css?v={{.AssetVer}}">
+<script src="static/htmx.min.js?v={{.AssetVer}}"></script>
+</head>
+<body>
+{{/* Outside #app: everything inside is replaced on every swap, which would
+     drop a fresh banner and stop a live region from ever announcing. */}}
+<div id="req-error" class="req-error" role="alert" hidden>
+  {{/* Empty on purpose: every path that raises this writes the message
+       in first, and dismissing empties the span again. */}}
+  <span id="req-error-text"></span>
+  <button type="button" id="req-error-dismiss" class="btn btn-secondary">Dismiss</button>
+</div>
+<div id="sr-status" role="status" aria-live="polite" class="sr-only"></div>
+{{template "_main.html" .}}
+<script>
+(function () {
+  // htmx ships timeout:0, which is no timeout and an htmx:timeout that can
+  // never fire. Only the poll's own fragment render sits here that long.
+  htmx.config.timeout = 20000;
+
+  var banner = document.getElementById('req-error');
+  var bannerText = document.getElementById('req-error-text');
+  var live = document.getElementById('sr-status');
+
+  function pillText() {
+    var pill = document.querySelector('#app .pill');
+    return pill ? pill.textContent.trim() : '';
+  }
+  // The standing health warnings as one string, announced only when the
+  // SET changes. :not(.chip-neutral) keeps the paused chip out of it.
+  function chipText() {
+    var chips = document.querySelectorAll('#app .chip:not(.chip-neutral)');
+    var parts = [];
+    for (var i = 0; i < chips.length; i++) {
+      parts.push(chips[i].textContent.trim());
+    }
+    return parts.join(', ');
+  }
+  // Its own transition, so BOTH edges are spoken. Keyed off .chip-paused:
+  // .chip-neutral is shared with the restart reminder.
+  function isPaused() {
+    return !!document.querySelector('#app .chip-paused');
+  }
+  // Its own transition too: the one chip that asks the user to act.
+  function restartText() {
+    var chip = document.querySelector('#app .chip-restart');
+    return chip ? chip.textContent.trim() : '';
+  }
+  var announced = pillText();
+  var announcedChips = chipText();
+  var announcedPaused = isPaused();
+  var announcedRestart = restartText();
+
+  // role="alert" announces on CONTENT change, so the message is written in
+  // rather than the box merely unhidden; hide() empties it again.
+  function showBanner(msg) {
+    bannerText.textContent = msg;
+    banner.hidden = false;
+  }
+  function hideBanner() {
+    banner.hidden = true;
+    bannerText.textContent = '';
+  }
+
+  // One message per failure mode: a send error is usually HA restarting, a
+  // response error means the add-on refused, a timeout may still run.
+  document.body.addEventListener('htmx:sendError', function () {
+    showBanner('Cannot reach the add-on - network error or Home Assistant may be restarting. Retrying automatically.');
+  });
+  document.body.addEventListener('htmx:responseError', function (e) {
+    var status = e.detail && e.detail.xhr ? e.detail.xhr.status : 0;
+    showBanner('Request failed (HTTP ' + status + ') - the page may be stale. It will refresh automatically.');
+  });
+  document.body.addEventListener('htmx:timeout', function () {
+    showBanner('Request timed out - it may still be running. The page will refresh automatically.');
+  });
+  document.getElementById('req-error-dismiss').addEventListener('click', hideBanner);
+
+  // Any successful request clears the banner: a 204 from the poll proves
+  // the page is current just as well as a swap does.
+  document.body.addEventListener('htmx:afterRequest', function (e) {
+    if (e.detail && e.detail.successful) { hideBanner(); }
+  });
+
+  // Times are server-rendered in UTC (a reader-dependent one would break
+  // /fragment's 204); data-utc-zone names the zone, data-utc-rel an age.
+  var timeFmt = null;
+  var timeZoneFmt = null;
+  try {
+    var base = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+    timeFmt = new Intl.DateTimeFormat(undefined, base);
+    base.timeZoneName = 'short';
+    timeZoneFmt = new Intl.DateTimeFormat(undefined, base);
+  } catch (e) {
+    timeFmt = null;
+    timeZoneFmt = null;
+  }
+
+  // An age in ms as a data-utc-rel span's text. A negative age reads "just
+  // now" (clock skew); the buckets overshoot so the text cannot flicker.
+  function relativeAge(ms) {
+    if (ms < 90000) { return 'just now'; }
+    if (ms < 5400000) { return Math.floor(ms / 60000) + ' min ago'; }
+    if (ms < 129600000) { return Math.floor(ms / 3600000) + ' h ago'; }
+    return Math.floor(ms / 86400000) + ' d ago';
+  }
+
+  // One timestamp span, rewritten in place. Idempotent: writes textContent
+  // whole and removes .ts-stale as well as adding it.
+  function renderTime(el) {
+    var ms = Date.parse(el.getAttribute('data-utc'));
+    // Unparseable keeps the server's own text - never "Invalid Date".
+    if (isNaN(ms)) { return; }
+
+    if (!el.hasAttribute('data-utc-rel')) {
+      // The Intl guard belongs to this branch alone: a browser without
+      // DateTimeFormat keeps the server's UTC text but can still show ages.
+      if (!timeFmt || !timeZoneFmt) { return; }
+      var fmt = el.hasAttribute('data-utc-zone') ? timeZoneFmt : timeFmt;
+      el.textContent = fmt.format(new Date(ms));
+      return;
+    }
+
+    // The threshold is stated once per card, in seconds, on an ancestor.
+    // Absent or 0 means no threshold: both fail the > 0 test below.
+    var age = Date.now() - ms;
+    var host = el.closest('[data-stale-after]');
+    var after = host ? parseInt(host.getAttribute('data-stale-after'), 10) : 0;
+    var stale = after > 0 && age > after * 1000;
+    var text = relativeAge(age);
+    el.textContent = stale ? text + ' - stale' : text;
+    el.classList.toggle('ts-stale', stale);
+  }
+
+  function localizeTimes(root) {
+    root.querySelectorAll('[data-utc]').forEach(renderTime);
+  }
+
+  // The relative ones only: localizeTimes already covers them on load and
+  // after a swap, and re-formatting absolute spans changes no character.
+  function tickAges() {
+    document.querySelectorAll('[data-utc-rel]').forEach(renderTime);
+  }
+
+  // Re-queries the DOM each run: #app is replaced by every swap, so a held
+  // reference would tick a span no longer on the page.
+  function tickCountdowns() {
+    document.querySelectorAll('[data-next-utc]').forEach(function (el) {
+      var ms = Date.parse(el.getAttribute('data-next-utc'));
+      if (isNaN(ms)) { return; }
+      var mins = Math.ceil((ms - Date.now()) / 60000);
+      el.textContent = mins > 0 ? 'next check in ~' + mins + 'm' : 'next check due now';
+    });
+  }
+
+  // The asset hash this document was served with. A fragment carrying a
+  // different one means the add-on was updated and this CSS is stale.
+  var appAtLoad = document.getElementById('app');
+  var assetsAtLoad = appAtLoad ? appAtLoad.getAttribute('data-assets') : null;
+
+  localizeTimes(document);
+  tickCountdowns();
+  // Independent of the poll, which never swaps an unchanged fragment. For
+  // the ages this is the whole feature: an idle tab would never go stale.
+  setInterval(function () {
+    tickCountdowns();
+    tickAges();
+  }, 15000);
+
+  // Announce the pill from the permanent region above, and only when it
+  // moved - otherwise every swap repeats the same state out loud.
+  document.body.addEventListener('htmx:afterSwap', function () {
+    // A moved asset hash means new markup would render with this tab's old
+    // CSS forever. Reload once; guarded so a bad swap cannot loop.
+    var app = document.getElementById('app');
+    var swappedAssets = app ? app.getAttribute('data-assets') : null;
+    if (assetsAtLoad && swappedAssets && swappedAssets !== assetsAtLoad) {
+      location.reload();
+      return;
+    }
+    // A swap brings back the server's markup, so the localized times, the
+    // ages and .ts-stale - all written by the client - are gone again.
+    localizeTimes(document);
+    tickCountdowns();
+
+    // ONE write, so a swap that moved both does not have the second
+    // announcement overwrite the first before it is read.
+    var parts = [];
+    var text = pillText();
+    if (text && text !== announced) {
+      announced = text;
+      parts.push(text);
+    }
+    var paused = isPaused();
+    if (paused !== announcedPaused) {
+      announcedPaused = paused;
+      parts.push(paused ? 'Automatic checks paused' : 'Automatic checks resumed');
+    }
+    var restart = restartText();
+    if (restart !== announcedRestart) {
+      // Both edges again: the reminder going away means it is loaded now.
+      parts.push(restart || 'Downloaded integrations are loaded now');
+      announcedRestart = restart;
+    }
+    var chips = chipText();
+    if (chips !== announcedChips) {
+      announcedChips = chips;
+      if (chips) {
+        parts.push(chips);
+      }
+    }
+    if (parts.length) {
+      live.textContent = parts.join('. ');
+    }
+  });
+})();
+</script>
+</body>
+</html>

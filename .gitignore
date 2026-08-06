@@ -1,0 +1,5 @@
+.DS_Store
+
+# Locally built agent binary. The add-on image builds it in the Dockerfile;
+# this is only what `go build -o ha-gitops-agent` leaves behind.
+/ha_gitops_agent/ha-gitops-agent
