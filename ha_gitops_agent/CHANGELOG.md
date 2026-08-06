@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.1] - 2026-08-07
+
+### Changed
+
+- The health chip and event raised when an import cannot record itself now
+  say what else that costs: the record is the merge base capture compares
+  against, so on an agent that has never applied, losing it quietly leaves
+  the file layer one-way. Nothing else reported that.
+
 ## [0.6.0] - 2026-08-07
 
 ### Added

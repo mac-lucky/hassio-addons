@@ -42,7 +42,7 @@
          held out of the apply, so live edits survive but repository
          changes to those files are not arriving. */}}
     {{if .Status.CaptureFailing}}<span class="chip">capture failing: live edits not saved to git</span>{{end}}
-    {{if .Status.ImportRecordFailing}}<span class="chip">import record not saved</span>{{end}}
+    {{if .Status.ImportRecordFailing}}<span class="chip">import record not saved: capture has no merge base</span>{{end}}
     {{if .Status.AddonUpdateSelfSlugFailing}}<span class="chip">update check cannot resolve own slug</span>{{end}}
     {{/* The one chip raised by a reconcile layer: planHacsLayer skips
          itself, so without this the option is on and nothing happens. */}}

@@ -250,8 +250,12 @@ func (r *Reconciler) noteImportRecordFailure(err error) {
 	})
 
 	if first {
+		// The record is also the merge base capture classifies against, so on
+		// an agent that has never applied, losing it leaves the file layer
+		// one-way with nothing else saying so.
 		r.logEvent("the import was pushed but its record could not be saved to /data: " + err.Error() +
-			" - after a restart the dashboard will show the previous import instead")
+			" - after a restart the dashboard will show the previous import instead, and if" +
+			" capture live changes is on it stays one-way until an import or an apply records a base")
 	}
 }
 
