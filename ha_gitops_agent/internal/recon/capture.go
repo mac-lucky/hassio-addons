@@ -216,16 +216,23 @@ func (b captureBases) forPath(p string) string {
 	return b.fallback
 }
 
-// resolveBases picks this cycle's merge bases and checks each is still in
-// the clone. A recorded SHA can go unreachable - a force-push, a rewritten
-// history, a re-clone - and classifying against a commit git cannot read
-// would fail every path; answering "no base" instead sends the cycle down
-// the apply-only path it took before this feature existed, which the next
-// successful apply then repairs by writing a fresh LastGoodSHA.
-func (r *Reconciler) resolveBases(ctx context.Context, state applier.State) captureBases {
+// resolveBases picks this cycle's merge bases and checks each is still a
+// commit the tip descends from. A recorded SHA can go unreachable - a
+// force-push, a rewritten history, a re-clone - and classifying against a
+// commit git cannot read would fail every path; answering "no base" instead
+// sends the cycle down the apply-only path it took before this feature
+// existed, which the next successful apply then repairs.
+//
+// Reachability alone is not enough, which a force-push of the tracked branch
+// shows on real hardware: the old commit is still in the object database, so
+// it reads as reachable, but it now sits on an ABANDONED line. Diffing it
+// against the tip then reports every path that differs across the divergence
+// as "the repository moved", and any of those the user also edited live
+// becomes a conflict that never happened. An orphaned base is no base.
+func (r *Reconciler) resolveBases(ctx context.Context, tip string, state applier.State) captureBases {
 	var bases captureBases
 
-	if len(state.LastCapturePaths) > 0 && r.reachable(ctx, state.LastCaptureSHA) {
+	if len(state.LastCapturePaths) > 0 && r.usableBase(ctx, state.LastCaptureSHA, tip) {
 		bases.capture = state.LastCaptureSHA
 		bases.captured = pathSet(state.LastCapturePaths)
 	}
@@ -238,8 +245,8 @@ func (r *Reconciler) resolveBases(ctx context.Context, state applier.State) capt
 	// applied before it imported, the older LastGoodSHA would read every path
 	// the import moved as "the repository moved" and call the next live edit
 	// to those files a conflict.
-	good := r.reachable(ctx, state.LastGoodSHA)
-	imported := r.reachable(ctx, state.LastImportSHA)
+	good := r.usableBase(ctx, state.LastGoodSHA, tip)
+	imported := r.usableBase(ctx, state.LastImportSHA, tip)
 	switch {
 	case good && imported:
 		bases.fallback = state.LastGoodSHA
@@ -254,13 +261,20 @@ func (r *Reconciler) resolveBases(ctx context.Context, state applier.State) capt
 	return bases
 }
 
-// reachable is CommitReachable with the empty SHA and the error folded into
-// "no", both of which mean the same thing to a caller choosing a merge base.
-func (r *Reconciler) reachable(ctx context.Context, sha string) bool {
+// usableBase reports whether sha can serve as a merge base for a cycle at
+// tip: present in the clone, and an ancestor of tip so that diffing the two
+// describes what the repository DID rather than how two lines of history
+// differ. The empty SHA and every error fold into "no", which all mean the
+// same thing to a caller choosing a base.
+func (r *Reconciler) usableBase(ctx context.Context, sha, tip string) bool {
 	if sha == "" {
 		return false
 	}
-	ok, err := r.git.CommitReachable(ctx, sha)
+	if ok, err := r.git.CommitReachable(ctx, sha); err != nil || !ok {
+		return false
+	}
+	// A commit is its own ancestor, so base == tip needs no special case.
+	ok, err := r.git.IsAncestor(ctx, sha, tip)
 	return err == nil && ok
 }
 
@@ -385,7 +399,7 @@ func (r *Reconciler) captureLiveChanges(
 		return changes, 0
 	}
 
-	routing := r.classifyChanges(ctx, tip, changes, r.resolveBases(ctx, state), pathSet(state.Manifest))
+	routing := r.classifyChanges(ctx, tip, changes, r.resolveBases(ctx, tip, state), pathSet(state.Manifest))
 	if len(routing.deferred) > 0 {
 		// Named, not counted: a deferred path is in no card and no plan, so
 		// this line is the only place it appears at all.

@@ -204,6 +204,19 @@ func TestCaptureBasesFallBackAndReportNoBase(t *testing.T) {
 // reads every path the import moved as a repository change, which turns the
 // user's next live edit to those files into a conflict that is not real.
 func TestResolveBasesPrefersTheLaterOfTheApplyAndImportCommits(t *testing.T) {
+	// Both candidates descend from the tip unless a case says otherwise.
+	descends := map[string]bool{"good1->tip1": true, "import1->tip1": true}
+	with := func(extra ...string) map[string]bool {
+		m := map[string]bool{}
+		for k, v := range descends {
+			m[k] = v
+		}
+		for _, k := range extra {
+			m[k] = true
+		}
+		return m
+	}
+
 	cases := []struct {
 		name     string
 		state    applier.State
@@ -213,28 +226,43 @@ func TestResolveBasesPrefersTheLaterOfTheApplyAndImportCommits(t *testing.T) {
 		{
 			name:     "the import came after the apply",
 			state:    applier.State{LastGoodSHA: "good1", LastImportSHA: "import1"},
-			ancestor: map[string]bool{"good1->import1": true},
+			ancestor: with("good1->import1"),
 			want:     "import1",
 		},
 		{
-			name:  "the apply came after the import",
-			state: applier.State{LastGoodSHA: "good1", LastImportSHA: "import1"},
-			want:  "good1",
+			name:     "the apply came after the import",
+			state:    applier.State{LastGoodSHA: "good1", LastImportSHA: "import1"},
+			ancestor: with(),
+			want:     "good1",
 		},
 		{
-			name:  "only an import has ever run",
-			state: applier.State{LastImportSHA: "import1"},
-			want:  "import1",
+			name:     "only an import has ever run",
+			state:    applier.State{LastImportSHA: "import1"},
+			ancestor: with(),
+			want:     "import1",
 		},
 		{
-			name:  "only an apply has ever run",
-			state: applier.State{LastGoodSHA: "good1"},
-			want:  "good1",
+			name:     "only an apply has ever run",
+			state:    applier.State{LastGoodSHA: "good1"},
+			ancestor: with(),
+			want:     "good1",
 		},
 		{
-			name:  "neither",
-			state: applier.State{},
-			want:  "",
+			name:     "neither",
+			state:    applier.State{},
+			ancestor: with(),
+			want:     "",
+		},
+		{
+			// VM e2e: force-pushing the tracked branch leaves the recorded
+			// base in the object database but off the tip's line. Diffing the
+			// two then reports everything that differs across the divergence
+			// as a repository change, and a live edit to any of it became a
+			// conflict that never happened.
+			name:     "a base orphaned by a force-push is no base",
+			state:    applier.State{LastGoodSHA: "good1", LastImportSHA: "import1"},
+			ancestor: map[string]bool{},
+			want:     "",
 		},
 	}
 	for _, tc := range cases {
@@ -243,10 +271,31 @@ func TestResolveBasesPrefersTheLaterOfTheApplyAndImportCommits(t *testing.T) {
 			fakes.git.ancestorOf = tc.ancestor
 			r := fakes.reconciler(captureOpts())
 
-			if got := r.resolveBases(context.Background(), tc.state).fallback; got != tc.want {
+			if got := r.resolveBases(context.Background(), "tip1", tc.state).fallback; got != tc.want {
 				t.Errorf("fallback = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The capture override is orphaned by the same force-push, and dropping it
+// must not silently promote the fallback for those paths either.
+func TestAnOrphanedCaptureBaseIsDropped(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.ancestorOf = map[string]bool{"good1->tip1": true}
+	r := fakes.reconciler(captureOpts())
+
+	bases := r.resolveBases(context.Background(), "tip1", applier.State{
+		LastGoodSHA:      "good1",
+		LastCaptureSHA:   "orphan1",
+		LastCapturePaths: []string{"automations.yaml"},
+	})
+
+	if bases.capture != "" {
+		t.Errorf("capture base = %q, want empty: it is not on the tip's line", bases.capture)
+	}
+	if got := bases.forPath("automations.yaml"); got != "good1" {
+		t.Errorf("forPath = %q, want good1", got)
 	}
 }
 

@@ -118,9 +118,10 @@ type fakeGit struct {
 	// non-empty sha resolves, which is what a repository nobody rewrote
 	// looks like.
 	commitReachable map[string]bool
-	// ancestorOf answers IsAncestor, keyed "ancestor->descendant". The zero
-	// value says no for every pair, which leaves LastGoodSHA the fallback
-	// base unless a test deliberately puts an import after it.
+	// ancestorOf answers IsAncestor, keyed "ancestor->descendant". nil means
+	// yes for every pair - one line of history that nobody rewrote, which is
+	// what almost every test wants. A non-nil map is looked up exactly, so a
+	// test can model a force-push by leaving a pair out.
 	ancestorOf map[string]bool
 	// changedBetween is what ChangedBetween reports for any pair of
 	// commits; nil means nothing in the repository moved, so every drifting
@@ -322,6 +323,9 @@ func (f *fakeGit) CommitReachable(_ context.Context, sha string) (bool, error) {
 func (f *fakeGit) IsAncestor(_ context.Context, ancestor, descendant string) (bool, error) {
 	if ancestor == "" || descendant == "" {
 		return false, nil
+	}
+	if f.ancestorOf == nil {
+		return true, nil
 	}
 	return f.ancestorOf[ancestor+"->"+descendant], nil
 }

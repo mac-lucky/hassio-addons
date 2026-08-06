@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.2] - 2026-08-07
+
+### Fixed
+
+- A merge base that a force-push left behind is no longer used. Rewriting
+  the tracked branch leaves the old commit in the object database, so it
+  still read as present, but it now sits on an abandoned line: comparing
+  it with the tip reported everything that differed across the divergence
+  as a repository change, and any of those files also edited here turned
+  into a conflict that never happened. A base now has to be a commit the
+  tip actually descends from. Found on hardware.
+
 ## [0.6.1] - 2026-08-07
 
 ### Changed
