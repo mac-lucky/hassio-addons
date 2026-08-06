@@ -1,0 +1,73 @@
+name: Vector Release
+
+# Publishing is tag-gated. Merging to main only builds and tests, so the
+# version in config.yaml can land ahead of the images it names; pushing
+# vector/vX.Y.Z is what puts them on GHCR and cuts the release.
+#
+# The tag carries a "v" and a slash because
+# actions-shared-workflows/generate-release-notes finds the previous tag with
+# --match "<prefix>/v*". The older vector-1.6.0 tag predates this and matches
+# nothing here, so the first tag in the new shape has no range to report.
+on:
+  push:
+    tags:
+      - "vector/v*"
+
+jobs:
+  verify:
+    name: Verify Tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # config.yaml is where the published image tag comes from, and the store
+      # entry Home Assistant reads. A tag naming a different version would
+      # publish an image nobody can install.
+      - name: Check the tag matches config.yaml
+        run: |
+          tag_version="${GITHUB_REF_NAME#vector/v}"
+          config_version=$(yq -r '.version' vector/config.yaml)
+          if [ "${tag_version}" != "${config_version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match config.yaml version (${config_version})" >&2
+            exit 1
+          fi
+          echo "both say ${config_version}"
+
+  ci:
+    name: CI
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/ci.yaml
+    with:
+      publish: true
+
+  release:
+    name: GitHub Release
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Full history: the notes are the commits since the previous tag, and a
+      # shallow clone cannot see it.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        uses: mac-lucky/actions-shared-workflows/.github/actions/generate-release-notes@master
+        with:
+          tag: ${{ github.ref_name }}
+          path_filter: ./vector
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Vector Log Collector ${GITHUB_REF_NAME#vector/v}" \
+            --notes-file release-notes.md

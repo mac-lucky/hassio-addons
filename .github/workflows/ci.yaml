@@ -11,6 +11,16 @@ on:
     paths:
       - "vector/**"
       - ".github/workflows/ci.yaml"
+  # release-vector.yaml calls this on a tag, which is the only way the images
+  # ever reach GHCR. Branch and pull request runs build every architecture and
+  # throw the result away, so a Dockerfile that cannot build still fails before
+  # it is tagged.
+  workflow_call:
+    inputs:
+      publish:
+        description: Push the built images to GHCR.
+        type: boolean
+        default: false
   workflow_dispatch:
 
 env:
@@ -164,7 +174,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GHCR
-        if: github.event_name != 'pull_request'
+        if: ${{ inputs.publish }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
@@ -189,7 +199,7 @@ jobs:
           context: vector
           file: vector/Dockerfile
           platforms: ${{ steps.platform.outputs.platform }}
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ inputs.publish || false }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:${{ needs.information.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:latest
