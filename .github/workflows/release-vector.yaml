@@ -10,7 +10,11 @@ name: Vector Release
 # nothing here, so the first tag in the new shape has no range to report.
 #
 # Dispatching this against an existing tag re-runs the same release, which is
-# the way to recover a publish that failed halfway without moving the tag.
+# the way to recover a publish that failed halfway without moving the tag. A
+# dispatch reads the workflow from the ref it is handed, so this only works on
+# a tag whose commit already carries this file; anything older is a 422 and has
+# to be released by hand. vector/v1.6.2 was cut before this landed and was
+# released that way.
 on:
   push:
     tags:
