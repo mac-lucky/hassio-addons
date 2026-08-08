@@ -213,9 +213,11 @@ jobs:
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=${{ needs.information.outputs.version }}
             VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
+          # The test-generator scope holds amd64 layers, so only the amd64 leg
+          # can reuse it; listing it for aarch64 was dead config.
           cache-from: |
             type=gha,scope=build-${{ matrix.architecture }}
-            type=gha,scope=test-amd64
+            ${{ matrix.architecture == 'amd64' && 'type=gha,scope=test-amd64' || '' }}
           cache-to: type=gha,scope=build-${{ matrix.architecture }},mode=max
           labels: |
             org.opencontainers.image.title=${{ needs.information.outputs.name }}
