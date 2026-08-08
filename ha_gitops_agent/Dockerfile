@@ -2,7 +2,7 @@
 # resolves an ARG used in a FROM instruction's image name from this global
 # scope, not from an ARG declared between stages further down the file.
 ARG GO_VERSION=1.26.5
-ARG BUILD_FROM=alpine:3.24
+ARG BUILD_FROM=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 # Keep in sync with config.yaml's version (which has a comment pointing back
 # here) - stamped into the binary as main.version below.
