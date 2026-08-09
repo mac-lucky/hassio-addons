@@ -206,7 +206,10 @@ jobs:
       - secret-scan
       - test-go
       - lint-go
-    runs-on: ubuntu-latest
+    # aarch64 builds on a native arm runner: the Dockerfile compiles the Go
+    # binary from source, and doing that under QEMU on ubuntu-latest was the
+    # slowest job in the fleet whenever the layer cache went cold.
+    runs-on: ${{ matrix.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     permissions:
       contents: read
       packages: write
@@ -218,7 +221,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Both declared architectures run on native runners; QEMU would only be
+      # needed if an emulated arch were ever added to the platform case below.
       - name: Set up QEMU
+        if: ${{ matrix.architecture != 'amd64' && matrix.architecture != 'aarch64' }}
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
