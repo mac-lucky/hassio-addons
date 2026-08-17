@@ -681,13 +681,23 @@ func TestASlowSensorPushDoesNotBlockTheNextPress(t *testing.T) {
 	blocked := make(chan struct{})
 	fakes.status.block = blocked
 	r := fakes.reconciler(baseOpts())
+
+	// Both presses have to be joined before the test returns: awaitPaused only
+	// waits for the in-memory flag, so a press is still inside writePausedFile -
+	// reading the package-level pausePath - while usePauseFile's Cleanup restores
+	// it. Deferred first so it runs last; close(blocked) has to release the push
+	// they are stuck in before Wait can finish.
+	var presses sync.WaitGroup
+	defer presses.Wait()
 	defer close(blocked)
 
-	go func() { _ = r.SetPaused(true) }()
+	presses.Add(1)
+	go func() { defer presses.Done(); _ = r.SetPaused(true) }()
 	awaitPaused(t, r, true)
 
 	// The first press is still stuck inside its push.
-	go func() { _ = r.SetPaused(false) }()
+	presses.Add(1)
+	go func() { defer presses.Done(); _ = r.SetPaused(false) }()
 	awaitPaused(t, r, false)
 }
 
