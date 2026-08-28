@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.3] - 2026-08-28
+
+### Security
+
+- The image runs `apk upgrade` at build time now. Alpine published openssl
+  3.5.8-r0 on 2026-08-27, fixing six high-severity CVEs in libssl3 and
+  libcrypto3, and the add-on base image had not been rebuilt against it yet.
+  Upgrading during the build takes the fix without waiting on the base.
+
 ## [0.6.2] - 2026-08-07
 
 ### Fixed

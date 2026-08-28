@@ -5,6 +5,18 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-28
+
+### Changed
+
+- Vector is now 0.58.0, up from 0.57.0. None of that release's breaking changes
+  reach this add-on. It uses the journald source, a remap transform and the
+  elasticsearch sink; 0.58 removed the azure_monitor_logs sink, the logdna sink
+  alias, the http_server encoding option, the influxdb_logs namespace option and
+  the legacy buffer metrics. The stricter rule on templated hostnames does not
+  apply either, because the config generator substitutes the sink endpoint
+  before Vector ever parses it.
+
 ## [1.6.2] - 2026-08-01
 
 ### Fixed
