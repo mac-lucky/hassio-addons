@@ -30,7 +30,9 @@ LABEL org.opencontainers.image.title="GitOps Agent" \
 # Only used when age_key is configured, but it has to be in the image either
 # way: the agent probes for it at startup and refuses to run with a key it
 # cannot act on.
-RUN apk add --no-cache git ca-certificates sops
+# apk upgrade first: the digest-pinned base can lag Alpine package fixes, and
+# upgrading at build picks them up without waiting for a base-image rebuild.
+RUN apk upgrade --no-cache && apk add --no-cache git ca-certificates sops
 
 COPY --from=builder /ha-gitops-agent /ha-gitops-agent
 
