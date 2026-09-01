@@ -235,6 +235,8 @@ func (f *fakeAgent) dispatchedCalls() dispatched {
 	return snapshot
 }
 
+func (f *fakeAgent) Busy() bool { return f.Status().Busy }
+
 func (f *fakeAgent) Status() recon.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -4239,5 +4241,65 @@ func TestDashboardSaysWhenAConflictCouldNotBeParked(t *testing.T) {
 	}
 	if strings.Contains(body, "Live copies preserved on <code></code>") {
 		t.Error("the card names an empty branch")
+	}
+}
+
+// A browser-marked cross-site POST must be refused: requireIngress only
+// checks the network hop, and a cross-site form rides the user's own
+// ingress session through the same proxy.
+func TestCrossSitePostIsRefused(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	handler := New(agent)
+
+	req := httptest.NewRequest(http.MethodPost, "/apply", nil)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if got := agent.dispatchedCalls().apply; len(got) != 0 {
+		t.Errorf("apply calls = %v, want none", got)
+	}
+}
+
+// The dashboard's own htmx calls (same-origin), a user-typed request
+// (none) and a header-less API script must all still pass.
+func TestSameOriginAndHeaderlessPostsPass(t *testing.T) {
+	for _, site := range []string{"same-origin", "none", ""} {
+		devEnv(t)
+		agent := newFakeAgent()
+		handler := New(agent)
+
+		req := httptest.NewRequest(http.MethodPost, "/reconcile", nil)
+		if site != "" {
+			req.Header.Set("Sec-Fetch-Site", site)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Sec-Fetch-Site %q: status = %d, want 200", site, rec.Code)
+		}
+		agent.awaitFinish(t)
+	}
+}
+
+// An oversized retry key must be refused before it can reach the event
+// ring, which renders into every fragment poll.
+func TestRetryRefusesAnOversizedKey(t *testing.T) {
+	devEnv(t)
+	agent := blockedAgent(blockedIntegration())
+	handler := New(agent)
+
+	rec := doForm(t, handler, "/retry", url.Values{"key": {strings.Repeat("x", maxRetryKeyLen+1)}})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if got := agent.dispatchedCalls().retry; len(got) != 0 {
+		t.Errorf("retry calls = %v, want none", got)
 	}
 }

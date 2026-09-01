@@ -33,6 +33,17 @@ const (
 	// mismatchLogInterval bounds how often a rejected request gets a log
 	// line, so a flood of guesses cannot spam the process log.
 	mismatchLogInterval = time.Minute
+
+	// MinSecretLen is the shortest webhook_secret main will serve. The
+	// comparison is constant-time, but nothing else slows a guesser down,
+	// so the secret itself has to carry the entropy.
+	MinSecretLen = 16
+
+	// maxFailures failed attempts within failureWindow lock the endpoint
+	// (HTTP 429) until the window rolls over - guessing gets a real
+	// budget, not just a quieter log.
+	maxFailures   = 30
+	failureWindow = time.Minute
 )
 
 // New builds the webhook trigger's http.Handler: one POST /webhook
@@ -45,13 +56,19 @@ const (
 func New(ctx context.Context, agent Agent, secret string) http.Handler {
 	mux := http.NewServeMux()
 	limiter := &rateLimiter{interval: mismatchLogInterval}
+	attempts := &attemptLimiter{window: failureWindow, maxFailures: maxFailures}
 
 	// Computed once from the app's lifetime, not per-request, to make the
 	// detachment explicit rather than incidental.
 	detachedCtx := context.WithoutCancel(ctx)
 
 	mux.HandleFunc("POST /webhook", func(w http.ResponseWriter, r *http.Request) {
+		if attempts.blocked() {
+			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			return
+		}
 		if !validToken(r, secret) {
+			attempts.recordFailure()
 			limiter.warn("hook: rejected webhook request: invalid or missing token", "remote", httpx.RemoteHost(r))
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
@@ -120,4 +137,39 @@ func (l *rateLimiter) warn(msg string, args ...any) {
 	}
 	l.last = now
 	slog.Warn(msg, args...)
+}
+
+// attemptLimiter refuses every request once maxFailures bad tokens have
+// arrived inside the current window. Global rather than per-remote: the
+// endpoint has exactly one legitimate caller shape (a forge webhook with
+// the right token), and a locked-out minute costs it nothing - the next
+// interval reconciles anyway.
+type attemptLimiter struct {
+	window      time.Duration
+	maxFailures int
+
+	mu       sync.Mutex
+	start    time.Time
+	failures int
+}
+
+func (l *attemptLimiter) roll(now time.Time) {
+	if l.start.IsZero() || now.Sub(l.start) > l.window {
+		l.start = now
+		l.failures = 0
+	}
+}
+
+func (l *attemptLimiter) blocked() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.roll(time.Now())
+	return l.failures >= l.maxFailures
+}
+
+func (l *attemptLimiter) recordFailure() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.roll(time.Now())
+	l.failures++
 }

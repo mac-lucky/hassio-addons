@@ -480,10 +480,19 @@ func (r *Reconciler) withMu(f func()) {
 	f()
 }
 
+// eventMaxLen bounds one activity entry. Entries quote foreign text - a
+// git error, a Supervisor body, a request parameter - and the ring is
+// rendered and hashed by every 5-second fragment poll, so an unbounded
+// entry is both a memory and a render cost.
+const eventMaxLen = 2000
+
 // logEvent appends one line to the bounded recent-activity log and the
 // process log. Takes r.mu, so a caller must not hold it. Refusals log here
 // too - the web UI re-renders identically either way.
 func (r *Reconciler) logEvent(message string) {
+	if len(message) > eventMaxLen {
+		message = message[:eventMaxLen] + "... (truncated)"
+	}
 	entry := Event{TS: utcNowISO(), Message: message}
 	r.mu.Lock()
 	r.events = append(r.events, entry)
@@ -536,6 +545,11 @@ func (r *Reconciler) pushStatus() {
 		slog.Warn("statusd.push failed", "state", state, "error", err)
 	}
 }
+
+// Busy reports whether an operation holds opLock right now - the web
+// layer's cheap early-out, where Status would clone every display mirror
+// under mu just to read one flag.
+func (r *Reconciler) Busy() bool { return r.busy() }
 
 // busy reports whether opLock is currently held, without blocking on it:
 // TryLock plus immediate Unlock, sync.Mutex having no inspector.

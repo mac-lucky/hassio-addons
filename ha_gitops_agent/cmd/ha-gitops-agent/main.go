@@ -135,6 +135,13 @@ func run() int {
 	// the select below needs no "is it enabled" branch.
 	var hookSrv *http.Server
 	var hookServeErr chan error
+	if opts.WebhookSecret != "" && len(opts.WebhookSecret) < hook.MinSecretLen {
+		// Refuse to expose an endpoint gated by a guessable secret; the
+		// agent still runs, only the trigger stays off.
+		slog.Error("webhook trigger DISABLED: webhook_secret is shorter than the minimum",
+			"min_length", hook.MinSecretLen)
+		opts.WebhookSecret = ""
+	}
 	if opts.WebhookSecret != "" {
 		hookSrv = &http.Server{
 			Addr:              hookBindAddr,

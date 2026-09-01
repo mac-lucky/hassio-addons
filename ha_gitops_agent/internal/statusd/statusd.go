@@ -104,10 +104,21 @@ func Push(state string, attrs map[string]any, client HTTPClient) (bool, error) {
 	return true, nil
 }
 
-// mergeAttrs copies attrs and adds the fixed friendly_name and icon.
+// maxAttrLen caps one string attribute. Sensor attributes reach a wider
+// audience than anything else this agent writes - every HA user including
+// non-admins, the recorder database, and anything exporting state - and
+// error/warnings quote foreign text (a git error, a check_config block)
+// with no bound of their own.
+const maxAttrLen = 500
+
+// mergeAttrs copies attrs, capping string values, and adds the fixed
+// friendly_name and icon.
 func mergeAttrs(attrs map[string]any) map[string]any {
 	merged := make(map[string]any, len(attrs)+2)
 	for k, v := range attrs {
+		if s, ok := v.(string); ok && len(s) > maxAttrLen {
+			v = s[:maxAttrLen] + "... (truncated)"
+		}
 		merged[k] = v
 	}
 	merged["friendly_name"] = "GitOps Agent Status"

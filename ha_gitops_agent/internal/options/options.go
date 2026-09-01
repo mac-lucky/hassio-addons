@@ -261,8 +261,11 @@ func asStringSlice(value any) []string {
 	return out
 }
 
-// truthy converts value to a bool, returning def for nil. Present but
-// malformed fields degrade rather than crash startup.
+// truthy converts value to a bool, returning def for nil or anything it
+// cannot read as one. Present but malformed fields degrade rather than
+// crash startup - and degrade to the DEFAULT, never to true: a string
+// "false" (a hand-edited options.json, an older schema) must not silently
+// enable an option like allow_import or capture_live_changes.
 func truthy(value any, def bool) bool {
 	switch v := value.(type) {
 	case nil:
@@ -272,11 +275,11 @@ func truthy(value any, def bool) bool {
 	case float64:
 		return v != 0
 	case string:
-		return v != ""
-	case map[string]any:
-		return len(v) != 0
-	case []any:
-		return len(v) != 0
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return def
+		}
+		return parsed
 	default:
 		return def
 	}

@@ -433,8 +433,9 @@ func TestLoadTrackAddonVersions(t *testing.T) {
 		{name: "explicit false", raw: map[string]any{"track_addon_versions": false}, want: false},
 		{name: "explicit true", raw: map[string]any{"track_addon_versions": true}, want: true},
 		{name: "null reads as the default", raw: map[string]any{"track_addon_versions": nil}, want: false},
-		{name: "a non-empty string is truthy", raw: map[string]any{"track_addon_versions": "true"}, want: true},
-		{name: "an empty string is not", raw: map[string]any{"track_addon_versions": ""}, want: false},
+		{name: "the string true parses", raw: map[string]any{"track_addon_versions": "true"}, want: true},
+		{name: "the string false parses as false, not as a non-empty string", raw: map[string]any{"track_addon_versions": "false"}, want: false},
+		{name: "an empty string reads as the default", raw: map[string]any{"track_addon_versions": ""}, want: false},
 	}
 
 	for _, tc := range cases {
@@ -464,8 +465,9 @@ func TestLoadCaptureLiveChanges(t *testing.T) {
 		{name: "explicit false", raw: map[string]any{"capture_live_changes": false}, want: false},
 		{name: "explicit true", raw: map[string]any{"capture_live_changes": true}, want: true},
 		{name: "null reads as the default", raw: map[string]any{"capture_live_changes": nil}, want: false},
-		{name: "a non-empty string is truthy", raw: map[string]any{"capture_live_changes": "true"}, want: true},
-		{name: "an empty string is not", raw: map[string]any{"capture_live_changes": ""}, want: false},
+		{name: "the string true parses", raw: map[string]any{"capture_live_changes": "true"}, want: true},
+		{name: "the string false parses as false, not as a non-empty string", raw: map[string]any{"capture_live_changes": "false"}, want: false},
+		{name: "an empty string reads as the default", raw: map[string]any{"capture_live_changes": ""}, want: false},
 	}
 
 	for _, tc := range cases {

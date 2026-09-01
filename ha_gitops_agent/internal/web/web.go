@@ -58,6 +58,11 @@ type Agent interface {
 	// Status returns the current status for display: sync state, last SHA,
 	// pending count, last apply time, last error.
 	Status() recon.Status
+	// Busy reports whether an operation holds the agent's operation lock.
+	// The routes' early-out probe: Status clones the full mirror set -
+	// events, history, the managed inventory - under the same mutex the
+	// running operation needs, and the start-wait polls it every 5ms.
+	Busy() bool
 	// ReconcileNow runs one fetch + diff cycle immediately.
 	ReconcileNow(ctx context.Context) []differ.Change
 	// ApplyNow applies the currently pending diff.
@@ -541,7 +546,17 @@ func New(agent Agent) http.Handler {
 	// press useful: clearing the memory only decides what the NEXT cycle
 	// plans, so the row would otherwise vanish for a whole interval.
 	mux.HandleFunc("POST /retry", func(w http.ResponseWriter, r *http.Request) {
+		// Bounded before anything reads it: an unrecognized key is echoed
+		// into the 200-entry activity ring and the log, so an unbounded one
+		// could evict the whole feed (and net/http alone allows 10MB of
+		// form body). Real keys are "<layer>:<manifest id>", well under the
+		// cap.
+		r.Body = http.MaxBytesReader(w, r.Body, maxRetryBodyBytes)
 		key := r.FormValue("key")
+		if len(key) > maxRetryKeyLen {
+			http.Error(w, "retry key too long", http.StatusBadRequest)
+			return
+		}
 		opRoute(agent, tracker, "retry blocked item", func(ctx context.Context) error {
 			if err := agent.RetryBlocked(key); err != nil {
 				return err
@@ -567,7 +582,7 @@ func New(agent Agent) http.Handler {
 		}
 	})
 
-	return requireIngress(mux)
+	return requireIngress(requireSameOrigin(mux))
 }
 
 // opRoute builds one action route: refuse while an operation is running,
@@ -584,7 +599,7 @@ func New(agent Agent) http.Handler {
 // log; the user reads refusals in the polled fragment's event log.
 func opRoute(agent Agent, tracker *opTracker, name string, op func(context.Context) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !agent.Status().Busy {
+		if !agent.Busy() {
 			done := make(chan struct{})
 			// opContext, not r.Context(): the operation outlives the
 			// response, whose end cancels the request context.
@@ -613,6 +628,12 @@ func opRoute(agent Agent, tracker *opTracker, name string, op func(context.Conte
 const (
 	opIDHeader      = "X-GitOps-Op-Id"
 	opRefusedHeader = "X-GitOps-Op-Refused"
+)
+
+// Bounds on POST /retry's one parameter - see the route.
+const (
+	maxRetryBodyBytes = 4096
+	maxRetryKeyLen    = 256
 )
 
 // opTracker is the most recent background operation a route started:
@@ -786,7 +807,7 @@ const (
 // recon.WaitIdle. Without it both servers can be down, WaitIdle reports
 // idle, and an apply is about to write (see waitIdleGrace in cmd/).
 func awaitBusy(agent Agent, done <-chan struct{}) {
-	awaitStart(done, func() bool { return agent.Status().Busy })
+	awaitStart(done, agent.Busy)
 }
 
 // awaitStart waits for started to report true or done to close, giving up
@@ -830,6 +851,30 @@ func requireIngress(next http.Handler) http.Handler {
 		if os.Getenv(DevEnvVar) != "1" && httpx.RemoteHost(r) != ingressProxyAddr {
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireSameOrigin refuses a state-changing request that the browser
+// itself marks as initiated by another site. requireIngress only checks
+// the network hop, and a cross-site form POST from any page the logged-in
+// user visits arrives through that same proxy riding their ingress
+// session - the unguessable ingress path is secrecy, not a control.
+//
+// The dashboard's htmx calls and its own forms send
+// "Sec-Fetch-Site: same-origin"; a user-typed URL sends "none"; a
+// non-browser API caller sends no header at all. Only an explicit
+// cross-site marking is refused, so nothing scriptable breaks.
+func requireSameOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			switch r.Header.Get("Sec-Fetch-Site") {
+			case "", "none", "same-origin":
+			default:
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
