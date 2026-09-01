@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -116,7 +117,8 @@ type Reconciler struct {
 	lastWarnings string
 	// lastDriftBranch mirrors applier.State.LastDriftBranch for display -
 	// set forward from a successful commitDriftBack, never hydrated at
-	// startup, like lastSHA/lastApplyUTC/lastStashDir.
+	// startup, like lastSHA/lastApplyUTC. lastStashDir IS hydrated (see
+	// New), so the Roll Back button survives a restart.
 	lastDriftBranch string
 	// lastImportSHA/lastImportUTC mirror applier.State's fields of the
 	// same names. Unlike lastDriftBranch these ARE hydrated in New, so the
@@ -347,6 +349,15 @@ func New(opts options.Options, deps Deps) *Reconciler {
 	persisted := r.applier.StateLoad()
 	r.lastImportSHA = persisted.LastImportSHA
 	r.lastImportUTC = persisted.LastImportUTC
+	// The rollback pointer too, but only while the directory it names still
+	// exists: the stash directories survive a restart, and a restart is
+	// exactly how people try to recover from a bad apply.
+	if persisted.LastStashDir != "" {
+		if info, err := os.Stat(persisted.LastStashDir); err == nil && info.IsDir() {
+			r.lastStashDir = persisted.LastStashDir
+			r.lastStashSummary = persisted.LastStashSummary
+		}
+	}
 	// Likewise the blocked list: an item blocked by the previous process is
 	// still blocked, and the first cycle is minutes away on a slow clone.
 	r.refreshStateMirrors(persisted)
@@ -1692,6 +1703,21 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			Error:    result.Error,
 			StashDir: result.StashDir,
 		})
+		if result.StashDir != "" {
+			// The stash must survive a restart even off a failed apply:
+			// Rollback is the manual retry when the automatic one was
+			// incomplete. The summary stays empty for applyFileLayer's reason.
+			st := r.applier.StateLoad()
+			st.LastStashDir = result.StashDir
+			st.LastStashSummary = ""
+			if saveErr := r.applier.StateSave(st); saveErr != nil {
+				slog.Warn("recon: could not persist the rollback pointer", "error", saveErr)
+			}
+		}
+		// A permanently failing change would otherwise allocate one stash
+		// directory per interval until an apply succeeds; the success path
+		// prunes, so this path has to as well.
+		r.applier.PruneStashDirs(pruneKeep, result.StashDir)
 		return result
 	}
 
@@ -1806,6 +1832,11 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// dialog cannot describe one apply at two fidelities.
 	if finalStashDir != "" {
 		summary := stashSummary(len(result.Changed), finalStashDir)
+		// Into the state saved below too, so the rollback point survives a
+		// restart. When this apply allocated no stash, the previous apply's
+		// persisted pointer rides through StateLoad/StateSave untouched.
+		state.LastStashDir = finalStashDir
+		state.LastStashSummary = summary
 		r.withMu(func() {
 			r.lastStashDir = finalStashDir
 			r.lastStashSummary = summary
@@ -1830,6 +1861,9 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			Error:    err.Error(),
 			StashDir: finalStashDir,
 		})
+		// The failure path leaks stash directories exactly as the file-layer
+		// one does; prune here too, protecting this apply's own stash.
+		r.applier.PruneStashDirs(pruneKeep, finalStashDir)
 		r.pushStatus()
 		return applier.Result{OK: false, Error: err.Error()}
 	}
@@ -2421,6 +2455,16 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 	}
 
 	if combined.OK {
+		// The persisted pointer clears with the in-memory one, or a restart
+		// would resurrect a rollback point this rollback just consumed.
+		st := r.applier.StateLoad()
+		if st.LastStashDir != "" || st.LastStashSummary != "" {
+			st.LastStashDir = ""
+			st.LastStashSummary = ""
+			if saveErr := r.applier.StateSave(st); saveErr != nil {
+				slog.Warn("recon: could not clear the persisted rollback pointer", "error", saveErr)
+			}
+		}
 		r.withMu(func() {
 			r.state = StateInSync
 			r.lastError = ""

@@ -152,6 +152,15 @@ type State struct {
 	LastCaptureSHA   string
 	LastCaptureUTC   string
 	LastCapturePaths []string
+	// LastStashDir is the stash directory the most recent apply left, the
+	// one the Roll Back button restores from, and LastStashSummary is the
+	// sentence the confirmation dialog quotes about it. Persisted so the
+	// rollback point survives an add-on restart - the stash directories
+	// themselves always did, but the pointer to the newest one used to be
+	// memory-only, and a restart is exactly how people try to recover from
+	// a bad apply. Cleared by a successful rollback.
+	LastStashDir     string
+	LastStashSummary string
 }
 
 // StateLoad loads the agent's persisted sync state from cfg.StatePath,
@@ -235,6 +244,12 @@ func StateLoad(cfg Config) State {
 	}
 	if v, ok := raw["last_capture_utc"]; ok {
 		state.LastCaptureUTC = asString(v)
+	}
+	if v, ok := raw["last_stash_dir"]; ok {
+		state.LastStashDir = asString(v)
+	}
+	if v, ok := raw["last_stash_summary"]; ok {
+		state.LastStashSummary = asString(v)
 	}
 	return state
 }
@@ -485,6 +500,8 @@ func StateSave(cfg Config, state State) error {
 		"last_capture_sha":        nullableString(state.LastCaptureSHA),
 		"last_capture_utc":        nullableString(state.LastCaptureUTC),
 		"last_capture_paths":      lastCapturePaths,
+		"last_stash_dir":          nullableString(state.LastStashDir),
+		"last_stash_summary":      nullableString(state.LastStashSummary),
 	}
 
 	data, err := json.Marshal(payload)

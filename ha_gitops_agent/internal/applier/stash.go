@@ -23,13 +23,21 @@ func makeStashDir(cfg Config) (string, error) {
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	stashDir := filepath.Join(cfg.BackupRoot, ts)
 	candidate := stashDir
-	suffix := 0
-	for {
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+	// Bounded, and only a clean "does not exist" ends the probe: any other
+	// stat failure (ENOTDIR from a file where the backup root should be,
+	// EACCES) would recur for every suffix and spin forever.
+	for suffix := 0; ; suffix++ {
+		_, err := os.Stat(candidate)
+		if os.IsNotExist(err) {
 			break
 		}
-		suffix++
-		candidate = fmt.Sprintf("%s-%d", stashDir, suffix)
+		if err != nil {
+			return "", fmt.Errorf("probing %s: %w", candidate, err)
+		}
+		if suffix >= 1000 {
+			return "", fmt.Errorf("no free stash directory name after %s", candidate)
+		}
+		candidate = fmt.Sprintf("%s-%d", stashDir, suffix+1)
 	}
 	if err := os.MkdirAll(candidate, 0o755); err != nil { // #nosec G301 -- 0755 deliberate: Home Assistant's own process must traverse/read these dirs
 		return "", err

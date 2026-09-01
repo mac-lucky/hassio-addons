@@ -1663,6 +1663,55 @@ func TestRollbackAfterSuccessfulApplyCallsRollbackFrom(t *testing.T) {
 	}
 }
 
+// The rollback pointer is persisted with the apply and hydrated at startup,
+// so a restart - exactly how people try to recover from a bad apply - does
+// not orphan the stash directories still on disk.
+func TestTheRollbackPointerSurvivesARestart(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	stash := t.TempDir()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: stash}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	if result := r.ApplyNow(context.Background(), true); !result.OK {
+		t.Fatalf("apply result = %+v, want ok", result)
+	}
+	if got := fakes.applier.state.LastStashDir; got != stash {
+		t.Fatalf("persisted stash dir = %q, want %q", got, stash)
+	}
+
+	// A fresh Reconciler over the same persisted state is the restart.
+	restarted := fakes.reconciler(opts)
+	if got := restarted.Status().LastStashDir; got != stash {
+		t.Errorf("hydrated stash dir = %q, want %q", got, stash)
+	}
+
+	result := restarted.Rollback(context.Background())
+	if !result.OK {
+		t.Fatalf("rollback result = %+v, want ok", result)
+	}
+	if got := fakes.applier.state.LastStashDir; got != "" {
+		t.Errorf("persisted stash dir after rollback = %q, want cleared", got)
+	}
+}
+
+// A pointer whose directory is gone - pruned, or /data restored from a
+// backup - must not offer a rollback that would fail.
+func TestAVanishedStashDirectoryIsNotHydrated(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.applier.state = applier.State{
+		Manifest: []string{}, LastStashDir: "/nonexistent/backup/x", LastStashSummary: "1 file(s)",
+	}
+
+	r := fakes.reconciler(baseOpts())
+
+	if got := r.Status().LastStashDir; got != "" {
+		t.Errorf("hydrated stash dir = %q, want empty for a vanished directory", got)
+	}
+}
+
 func TestRunLoopHonoursStopEventQuickly(t *testing.T) {
 	fakes := newReconcilerFakes()
 	opts := baseOpts()

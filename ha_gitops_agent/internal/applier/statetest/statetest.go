@@ -127,6 +127,14 @@ func PoisonedState(t *testing.T) applier.State {
 			state.LastCaptureSHA = "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d"
 		case "LastCaptureUTC":
 			state.LastCaptureUTC = "2026-08-04T09:20:11+00:00"
+		case "LastStashDir":
+			// Displayed by design: the Roll Back dialog names the stash
+			// directory it would restore from.
+			state.LastStashDir = "/data/backup/20260804T092011Z"
+		case "LastStashSummary":
+			// Displayed by design: the one sentence the Roll Back
+			// confirmation quotes about what the stash restores.
+			state.LastStashSummary = "2 file(s) and registry objects"
 		case "LastCapturePaths":
 			// Poisoned, unlike ConflictedPaths beside it: this half of the
 			// merge-base override is bookkeeping the classifier reads and

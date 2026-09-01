@@ -165,6 +165,52 @@ func TestEmptyChangesIsNoop(t *testing.T) {
 	}
 }
 
+// The token is read before anything is written: finding it missing after
+// writeChanges would leave the config overwritten with no check_config and
+// no stash pointer to roll back from.
+func TestMissingSupervisorTokenWritesNothing(t *testing.T) {
+	t.Setenv("SUPERVISOR_TOKEN", "")
+	cfg := testConfig(t)
+	repoRoot := t.TempDir()
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(repoRoot, "automations.yaml"), "new\n")
+	writeText(t, filepath.Join(configRoot, "automations.yaml"), "old\n")
+
+	changes := []Change{{Path: "automations.yaml", Kind: ChangeUpdate}}
+	_, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
+	if err == nil {
+		t.Fatal("expected an error for the missing token")
+	}
+	if got := readText(t, filepath.Join(configRoot, "automations.yaml")); got != "old\n" {
+		t.Errorf("automations.yaml = %q, want untouched", got)
+	}
+	if _, statErr := os.Stat(cfg.BackupRoot); !os.IsNotExist(statErr) {
+		t.Errorf("backup root should not exist: nothing was stashed")
+	}
+}
+
+// A backup root that is not a directory must be an error, not a spin:
+// os.IsNotExist is false for ENOTDIR, and the probe loop used to retry the
+// next suffix forever with the operation lock held.
+func TestBackupRootAsAFileFailsInsteadOfLooping(t *testing.T) {
+	t.Setenv("SUPERVISOR_TOKEN", "test-token")
+	cfg := testConfig(t)
+	writeText(t, cfg.BackupRoot, "not a directory\n")
+	repoRoot := t.TempDir()
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(repoRoot, "automations.yaml"), "new\n")
+	writeText(t, filepath.Join(configRoot, "automations.yaml"), "old\n")
+
+	changes := []Change{{Path: "automations.yaml", Kind: ChangeUpdate}}
+	_, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
+	if err == nil {
+		t.Fatal("expected an error for the unusable backup root")
+	}
+	if got := readText(t, filepath.Join(configRoot, "automations.yaml")); got != "old\n" {
+		t.Errorf("automations.yaml = %q, want untouched", got)
+	}
+}
+
 func TestHappyPathWritesFilesAndReturnsOK(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "test-token")
 	cfg := testConfig(t)

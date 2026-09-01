@@ -68,6 +68,14 @@ func Apply(
 	}
 	changes = goodChanges
 
+	// Before any write: a missing token means check_config could never run,
+	// and finding that out after writeChanges would leave the config
+	// overwritten with no validation and no stash pointer to roll back from.
+	token, err := options.SupervisorToken()
+	if err != nil {
+		return Result{}, err
+	}
+
 	stashDir, err := makeStashDir(cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("applier: creating stash directory: %w", err)
@@ -80,11 +88,6 @@ func Apply(
 	if writeErr != nil {
 		errMsg, rbOK := rollbackAfterFailure(cfg, stashDir, configRoot, fmt.Sprintf("failed writing changes: %v", writeErr))
 		return Result{OK: false, Error: joinNotes(skipNote, errMsg), RolledBack: rbOK, StashDir: stashDir}, nil
-	}
-
-	token, err := options.SupervisorToken()
-	if err != nil {
-		return Result{}, err
 	}
 
 	valid, checkErr, warnings := checkConfig(ctx, client, cfg, token)
