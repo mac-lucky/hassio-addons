@@ -227,14 +227,16 @@ var _ History = (*history.Store)(nil)
 // caller does, not whether the user is told, and ApplyNow reports it.
 // Prune has none: nothing observes whether an old backup was tidied.
 type Snapshot interface {
-	PreApplyBackup() (string, error)
+	PreApplyBackup(ctx context.Context) (string, error)
 	Prune(keep int)
 }
 
 type realSnapshot struct{}
 
-func (realSnapshot) PreApplyBackup() (string, error) { return snapshot.PreApplyBackup(nil) }
-func (realSnapshot) Prune(keep int)                  { snapshot.Prune(keep, nil) }
+func (realSnapshot) PreApplyBackup(ctx context.Context) (string, error) {
+	return snapshot.PreApplyBackup(ctx, nil)
+}
+func (realSnapshot) Prune(keep int) { snapshot.Prune(keep, nil) }
 
 var _ Snapshot = realSnapshot{}
 

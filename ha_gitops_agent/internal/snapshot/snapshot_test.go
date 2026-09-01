@@ -70,7 +70,7 @@ func TestPreApplyBackupReturnsSlugOnSuccess(t *testing.T) {
 		postResponse: jsonResponse(t, 200, map[string]any{"result": "ok", "data": map[string]any{"slug": "abc123"}}),
 	}
 
-	slug, err := PreApplyBackup(client)
+	slug, err := PreApplyBackup(context.Background(), client)
 	if err != nil {
 		t.Fatalf("PreApplyBackup() error = %v, want nil", err)
 	}
@@ -86,7 +86,7 @@ func TestPreApplyBackupReturnsEmptyOnHTTPError(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "test-token")
 	client := &fakeClient{postResponse: jsonResponse(t, 503, map[string]any{})}
 
-	slug, err := PreApplyBackup(client)
+	slug, err := PreApplyBackup(context.Background(), client)
 	if slug != "" {
 		t.Errorf("PreApplyBackup() = %q, want empty", slug)
 	}
@@ -103,7 +103,7 @@ func TestPreApplyBackupReturnsEmptyOnTransportError(t *testing.T) {
 	transportErr := errors.New("connection refused")
 	client := &fakeClient{postErr: transportErr}
 
-	slug, err := PreApplyBackup(client)
+	slug, err := PreApplyBackup(context.Background(), client)
 	if slug != "" {
 		t.Errorf("PreApplyBackup() = %q, want empty", slug)
 	}
@@ -122,7 +122,7 @@ func TestPreApplyBackupErrorNamesTheBackupTimeout(t *testing.T) {
 
 	client := &fakeClient{postErr: context.DeadlineExceeded}
 
-	_, err := PreApplyBackup(client)
+	_, err := PreApplyBackup(context.Background(), client)
 	if err == nil {
 		t.Fatal("PreApplyBackup() error = nil, want a timeout error")
 	}
@@ -146,7 +146,7 @@ func TestPreApplyBackupUsesBackupTimeoutNotRequestTimeout(t *testing.T) {
 		onPost:       func(req *http.Request) { deadline, _ = req.Context().Deadline() },
 	}
 
-	if _, err := PreApplyBackup(client); err != nil {
+	if _, err := PreApplyBackup(context.Background(), client); err != nil {
 		t.Fatalf("PreApplyBackup() error = %v, want nil", err)
 	}
 	if remaining := time.Until(deadline); remaining < 30*time.Minute {
@@ -158,7 +158,7 @@ func TestPreApplyBackupReturnsEmptyWhenSlugMissing(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "test-token")
 	client := &fakeClient{postResponse: jsonResponse(t, 200, map[string]any{"result": "ok", "data": map[string]any{}})}
 
-	slug, err := PreApplyBackup(client)
+	slug, err := PreApplyBackup(context.Background(), client)
 	if slug != "" {
 		t.Errorf("PreApplyBackup() = %q, want empty", slug)
 	}
@@ -171,7 +171,7 @@ func TestPreApplyBackupReturnsEmptyWithoutSupervisorToken(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "")
 	client := &fakeClient{}
 
-	slug, err := PreApplyBackup(client)
+	slug, err := PreApplyBackup(context.Background(), client)
 	if slug != "" {
 		t.Errorf("PreApplyBackup() = %q, want empty", slug)
 	}

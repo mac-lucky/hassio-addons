@@ -121,6 +121,12 @@ func healthProbe(ctx context.Context, client HTTPClient, cfg Config, token strin
 		if !time.Now().Before(deadline) {
 			return false
 		}
+		// Checked explicitly: a cancelled ctx makes probeOnce fail instantly
+		// and sleepCtx return immediately, which would otherwise turn the
+		// rest of the timeout into a busy loop.
+		if ctx.Err() != nil {
+			return false
+		}
 		sleepCtx(ctx, cfg.HealthProbeInterval)
 	}
 }

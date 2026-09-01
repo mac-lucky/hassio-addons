@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // RunResult is the outcome of one Runner.Run call.
@@ -41,10 +43,16 @@ func (CommandRunner) Run(ctx context.Context, dir string, env []string, args ...
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204 -- argv is built by the calling package from fixed git/sops subcommands plus repo config and paths, never unsanitized input. Covers internal/gitsync and internal/sopscrypt; a new caller must re-justify it.
 	cmd.Dir = dir
 	cmd.Env = env
+	// The buffers below make Run wait on pipe-copy goroutines that finish
+	// only when every DESCENDANT closes the write end - a killed git leaves
+	// git-remote-https holding it, and without a WaitDelay that wait is
+	// forever, past the deadline, with the caller's operation lock held.
+	cmd.WaitDelay = 10 * time.Second
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &cappedBuffer{limit: maxOutputBytes}
+	stderr := &cappedBuffer{limit: maxOutputBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 	if err != nil {
@@ -55,11 +63,32 @@ func (CommandRunner) Run(ctx context.Context, dir string, env []string, args ...
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return RunResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitErr.ExitCode()}, nil
+			return RunResult{Stdout: stdout.buf.String(), Stderr: stderr.buf.String(), ExitCode: exitErr.ExitCode()}, nil
 		}
 		return RunResult{}, err
 	}
-	return RunResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: 0}, nil
+	return RunResult{Stdout: stdout.buf.String(), Stderr: stderr.buf.String(), ExitCode: 0}, nil
+}
+
+// maxOutputBytes bounds each captured stream. Any blob a caller needs in
+// full (git show, a sops decrypt) fits comfortably; an unbounded stream
+// would grow the add-on into its memory limit and be OOM-killed mid-apply
+// instead of failing the one call.
+const maxOutputBytes = 64 << 20
+
+// cappedBuffer is a bytes.Buffer that refuses to grow past limit. Refusal,
+// not truncation: the callers use stdout as file CONTENT, and a silently
+// truncated decrypt or git show must never be written anywhere.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.buf.Len()+len(p) > c.limit {
+		return 0, fmt.Errorf("subprocess output exceeded %d MiB", c.limit>>20)
+	}
+	return c.buf.Write(p)
 }
 
 // Redact returns text with every occurrence of secret replaced, applied

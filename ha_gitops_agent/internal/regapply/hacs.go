@@ -61,6 +61,13 @@ const (
 // storage, so a timeout means the download is never coming back.
 const hacsDownloadTimeout = 10 * time.Minute
 
+// hacsListTimeout bounds one hacs/repositories/list - the WHOLE store,
+// thousands of entries, which HACS serializes on the fly. On a Pi that can
+// outlast the tight transport default, and a timeout there is classified
+// as transport, so nothing would be remembered and the same listing would
+// be retried every cycle.
+const hacsListTimeout = time.Minute
+
 // wsCodeUnknownCommand is Core's ERR_UNKNOWN_COMMAND, answered for a
 // command type nothing has registered. For a hacs/* command it means one
 // thing: HACS is not installed on this box.
@@ -152,7 +159,7 @@ func fetchHacsRepositories(ctx context.Context, ws WSClient, req HacsFetchReques
 		return repos, nil
 	}
 
-	result, err := ws.Cmd(ctx, msgHacsRepositoriesList, hacsListParams())
+	result, err := ws.CmdTimeout(ctx, msgHacsRepositoriesList, hacsListParams(), hacsListTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("could not read the HACS repository list: %w",
 			hacsCommandError(msgHacsRepositoriesList, err))
@@ -320,7 +327,7 @@ type hacsSession struct {
 // case-insensitive, preferring an installed duplicate - so the driver
 // cannot resolve a manifest entry to a different id than the planner did.
 func (s *hacsSession) idOf(ctx context.Context, fullName string) (string, error) {
-	result, err := s.conn.cmd(ctx, msgHacsRepositoriesList, hacsListParams(), 0)
+	result, err := s.conn.cmd(ctx, msgHacsRepositoriesList, hacsListParams(), hacsListTimeout)
 	if err != nil {
 		return "", fmt.Errorf("could not read the HACS repository list: %w",
 			hacsCommandError(msgHacsRepositoriesList, err))

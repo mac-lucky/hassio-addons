@@ -267,11 +267,16 @@ func (c *Client) recvRaw(ctx context.Context) (map[string]any, *Error) {
 
 // recvMatching reads frames until one carries "id" == id, discarding the
 // rest, or returns a "timeout" *Error. Each read gets a fresh budget, so a
-// run of unrelated frames does not eat the wait for the real response.
+// run of unrelated frames does not eat the wait for the real response - but
+// the loop as a whole is capped at three budgets, or a steady stream of
+// frames that never match (this client subscribes to nothing, so all of
+// them are stale or pushed) would hold the Cmd open forever.
 func (c *Client) recvMatching(ctx context.Context, id uint64, timeout time.Duration) (map[string]any, *Error) {
+	overallCtx, cancel := context.WithTimeout(ctx, 3*timeout)
+	defer cancel()
 	timeoutMsg := fmt.Sprintf("no response for id=%d within %s", id, timeout)
 	for {
-		msg, err := c.readMessage(ctx, timeout, timeoutMsg)
+		msg, err := c.readMessage(overallCtx, timeout, timeoutMsg)
 		if err != nil {
 			return nil, err
 		}

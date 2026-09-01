@@ -434,14 +434,22 @@ func TestApplyHacsPlanGivesOnlyTheDownloadALongBudget(t *testing.T) {
 
 	for i, call := range ws.calls {
 		budget := ws.timeouts[i]
-		if call.msgType == msgHacsRepositoryDownload {
+		switch call.msgType {
+		case msgHacsRepositoryDownload:
 			if budget != hacsDownloadTimeout {
 				t.Errorf("download budget = %v, want %v", budget, hacsDownloadTimeout)
 			}
-			continue
-		}
-		if budget != 0 {
-			t.Errorf("%s budget = %v, want the client default", call.msgType, budget)
+		case msgHacsRepositoriesList:
+			// The whole store, serialized on the fly - its own budget too,
+			// or a slow box records a transport failure and retries the
+			// same listing every cycle.
+			if budget != hacsListTimeout {
+				t.Errorf("list budget = %v, want %v", budget, hacsListTimeout)
+			}
+		default:
+			if budget != 0 {
+				t.Errorf("%s budget = %v, want the client default", call.msgType, budget)
+			}
 		}
 	}
 }

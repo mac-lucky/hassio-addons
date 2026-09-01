@@ -1681,7 +1681,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// whose failure IS fatal. Reported rather than swallowed - on a large
 	// install this can fail every apply (see snapshot.BackupTimeout), and
 	// the dashboard would stay green without the safety net.
-	if _, backupErr := r.snapshot.PreApplyBackup(); backupErr != nil {
+	if _, backupErr := r.snapshot.PreApplyBackup(ctx); backupErr != nil {
 		r.withMu(func() { r.lastBackupError = backupErr.Error() })
 		r.logEvent("pre-apply supervisor backup failed: " + backupErr.Error())
 	} else {

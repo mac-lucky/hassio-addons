@@ -510,7 +510,7 @@ type fakeSnapshot struct {
 	backupErr error
 }
 
-func (f *fakeSnapshot) PreApplyBackup() (string, error) {
+func (f *fakeSnapshot) PreApplyBackup(_ context.Context) (string, error) {
 	f.backupCalls++
 	if f.backupErr != nil {
 		return "", f.backupErr

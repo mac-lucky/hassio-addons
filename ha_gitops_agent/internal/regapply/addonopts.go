@@ -366,6 +366,12 @@ func pollAddonStarted(ctx context.Context, client AddonHTTPClient, token, slug s
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("add-on %s did not report state \"started\" within %s after restart", slug, addonRestartPollTimeout)
 		}
+		// A cancelled ctx makes the fetch fail instantly and the sleep
+		// return immediately - without this check, the rest of the deadline
+		// would be a tight loop of doomed requests.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("add-on %s: restart poll cancelled: %w", slug, err)
+		}
 		sleepAddonCtx(ctx, addonRestartPollInterval)
 	}
 }

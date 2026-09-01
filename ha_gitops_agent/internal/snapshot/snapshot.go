@@ -47,8 +47,10 @@ var DefaultClient HTTPClient = http.DefaultClient
 // primary rollback path: every failure is logged and returned so the
 // caller can report it and carry on rather than abort the apply.
 //
+// BackupTimeout caps the call within whatever ctx allows, so a caller that
+// is shutting down can end a 15-minute tar instead of waiting it out.
 // Pass a nil client to use DefaultClient.
-func PreApplyBackup(client HTTPClient) (string, error) {
+func PreApplyBackup(ctx context.Context, client HTTPClient) (string, error) {
 	if client == nil {
 		client = DefaultClient
 	}
@@ -71,9 +73,9 @@ func PreApplyBackup(client HTTPClient) (string, error) {
 		return "", fmt.Errorf("failed to encode request body: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), BackupTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, BackupTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, options.Supervisor+"/backups/new/partial", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, options.Supervisor+"/backups/new/partial", bytes.NewReader(body))
 	if err != nil {
 		slog.Warn("pre_apply_backup: failed to build request", "error", err)
 		return "", fmt.Errorf("failed to build request: %w", err)
