@@ -102,10 +102,11 @@ off - nothing about ordinary syncing needs it.
 ### `webhook_secret`
 
 Empty by default (the listener never starts). Set it to a shared
-secret to enable a small separate `POST /webhook` listener on port
-8098 that triggers an immediate reconcile - useful for a git host's
-push webhook instead of waiting for the next `interval_minutes` tick.
-See "Webhook trigger" below.
+secret of at least 16 characters to enable a small separate
+`POST /webhook` listener on port 8098 that triggers an immediate
+reconcile - useful for a git host's push webhook instead of waiting
+for the next `interval_minutes` tick. A shorter secret is refused at
+startup and the listener stays off. See "Webhook trigger" below.
 
 ### `apply_after_pull`
 
@@ -1537,6 +1538,10 @@ at all - no socket is bound on port 8098. Set it to enable `POST
 header or a `?token=<secret>` query parameter (the header is checked
 first if both are present). A match triggers an immediate reconcile
 asynchronously and responds `202 Accepted`; a mismatch responds `403`.
+The secret must be at least 16 characters - a shorter one is refused
+at startup and the listener stays off. After 30 bad tokens within a
+minute the endpoint answers `429` for everything until the minute
+rolls over, so a guesser gets a real budget rather than a quieter log.
 
 **Prefer the `X-Gitops-Token` header over `?token=`.** A query
 parameter routinely ends up written to a reverse proxy's or client's

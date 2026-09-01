@@ -8,6 +8,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.4] - 2026-09-02
+
+A hardening release: a full audit of the agent produced fixes across the
+sync engine, the registry layers and the web dashboard. No new options and
+no changed defaults; the one behavior change to note is that a
+`webhook_secret` shorter than 16 characters now keeps the webhook listener
+off (see Security below).
+
+### Fixed
+
+- A transient `git diff` failure during the capture phase no longer wipes
+  the conflict record. Paths the agent had refused to sync in either
+  direction could be routed back into the apply on the strength of one
+  failed diff, overwriting the live edit the record was protecting. The
+  error path now keeps every standing conflict out of the apply.
+- The Roll Back button survives a restart. The pointer to the newest
+  backup stash was memory-only, so restarting the add-on - exactly how
+  people try to recover from a bad apply - left the stash directories on
+  disk with no way to use them. The pointer is persisted now, on failed
+  applies too.
+- Rolling back an adopted area, dashboard or other registry object now
+  releases ownership again. Ownership used to stick after the rollback, so
+  removing the item from the manifest later deleted an object the user had
+  made by hand.
+- Rolling back files now asks Home Assistant to reload (or restart, per
+  `apply_after_pull`), so the runtime matches the restored files instead of
+  keeping the applied config in memory.
+- A symlinked config file no longer fails every apply. The path is skipped
+  with a note and the rest of the batch still applies.
+- Two hangs that could wedge the agent until a restart (and one past it):
+  a timed-out git call whose helper process lingered could block forever,
+  and a backup directory replaced by a file spun the stash allocator in a
+  loop with the operation lock held. Restart polls and health probes also
+  stop burning their whole deadline when the operation is cancelled.
+- Failed applies no longer leak one backup stash directory per check
+  interval, and interrupted rollbacks can no longer lose journal entries -
+  a stash bookkeeping failure used to drop an entry from the journal
+  without undoing it, putting it out of reach of every later retry.
+- Add-on options and config entries that vanished between planning and
+  applying are handled cleanly instead of jamming their own rollback.
+- A subentry created successfully but not identifiable afterwards is now
+  adopted by its `match` rules on the next check instead of being stranded
+  by the failure memory.
+- The whole HACS store listing gets its own timeout, so a slow box no
+  longer records it as a transport failure and refetches every cycle.
+- `state.json` and the run history are written with an fsync before the
+  rename, so a power cut can no longer leave a zero-length file that
+  silently resets what the agent manages.
+
+### Security
+
+- Credentials embedded in `repo_url` (`https://user:token@...`) were
+  written to the add-on log by two startup messages and could be echoed
+  back in git's own errors. Both are scrubbed now, and the dashboard's
+  redaction handles more URL shapes.
+- Live values read back from Home Assistant - a prior add-on password
+  captured when an option came under management, a reconfigure flow's
+  current values - could reach world-readable files or unredacted errors.
+  `state.json`, the run history and commit-back staging are 0600 now, and
+  flow rejections are scrubbed against everything the step submitted.
+- The dashboard's state-changing endpoints reject browser cross-site
+  requests, and the retry endpoint bounds its input instead of letting an
+  oversized value flood the activity feed.
+- The webhook listener requires a secret of at least 16 characters and
+  locks out after 30 bad tokens per minute. A short secret is refused at
+  startup with an error in the log.
+- The status sensor's error and warning attributes are capped: sensor
+  attributes are visible to every Home Assistant user and exporter, a
+  wider audience than the add-on's own dashboard.
+- Boolean options degrade safely: a malformed value like the string
+  "false" now reads as the option's default instead of enabling it.
+
 ## [0.6.3] - 2026-08-28
 
 ### Security

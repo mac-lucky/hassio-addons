@@ -4,7 +4,7 @@ slug: ha_gitops_agent
 url: https://github.com/mac-lucky/hassio-addons/tree/main/ha_gitops_agent
 # Keep in sync with Dockerfile's ARG BUILD_VERSION default (which has a
 # comment pointing back here).
-version: "0.6.3"
+version: "0.6.4"
 arch:
   - aarch64
   - amd64
