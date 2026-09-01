@@ -144,12 +144,37 @@ func assertRunsOutsideTheWorktree(t *testing.T, dir, target string) {
 	}
 }
 
+// writeDecryptFixture writes a real file for DecryptFile, which reads its
+// target before calling sops to check the declared key source.
+func writeDecryptFixture(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestDecryptAlsoRunsOutsideTheWorktree(t *testing.T) {
 	c, fr := newTestCrypter(t)
-	if _, err := c.DecryptFile(context.Background(), "/repo/secrets.yaml"); err != nil {
+	path := writeDecryptFixture(t, "secrets.yaml", "mqtt_password: ENC[data]\n")
+	if _, err := c.DecryptFile(context.Background(), path); err != nil {
 		t.Fatalf("DecryptFile: %v", err)
 	}
-	assertRunsOutsideTheWorktree(t, fr.calls[0].dir, "/repo/secrets.yaml")
+	assertRunsOutsideTheWorktree(t, fr.calls[0].dir, path)
+}
+
+// The key-source guard must never be skippable: an unreadable target is an
+// error, not a fall-through to running sops against whatever backends the
+// repository's own metadata declares.
+func TestDecryptRefusesAnUnreadableFile(t *testing.T) {
+	c, fr := newTestCrypter(t)
+	if _, err := c.DecryptFile(context.Background(), filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+		t.Fatal("DecryptFile() error = nil, want a refusal for the unreadable file")
+	}
+	if len(fr.calls) != 0 {
+		t.Errorf("sops was run %d time(s), want none", len(fr.calls))
+	}
 }
 
 // secrets.yaml is encrypted whole: --encrypted-regex would leave every
@@ -317,8 +342,9 @@ func TestEncryptSurfacesNonZeroExit(t *testing.T) {
 func TestDecryptPassesKeyOnlyInEnv(t *testing.T) {
 	c, fr := newTestCrypter(t)
 	fr.stdout = "mqtt_password: hunter2\n"
+	path := writeDecryptFixture(t, "secrets.yaml", "mqtt_password: ENC[data]\n")
 
-	plaintext, err := c.DecryptFile(context.Background(), "/repo/secrets.yaml")
+	plaintext, err := c.DecryptFile(context.Background(), path)
 	if err != nil {
 		t.Fatalf("DecryptFile: %v", err)
 	}
@@ -330,9 +356,9 @@ func TestDecryptPassesKeyOnlyInEnv(t *testing.T) {
 	}
 	call := fr.calls[0]
 
-	want := []string{"sops", "decrypt", "/repo/secrets.yaml"}
+	want := []string{"sops", "decrypt", "--input-type", "yaml", "--output-type", "yaml", path}
 	if !equalStrings(call.args, want) {
-		t.Errorf("argv = %q, want %q (bare - no key, no recipient)", call.args, want)
+		t.Errorf("argv = %q, want %q (no key, no recipient)", call.args, want)
 	}
 	for _, arg := range call.args {
 		if strings.Contains(arg, testIdentity) {
@@ -358,7 +384,7 @@ func TestDecryptRedactsKeyFromErrors(t *testing.T) {
 	fr.exit = 1
 	fr.stderr = "failed to load key " + testIdentity + " for decryption"
 
-	_, err := c.DecryptFile(context.Background(), "/repo/secrets.yaml")
+	_, err := c.DecryptFile(context.Background(), writeDecryptFixture(t, "secrets.yaml", "mqtt_password: ENC[data]\n"))
 	if err == nil {
 		t.Fatal("DecryptFile() error = nil, want an error")
 	}

@@ -348,6 +348,11 @@ func driveSubentryFlow(
 	}
 	flowID, _ := result["flow_id"].(string)
 
+	// What the previous iteration submitted, for scrubbing a rejection: on
+	// a reconfigure the submission merges the manifest over the step's
+	// LIVE defaults, credentials included, and a validator can quote any
+	// of it back in "errors".
+	var lastSubmission map[string]any
 	for steps := 0; ; {
 		typ, _ := result["type"].(string)
 		switch typ {
@@ -370,7 +375,8 @@ func driveSubentryFlow(
 			stepID, _ := result["step_id"].(string)
 			if errs, ok := result["errors"].(map[string]any); ok && len(errs) > 0 {
 				abortSubentryFlowBestEffort(ctx, client, token, flowID, label)
-				return fmt.Errorf("%s: step '%s' rejected the submitted data: %v", label, stepID, errs)
+				return fmt.Errorf("%s: step '%s' rejected the submitted data: %s",
+					label, stepID, redactStepSecrets(fmt.Sprintf("%v", errs), lastSubmission))
 			}
 
 			rawSchema, _ := result["data_schema"].([]any)
@@ -388,6 +394,7 @@ func driveSubentryFlow(
 				return fmt.Errorf("%s: flow exceeded %d steps without completing", label, maxFlowSteps)
 			}
 
+			lastSubmission = submission
 			next, advErr := advanceSubentryFlow(ctx, client, token, flowID, submission)
 			if advErr != nil {
 				abortSubentryFlowBestEffort(ctx, client, token, flowID, label)

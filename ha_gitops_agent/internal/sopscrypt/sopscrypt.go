@@ -120,7 +120,11 @@ func (c *Crypter) EncryptFileInPlace(ctx context.Context, absPath, relPath strin
 	args = append(args, storeFlags(format)...)
 	args = append(args, absPath)
 
-	result, err := c.run(ctx, args, runDir(), nil)
+	dir, err := runDir()
+	if err != nil {
+		return err
+	}
+	result, err := c.run(ctx, args, dir, nil)
 	if err != nil {
 		return err
 	}
@@ -161,26 +165,36 @@ func (c *Crypter) DecryptFile(ctx context.Context, absPath string) ([]byte, erro
 	}
 	args := []string{"sops", "decrypt"}
 	// Checked here so no path to sops can skip it: the document's own
-	// metadata picks the backend, and it is repository content.
-	if data, err := os.ReadFile(absPath); err == nil { // #nosec G304 -- caller-guarded path inside the worktree
-		if source := UnsupportedKeySource(data); source != "" {
-			return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: it declares a %s master key, and this agent decrypts only with its configured age key",
-				filepath.Base(absPath), source)
-		}
-		// Named on the way out too, mirroring EncryptFileInPlace: sops
-		// infers its store from the extension case-sensitively, and the
-		// wrong store fails outright ("no binary data found in tree").
-		// The ciphertext settles what the path cannot, since a dotenv
-		// document has no extension; an unreadable file lets sops refuse.
-		format := formatFromPath(absPath)
-		if format == FormatNone && isDotenvCiphertext(data) {
-			format = FormatDotenv
-		}
-		args = append(args, storeFlags(format)...)
+	// metadata picks the backend, and it is repository content. A read
+	// failure is an error, not a fall-through - running sops anyway would
+	// skip exactly this guard against repository-declared kms/vault
+	// backends, on nothing more than a transient EACCES.
+	data, err := os.ReadFile(absPath) // #nosec G304 -- caller-guarded path inside the worktree
+	if err != nil {
+		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: could not read it to check its key source: %v",
+			filepath.Base(absPath), err)
 	}
+	if source := UnsupportedKeySource(data); source != "" {
+		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: it declares a %s master key, and this agent decrypts only with its configured age key",
+			filepath.Base(absPath), source)
+	}
+	// Named on the way out too, mirroring EncryptFileInPlace: sops
+	// infers its store from the extension case-sensitively, and the
+	// wrong store fails outright ("no binary data found in tree").
+	// The ciphertext settles what the path cannot, since a dotenv
+	// document has no extension.
+	format := formatFromPath(absPath)
+	if format == FormatNone && isDotenvCiphertext(data) {
+		format = FormatDotenv
+	}
+	args = append(args, storeFlags(format)...)
 	args = append(args, absPath)
 
-	result, err := c.run(ctx, args, runDir(), []string{"SOPS_AGE_KEY=" + c.identity})
+	dir, err := runDir()
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.run(ctx, args, dir, []string{"SOPS_AGE_KEY=" + c.identity})
 	if err != nil {
 		return nil, err
 	}
@@ -285,23 +299,24 @@ func (c *Crypter) failureReason(result RunResult) string {
 // masked diff would all accept.
 //
 // --config is no alternative: sops rejects a config with no matching
-// creation rule. Falls back to the temp dir itself, still outside the
-// worktree.
-func runDir() string {
+// creation rule. A MkdirTemp failure is FATAL to the call, never a
+// fallback to the temp dir itself: sops's upward search from /tmp reaches
+// / - exactly where a planted config would sit - so running there defeats
+// the boundary this directory exists to hold.
+func runDir() (string, error) {
 	sopsRunDirOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "sopscrypt-")
-		if err != nil {
-			sopsRunDir = os.TempDir()
-			return
-		}
-		sopsRunDir = dir
+		sopsRunDir, sopsRunDirErr = os.MkdirTemp("", "sopscrypt-")
 	})
-	return sopsRunDir
+	if sopsRunDirErr != nil {
+		return "", fmt.Errorf("sopscrypt: could not create the sops run directory: %w", sopsRunDirErr)
+	}
+	return sopsRunDir, nil
 }
 
 var (
 	sopsRunDirOnce sync.Once
 	sopsRunDir     string
+	sopsRunDirErr  error
 )
 
 // baseEnv is the process environment minus any inherited age key, which

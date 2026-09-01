@@ -302,7 +302,7 @@ func sanitizeManagedMap(raw any, field string) map[string]string {
 	m, ok := raw.(map[string]any)
 	if !ok {
 		if raw != nil {
-			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "value", raw)
+			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "type", fmt.Sprintf("%T", raw))
 		}
 		return map[string]string{}
 	}
@@ -311,7 +311,7 @@ func sanitizeManagedMap(raw any, field string) map[string]string {
 		if s, ok := v.(string); ok {
 			clean[k] = s
 		} else {
-			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "value", v)
+			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "type", fmt.Sprintf("%T", v))
 		}
 	}
 	return clean
@@ -325,7 +325,7 @@ func sanitizeFieldOriginals(raw any, field string) map[string]map[string]any {
 	m, ok := raw.(map[string]any)
 	if !ok {
 		if raw != nil {
-			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "value", raw)
+			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "type", fmt.Sprintf("%T", raw))
 		}
 		return map[string]map[string]any{}
 	}
@@ -333,7 +333,7 @@ func sanitizeFieldOriginals(raw any, field string) map[string]map[string]any {
 	for k, v := range m {
 		fields, ok := v.(map[string]any)
 		if !ok {
-			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "value", v)
+			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "type", fmt.Sprintf("%T", v))
 			continue
 		}
 		clean[k] = fields
@@ -347,7 +347,7 @@ func sanitizeBoolMap(raw any, field string) map[string]bool {
 	m, ok := raw.(map[string]any)
 	if !ok {
 		if raw != nil {
-			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "value", raw)
+			slog.Warn("applier: state_load "+field+" is not a mapping, resetting", "type", fmt.Sprintf("%T", raw))
 		}
 		return map[string]bool{}
 	}
@@ -356,7 +356,7 @@ func sanitizeBoolMap(raw any, field string) map[string]bool {
 		if b, ok := v.(bool); ok {
 			clean[k] = b
 		} else {
-			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "value", v)
+			slog.Warn("applier: state_load dropping malformed "+field+" entry", "key", k, "type", fmt.Sprintf("%T", v))
 		}
 	}
 	return clean
@@ -370,7 +370,7 @@ func sanitizeStringList(raw any, field string) []string {
 	list, ok := raw.([]any)
 	if !ok {
 		if raw != nil {
-			slog.Warn("applier: state_load "+field+" is not a list, resetting", "value", raw)
+			slog.Warn("applier: state_load "+field+" is not a list, resetting", "type", fmt.Sprintf("%T", raw))
 		}
 		return []string{}
 	}
@@ -379,7 +379,7 @@ func sanitizeStringList(raw any, field string) []string {
 	for _, entryRaw := range list {
 		entry, ok := entryRaw.(string)
 		if !ok || entry == "" {
-			slog.Warn("applier: state_load dropping malformed "+field+" entry", "value", entryRaw)
+			slog.Warn("applier: state_load dropping malformed "+field+" entry", "type", fmt.Sprintf("%T", entryRaw))
 			continue
 		}
 		if seen[entry] {
@@ -510,7 +510,10 @@ func StateSave(cfg Config, state State) error {
 	}
 
 	tmpPath := cfg.StatePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil { // #nosec G306 -- add-on-private state, not secret
+	// 0600 like regapply's stash files, and for the same reason: addon
+	// originals hold another add-on's real pre-management option values, a
+	// prior password included, and history/attempt errors can quote them.
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmpPath, cfg.StatePath)

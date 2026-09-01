@@ -285,10 +285,18 @@ func (g *GitSync) copyLiveIntoWorkdir(ctx context.Context, configRoot, p string)
 	if err := os.MkdirAll(filepath.Dir(repoPath), 0o750); err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(repoPath, content, 0o644); err != nil { // #nosec G304,G306,G703 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir; config content, not secret
+	// 0600, and removed again on a failed encrypt: between this write and
+	// encryptInWorkdir the live content - a secrets file included - sits in
+	// the worktree in the clear, and a copy left behind by a failed sops
+	// call would otherwise stay there, inside every Supervisor backup of
+	// /data. Git records only the executable bit, so the tighter mode
+	// never reaches the repository. The next cycle's forced checkout
+	// restores anything removed here.
+	if err := os.WriteFile(repoPath, content, 0o600); err != nil { // #nosec G304 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
 		return false, err
 	}
 	if err := g.encryptInWorkdir(ctx, repoPath, p, content); err != nil {
+		_ = os.Remove(repoPath)
 		return false, err
 	}
 	return true, nil

@@ -79,7 +79,9 @@ func TestRepoDecryptTransformPassesPlaintextThrough(t *testing.T) {
 // the absolute path has to be rebuilt from the caller's root.
 func TestRepoDecryptTransformDecryptsFromTheRepoRoot(t *testing.T) {
 	fake := &fakeSops{decrypt: "mqtt_password: hunter2\n"}
-	transform := repoDecryptTransform(newFakeCrypter(t, fake), "/data/repo")
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "secrets.yaml"), encryptedFixture)
+	transform := repoDecryptTransform(newFakeCrypter(t, fake), root)
 
 	out, encrypted, err := transform("secrets.yaml", []byte(encryptedFixture))
 	if err != nil {
@@ -95,7 +97,7 @@ func TestRepoDecryptTransformDecryptsFromTheRepoRoot(t *testing.T) {
 		t.Fatalf("sops calls = %d, want 1", len(fake.calls))
 	}
 	call := fake.calls[0]
-	if want := filepath.Join("/data/repo", "secrets.yaml"); call[len(call)-1] != want {
+	if want := filepath.Join(root, "secrets.yaml"); call[len(call)-1] != want {
 		t.Errorf("sops argv = %q, want it to end in %q", call, want)
 	}
 }
@@ -104,7 +106,9 @@ func TestRepoDecryptTransformDecryptsFromTheRepoRoot(t *testing.T) {
 // write ENC[...] into the live config.
 func TestRepoDecryptTransformSurfacesFailures(t *testing.T) {
 	fake := &fakeSops{exit: 1, stderr: "no key could decrypt the data"}
-	transform := repoDecryptTransform(newFakeCrypter(t, fake), "/data/repo")
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "secrets.yaml"), encryptedFixture)
+	transform := repoDecryptTransform(newFakeCrypter(t, fake), root)
 
 	if _, _, err := transform("secrets.yaml", []byte(encryptedFixture)); err == nil {
 		t.Fatal("transform() error = nil, want the decrypt failure")
@@ -117,7 +121,9 @@ func TestRepoDecryptTransformSurfacesFailures(t *testing.T) {
 // how much of the diff to publish, needs the flag.
 func TestApplierRepoTransformDropsTheEncryptedFlag(t *testing.T) {
 	fake := &fakeSops{decrypt: "mqtt_password: hunter2\n"}
-	transform := applierRepoTransform(repoDecryptTransform(newFakeCrypter(t, fake), "/data/repo"))
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "secrets.yaml"), encryptedFixture)
+	transform := applierRepoTransform(repoDecryptTransform(newFakeCrypter(t, fake), root))
 
 	out, err := transform("secrets.yaml", []byte(encryptedFixture))
 	if err != nil {

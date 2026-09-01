@@ -536,6 +536,10 @@ func driveFlow(
 	}
 	flowID, _ := result["flow_id"].(string)
 
+	// The previous iteration's submission, for scrubbing a rejection: the
+	// "errors" map is the integration's own validator and can quote any
+	// submitted value back.
+	var lastSubmission map[string]any
 	for steps := 0; ; {
 		typ, _ := result["type"].(string)
 		switch typ {
@@ -562,7 +566,8 @@ func driveFlow(
 			stepID, _ := result["step_id"].(string)
 			if errs, ok := result["errors"].(map[string]any); ok && len(errs) > 0 {
 				abortFlowBestEffort(ctx, client, token, flowID, domain)
-				return "", "", fmt.Errorf("domain %s: step '%s' rejected the declared data: %v", domain, stepID, errs)
+				return "", "", fmt.Errorf("domain %s: step '%s' rejected the declared data: %s",
+					domain, stepID, redactStepSecrets(fmt.Sprintf("%v", errs), lastSubmission))
 			}
 
 			schema := result["data_schema"]
@@ -583,6 +588,7 @@ func driveFlow(
 				return "", "", fmt.Errorf("domain %s: flow exceeded %d steps without completing", domain, maxFlowSteps)
 			}
 
+			lastSubmission = stepData
 			next, advErr := advanceFlow(ctx, client, token, flowID, stepData)
 			if advErr != nil {
 				abortFlowBestEffort(ctx, client, token, flowID, domain)

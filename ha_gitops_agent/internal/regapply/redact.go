@@ -90,3 +90,20 @@ func redactedError(err error, values []string) error {
 	}
 	return &redactedErr{msg: redactValues(err.Error(), values), cause: err}
 }
+
+// redactedStepError is redactedError's field-name-driven sibling: err's
+// text scrubbed through redactStepSecrets against each map in turn,
+// identity kept for errors.Is/As. nil maps are no-ops.
+func redactedStepError(err error, maps ...map[string]any) error {
+	if err == nil {
+		return err
+	}
+	text := err.Error()
+	for _, m := range maps {
+		text = redactStepSecrets(text, m)
+	}
+	if text == err.Error() {
+		return err
+	}
+	return &redactedErr{msg: text, cause: err}
+}

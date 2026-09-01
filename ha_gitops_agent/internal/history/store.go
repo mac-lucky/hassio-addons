@@ -140,7 +140,9 @@ func (s *Store) Append(rec Record) error {
 	line = append(line, marshalled...)
 	line = append(line, '\n')
 
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) // #nosec G304,G302 -- caller-owned path under the add-on's own /data; run metadata, not secret
+	// 0600: a record's Error field can quote whatever a failing apply or
+	// Supervisor call echoed back, and that has included live values.
+	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- caller-owned path under the add-on's own /data
 	if err != nil {
 		return err
 	}
@@ -192,7 +194,7 @@ func (s *Store) rotate() {
 	buf := data[start:]
 
 	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, buf, 0o644); err != nil { // #nosec G306 -- add-on-private run metadata, not secret
+	if err := os.WriteFile(tmpPath, buf, 0o600); err != nil { // 0600 for Append's reason
 		slog.Warn("history rotate failed", "path", s.path, "error", err)
 		return
 	}

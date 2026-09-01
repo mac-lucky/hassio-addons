@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -276,13 +277,27 @@ func newCommandError(format string, args ...any) *CommandError {
 // with the branch name; recon matches it with errors.Is.
 var ErrRemoteBranchMissing = errors.New("the tracked branch does not exist on the remote yet")
 
-// redactCredentials strips both secrets credentialEnv can put in front of
-// git - the raw token and the base64 "user:token" blob, which some git/curl
-// failure paths echo back verbatim - from all git output before it is
-// logged or turned into a CommandError.
+// redactCredentials strips every secret this configuration can put in
+// front of git - the raw token, the base64 "user:token" blob some git/curl
+// failure paths echo back verbatim, and a password embedded in repo_url's
+// userinfo, which git quotes back in its own errors - from all git output
+// before it is logged or turned into a CommandError.
 func (g *GitSync) redactCredentials(text string) string {
 	text = execx.Redact(text, g.Opts.GitToken)
-	return execx.Redact(text, g.basicAuthBlob())
+	text = execx.Redact(text, g.basicAuthBlob())
+	return execx.Redact(text, g.repoURLPassword())
+}
+
+// repoURLPassword is the password in Opts.RepoURL's userinfo, or "".
+// credentialEnv never sends it anywhere, but the URL itself goes on git's
+// command line, and git repeats it in errors.
+func (g *GitSync) repoURLPassword() string {
+	parsed, err := url.Parse(g.Opts.RepoURL)
+	if err != nil || parsed.User == nil {
+		return ""
+	}
+	password, _ := parsed.User.Password()
+	return password
 }
 
 // basicAuthBlob returns the base64 "user:token" blob for the Basic
@@ -349,7 +364,8 @@ func (g *GitSync) EnsureClone(ctx context.Context) error {
 		if origin == g.Opts.RepoURL {
 			return nil
 		}
-		slog.Info("gitsync: origin changed, re-cloning", "from", origin, "to", g.Opts.RepoURL, "workdir", g.Workdir)
+		slog.Info("gitsync: origin changed, re-cloning",
+			"from", execx.RedactURL(origin), "to", execx.RedactURL(g.Opts.RepoURL), "workdir", g.Workdir)
 		if err := os.RemoveAll(g.Workdir); err != nil {
 			return fmt.Errorf("gitsync: removing old clone: %w", err)
 		}
@@ -369,7 +385,7 @@ func (g *GitSync) EnsureClone(ctx context.Context) error {
 	if _, err := g.runGit(ctx, []string{"config", "--global", "--add", "safe.directory", absPath(g.Workdir)}, g.Workdir, nil); err != nil {
 		return err
 	}
-	slog.Info("gitsync: cloned", "repo_url", g.Opts.RepoURL, "workdir", g.Workdir)
+	slog.Info("gitsync: cloned", "repo_url", execx.RedactURL(g.Opts.RepoURL), "workdir", g.Workdir)
 	return nil
 }
 

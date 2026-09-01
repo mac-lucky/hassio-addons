@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -99,4 +101,26 @@ func Redact(text, secret string) string {
 		return text
 	}
 	return strings.ReplaceAll(text, secret, "***REDACTED***")
+}
+
+// credentialInURL matches a "user:password@" credential ahead of a host,
+// including the scheme-less shapes url.Parse reads as an opaque path with
+// no Userinfo ("github.com/u:token@repo"). An scp-style "git@host:" has no
+// colon before its "@" and stays untouched.
+var credentialInURL = regexp.MustCompile(`([^/@:\s]+):([^@\s]+)@`)
+
+// RedactURL returns rawURL safe to log or display: userinfo is stripped,
+// any query string is dropped (tokens ride there too), and a string
+// url.Parse cannot decompose at all is replaced rather than trusted.
+func RedactURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "(unparseable url, redacted)"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	return credentialInURL.ReplaceAllString(parsed.String(), "${1}:***REDACTED***@")
 }

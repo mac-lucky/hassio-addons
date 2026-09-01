@@ -461,8 +461,17 @@ type addonStashEntry struct {
 func executeAddonOp(
 	ctx context.Context, client AddonHTTPClient, token string, op registries.RegOp,
 	declaredRestartOnChange map[string]bool, originals map[string]map[string]any, restartOnChangeState map[string]bool,
-) (addonStashEntry, error) {
+) (entry addonStashEntry, err error) {
 	slug := op.Key
+
+	// The POSTs below send the add-on's WHOLE merged options object, and a
+	// Supervisor rejection can quote any of it back (internal/httperr keeps
+	// 400 characters of the body). The caller scrubs the declared
+	// op.Secrets; the live values under credential-shaped keys - a restore
+	// op declares no secrets at all - are only known here, so every failure
+	// leaves through this scrub.
+	var current, merged map[string]any
+	defer func() { err = redactedStepError(err, current, merged) }()
 
 	info, err := fetchAddonInfoRaw(ctx, client, token, slug)
 	if err != nil {
@@ -473,7 +482,7 @@ func executeAddonOp(
 			return addonStashEntry{}, fmt.Errorf("add-on not installed: %s", slug)
 		}
 	}
-	current, _ := info["options"].(map[string]any)
+	current, _ = info["options"].(map[string]any)
 
 	defaults, hasDefaults, defaultsErr := fetchAddonStoreDefaultsRaw(ctx, client, token, slug)
 	if defaultsErr != nil {
@@ -486,7 +495,7 @@ func executeAddonOp(
 	}
 	base := persistedOnlyOptions(current, defaults, hasDefaults)
 
-	merged := make(map[string]any, len(base)+len(op.Params))
+	merged = make(map[string]any, len(base)+len(op.Params))
 	for k, v := range base {
 		merged[k] = v
 	}

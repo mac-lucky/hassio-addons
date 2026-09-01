@@ -18,7 +18,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"runtime/debug"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/execx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/history"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/httpx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/humanize"
@@ -257,18 +257,12 @@ func addonUpdatesFunc(updates []recon.AddonUpdateStatus) addonUpdatesView {
 	return view
 }
 
-// redactRepoURL strips userinfo ("user:token@") so a credential in
-// repo_url never reaches the dashboard or /status.json.
+// redactRepoURL strips credentials so repo_url never reaches the dashboard
+// or /status.json carrying one. execx.RedactURL fails closed: userinfo and
+// the query string go, scheme-less credential shapes are caught, and a
+// string url.Parse cannot decompose is replaced rather than trusted.
 func redactRepoURL(rawURL string) string {
-	if rawURL == "" {
-		return rawURL
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.User == nil {
-		return rawURL
-	}
-	parsed.User = nil
-	return parsed.String()
+	return execx.RedactURL(rawURL)
 }
 
 // safeStatus is agent.Status() with any credential stripped from RepoURL.
