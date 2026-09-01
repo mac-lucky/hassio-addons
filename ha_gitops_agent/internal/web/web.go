@@ -262,18 +262,12 @@ func addonUpdatesFunc(updates []recon.AddonUpdateStatus) addonUpdatesView {
 	return view
 }
 
-// redactRepoURL strips credentials so repo_url never reaches the dashboard
-// or /status.json carrying one. execx.RedactURL fails closed: userinfo and
-// the query string go, scheme-less credential shapes are caught, and a
-// string url.Parse cannot decompose is replaced rather than trusted.
-func redactRepoURL(rawURL string) string {
-	return execx.RedactURL(rawURL)
-}
-
-// safeStatus is agent.Status() with any credential stripped from RepoURL.
+// safeStatus is agent.Status() with any credential stripped from RepoURL
+// (execx.RedactURL, which fails closed) before it reaches the dashboard
+// or /status.json.
 func safeStatus(agent Agent) recon.Status {
 	status := agent.Status()
-	status.RepoURL = redactRepoURL(status.RepoURL)
+	status.RepoURL = execx.RedactURL(status.RepoURL)
 	return status
 }
 

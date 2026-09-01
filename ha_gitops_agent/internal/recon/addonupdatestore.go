@@ -3,6 +3,8 @@ package recon
 import (
 	"encoding/json"
 	"os"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 )
 
 // addonUpdatesPath holds the last check's per-slug results, so the card is
@@ -60,17 +62,7 @@ func writeAddonUpdatesFile(rows []AddonUpdateStatus) error {
 		return err
 	}
 
-	tmpPath := addonUpdatesPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil { // #nosec G306 -- add-on-private check results, not secret
-		return err
-	}
-	if err := os.Rename(tmpPath, addonUpdatesPath); err != nil {
-		// Cleaned up like history.rotate's own rename failure: a .tmp
-		// nothing will read again is litter in a volume users look at.
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return fsx.WriteFileAtomic(addonUpdatesPath, data, 0o644)
 }
 
 // hydrateAddonUpdates reconciles what was persisted against what is

@@ -27,6 +27,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/hacs"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/history"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/humanize"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/regapply"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
@@ -490,10 +491,7 @@ const eventMaxLen = 2000
 // process log. Takes r.mu, so a caller must not hold it. Refusals log here
 // too - the web UI re-renders identically either way.
 func (r *Reconciler) logEvent(message string) {
-	if len(message) > eventMaxLen {
-		message = message[:eventMaxLen] + "... (truncated)"
-	}
-	entry := Event{TS: utcNowISO(), Message: message}
+	entry := Event{TS: utcNowISO(), Message: humanize.Truncate(message, eventMaxLen)}
 	r.mu.Lock()
 	r.events = append(r.events, entry)
 	if len(r.events) > eventLogMaxLen {
@@ -546,14 +544,11 @@ func (r *Reconciler) pushStatus() {
 	}
 }
 
-// Busy reports whether an operation holds opLock right now - the web
-// layer's cheap early-out, where Status would clone every display mirror
-// under mu just to read one flag.
-func (r *Reconciler) Busy() bool { return r.busy() }
-
-// busy reports whether opLock is currently held, without blocking on it:
-// TryLock plus immediate Unlock, sync.Mutex having no inspector.
-func (r *Reconciler) busy() bool {
+// Busy reports whether an operation holds opLock right now, without
+// blocking on it (TryLock plus immediate Unlock, sync.Mutex having no
+// inspector). Exported as the web layer's cheap early-out, where Status
+// would clone every display mirror under mu just to read one flag.
+func (r *Reconciler) Busy() bool {
 	if r.opLock.TryLock() {
 		r.opLock.Unlock()
 		return false
@@ -839,7 +834,7 @@ func (r *Reconciler) Status() Status {
 
 	return Status{
 		State:               state,
-		Busy:                r.busy(),
+		Busy:                r.Busy(),
 		Configured:          r.opts.RepoURL != "",
 		DryRun:              r.opts.DryRun,
 		RepoURL:             r.opts.RepoURL,
@@ -1703,6 +1698,13 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	}
 
 	result, failed := r.applyFileLayer(ctx, pending)
+	// Structural, not per-exit: a permanently failing change allocates one
+	// stash directory per interval until an apply succeeds, so EVERY exit
+	// from here on prunes, protecting this apply's own stash. finalStashDir
+	// may still be replaced by the registry-only MakeStashDir below; the
+	// deferred read sees whatever it ends up as.
+	finalStashDir := result.StashDir
+	defer func() { r.applier.PruneStashDirs(pruneKeep, finalStashDir) }()
 	if failed {
 		// The single funnel for every file-layer failure, so one record
 		// covers both of applyFileLayer's exits. Only claim a rollback that
@@ -1721,17 +1723,8 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			// The stash must survive a restart even off a failed apply:
 			// Rollback is the manual retry when the automatic one was
 			// incomplete. The summary stays empty for applyFileLayer's reason.
-			st := r.applier.StateLoad()
-			st.LastStashDir = result.StashDir
-			st.LastStashSummary = ""
-			if saveErr := r.applier.StateSave(st); saveErr != nil {
-				slog.Warn("recon: could not persist the rollback pointer", "error", saveErr)
-			}
+			r.persistStashPointer(result.StashDir, "")
 		}
-		// A permanently failing change would otherwise allocate one stash
-		// directory per interval until an apply succeeds; the success path
-		// prunes, so this path has to as well.
-		r.applier.PruneStashDirs(pruneKeep, result.StashDir)
 		return result
 	}
 
@@ -1784,7 +1777,6 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// ApplyPlan; it is persisted below in the same StateSave() as the
 	// manifest update so both land together.
 	var acc registryApplyOutcome
-	finalStashDir := result.StashDir
 	if len(registryOps) > 0 {
 		// registryOps is unified for display but executed as seven
 		// independent layers, each running only once the one before it
@@ -1884,9 +1876,6 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			Error:    err.Error(),
 			StashDir: finalStashDir,
 		})
-		// The failure path leaks stash directories exactly as the file-layer
-		// one does; prune here too, protecting this apply's own stash.
-		r.applier.PruneStashDirs(pruneKeep, finalStashDir)
 		r.pushStatus()
 		return applier.Result{OK: false, Error: err.Error()}
 	}
@@ -2034,13 +2023,30 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 		StashDir: finalStashDir,
 	})
 
-	// Best-effort cleanup; neither call returns an error, and both log
-	// their own failures.
+	// Best-effort cleanup; the stash-directory prune is the deferred one
+	// above, shared with every failure exit.
 	r.snapshot.Prune(pruneKeep)
-	r.applier.PruneStashDirs(pruneKeep, finalStashDir)
 
 	r.pushStatus()
 	return result
+}
+
+// persistStashPointer records dir/summary as the durable rollback pointer
+// in state.json - the load-modify-save shape both failure-path callers
+// need (the success path rides the apply's own StateSave). A no-op when
+// the persisted pointer already matches; returns the loaded state, with
+// the write applied, so a caller can feed it onward.
+func (r *Reconciler) persistStashPointer(dir, summary string) applier.State {
+	st := r.applier.StateLoad()
+	if st.LastStashDir == dir && st.LastStashSummary == summary {
+		return st
+	}
+	st.LastStashDir = dir
+	st.LastStashSummary = summary
+	if err := r.applier.StateSave(st); err != nil {
+		slog.Warn("recon: could not persist the rollback pointer", "error", err)
+	}
+	return st
 }
 
 // applyFileLayer applies the pending file changes through internal/
@@ -2479,13 +2485,6 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 		}
 	}
 
-	// Out here because the mirrors follow EVERY rollback: an install with
-	// no registry layer takes none of the branches above and would show
-	// pre-rollback ownership for up to a whole interval. Re-read rather
-	// than reusing regState, which exists only on that branch. The file
-	// manifest does not shrink: the repository still asks for those files.
-	r.refreshStateMirrors(r.applier.StateLoad())
-
 	combined := applier.Result{
 		OK:         result.OK && registryRolledBack && addonRolledBack && integrationRolledBack,
 		Changed:    result.Changed,
@@ -2494,17 +2493,21 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 		StashDir:   result.StashDir,
 	}
 
+	// The mirrors follow EVERY rollback: an install with no registry layer
+	// takes none of the branches above and would show pre-rollback
+	// ownership for up to a whole interval. Re-read rather than reusing
+	// regState, which exists only on that branch; on success the same load
+	// also clears the persisted rollback pointer - a restart would
+	// otherwise resurrect a rollback point this rollback just consumed.
+	// The file manifest does not shrink: the repository still asks for
+	// those files.
 	if combined.OK {
-		// The persisted pointer clears with the in-memory one, or a restart
-		// would resurrect a rollback point this rollback just consumed.
-		st := r.applier.StateLoad()
-		if st.LastStashDir != "" || st.LastStashSummary != "" {
-			st.LastStashDir = ""
-			st.LastStashSummary = ""
-			if saveErr := r.applier.StateSave(st); saveErr != nil {
-				slog.Warn("recon: could not clear the persisted rollback pointer", "error", saveErr)
-			}
-		}
+		r.refreshStateMirrors(r.persistStashPointer("", ""))
+	} else {
+		r.refreshStateMirrors(r.applier.StateLoad())
+	}
+
+	if combined.OK {
 		r.withMu(func() {
 			r.state = StateInSync
 			r.lastError = ""

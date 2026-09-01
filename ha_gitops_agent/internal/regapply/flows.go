@@ -536,10 +536,12 @@ func driveFlow(
 	}
 	flowID, _ := result["flow_id"].(string)
 
-	// The previous iteration's submission, for scrubbing a rejection: the
-	// "errors" map is the integration's own validator and can quote any
-	// submitted value back.
+	// Scrubbed at the function boundary, executeAddonOp's pattern, so every
+	// exit is covered rather than the one "errors" branch: rejection maps,
+	// abort reasons and description placeholders are all the integration's
+	// own text and can quote back anything the previous step submitted.
 	var lastSubmission map[string]any
+	defer func() { err = redactedStepError(err, lastSubmission) }()
 	for steps := 0; ; {
 		typ, _ := result["type"].(string)
 		switch typ {
@@ -566,8 +568,7 @@ func driveFlow(
 			stepID, _ := result["step_id"].(string)
 			if errs, ok := result["errors"].(map[string]any); ok && len(errs) > 0 {
 				abortFlowBestEffort(ctx, client, token, flowID, domain)
-				return "", "", fmt.Errorf("domain %s: step '%s' rejected the declared data: %s",
-					domain, stepID, redactStepSecrets(fmt.Sprintf("%v", errs), lastSubmission))
+				return "", "", fmt.Errorf("domain %s: step '%s' rejected the declared data: %v", domain, stepID, errs)
 			}
 
 			schema := result["data_schema"]
@@ -1032,15 +1033,14 @@ func integrationInverseReplayAndPersist(
 		entry := executed[pos]
 		label := fmt.Sprintf("%s integration:%s", entry.Kind, entry.Key)
 
-		// Committed only after a successful write - see
-		// addonInverseReplayAndPersist for why a plain truncation loses a
-		// skipped entry from every later retry.
-		shortenedIdx := removeInt(outstanding, pos)
-		if err := writeIntegrationStash(stashDir, entriesFor(executed, shortenedIdx)); err != nil {
+		shortened, err := shrinkJournal(outstanding, pos, executed, func(entries []integrationStashEntry) error {
+			return writeIntegrationStash(stashDir, entries)
+		})
+		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: stash write failed: %v", label, err))
 			continue
 		}
-		outstanding = shortenedIdx
+		outstanding = shortened
 
 		if err := invertFlowOp(ctx, client, dialer, token, entry, managed, hashes, dataSnapshots, secrets); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", label, err))

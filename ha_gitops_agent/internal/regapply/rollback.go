@@ -145,13 +145,14 @@ func inverseReplayAndPersist(
 		entry := executed[pos]
 		label := fmt.Sprintf("%s %s:%s", entry.Kind, entry.RType, entry.Key)
 
-		shortenedIdx := removeInt(outstanding, pos)
-		toWrite := append(append([]stashEntry(nil), prefix...), entriesFor(executed, shortenedIdx)...)
-		if err := writeRegistryStash(stashDir, toWrite); err != nil {
+		shortened, err := shrinkJournal(outstanding, pos, executed, func(entries []stashEntry) error {
+			return writeRegistryStash(stashDir, append(append([]stashEntry(nil), prefix...), entries...))
+		})
+		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: stash write failed: %v", label, err))
 			continue
 		}
-		outstanding = shortenedIdx
+		outstanding = shortened
 
 		if conn == nil {
 			if dialer == nil {
@@ -213,6 +214,21 @@ func entriesFor[T any](executed []T, idx []int) []T {
 		out[i] = executed[x]
 	}
 	return out
+}
+
+// shrinkJournal commits the removal of executed[pos] from an on-disk
+// rollback journal: the shortened list is WRITTEN first, and the shortened
+// index set is returned only when that write landed. The one invariant all
+// three inverse replays share - a failed write must leave the entry both
+// on disk and outstanding, or the next successful write persists a journal
+// missing an entry the failure skipped, dropping it from every later retry
+// with its live effect still in place.
+func shrinkJournal[T any](outstanding []int, pos int, executed []T, write func([]T) error) ([]int, error) {
+	shortened := removeInt(outstanding, pos)
+	if err := write(entriesFor(executed, shortened)); err != nil {
+		return outstanding, err
+	}
+	return shortened, nil
 }
 
 // isTransportOrTimeoutError reports whether err is a *wsclient.Error whose

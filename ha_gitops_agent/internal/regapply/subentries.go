@@ -332,7 +332,7 @@ func subentryStepData(data map[string]any, stepID string) map[string]any {
 func driveSubentryFlow(
 	ctx context.Context, client IntegrationHTTPClient, token, entryID, subentryType, subentryID string,
 	data map[string]any,
-) error {
+) (err error) {
 	if data == nil {
 		data = map[string]any{}
 	}
@@ -348,11 +348,13 @@ func driveSubentryFlow(
 	}
 	flowID, _ := result["flow_id"].(string)
 
-	// What the previous iteration submitted, for scrubbing a rejection: on
-	// a reconfigure the submission merges the manifest over the step's
-	// LIVE defaults, credentials included, and a validator can quote any
-	// of it back in "errors".
+	// Scrubbed at the function boundary, executeAddonOp's pattern, so every
+	// exit is covered rather than the one "errors" branch: on a reconfigure
+	// the submission merges the manifest over the step's LIVE defaults,
+	// credentials included, and rejection maps, abort reasons and
+	// placeholders can all quote any of it back.
 	var lastSubmission map[string]any
+	defer func() { err = redactedStepError(err, lastSubmission) }()
 	for steps := 0; ; {
 		typ, _ := result["type"].(string)
 		switch typ {
@@ -375,8 +377,7 @@ func driveSubentryFlow(
 			stepID, _ := result["step_id"].(string)
 			if errs, ok := result["errors"].(map[string]any); ok && len(errs) > 0 {
 				abortSubentryFlowBestEffort(ctx, client, token, flowID, label)
-				return fmt.Errorf("%s: step '%s' rejected the submitted data: %s",
-					label, stepID, redactStepSecrets(fmt.Sprintf("%v", errs), lastSubmission))
+				return fmt.Errorf("%s: step '%s' rejected the submitted data: %v", label, stepID, errs)
 			}
 
 			rawSchema, _ := result["data_schema"].([]any)

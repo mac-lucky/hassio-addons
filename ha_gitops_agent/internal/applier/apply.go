@@ -104,11 +104,7 @@ func Apply(
 	}
 
 	errMsg := ""
-	if opts.ApplyAfterPull == "reload" || opts.ApplyAfterPull == "restart" {
-		service := "reload_all"
-		if opts.ApplyAfterPull == "restart" {
-			service = "restart"
-		}
+	if service := serviceFor(opts.ApplyAfterPull); service != "" {
 		if callOK, callErr := callService(ctx, client, cfg, token, service); !callOK {
 			errMsg = callErr
 		}
@@ -144,7 +140,9 @@ func Apply(
 // later apply or manual restart. Best-effort: the files are already
 // restored either way, so the return is "" or a warning to surface.
 func ReloadAfterRollback(ctx context.Context, cfg Config, opts options.Options, client HTTPClient) string {
-	if opts.ApplyAfterPull != "reload" && opts.ApplyAfterPull != "restart" {
+	const prefix = "could not ask home assistant to reload the restored files: "
+	service := serviceFor(opts.ApplyAfterPull)
+	if service == "" {
 		return ""
 	}
 	if client == nil {
@@ -152,14 +150,24 @@ func ReloadAfterRollback(ctx context.Context, cfg Config, opts options.Options, 
 	}
 	token, err := options.SupervisorToken()
 	if err != nil {
-		return "could not ask home assistant to reload the restored files: " + err.Error()
-	}
-	service := "reload_all"
-	if opts.ApplyAfterPull == "restart" {
-		service = "restart"
+		return prefix + err.Error()
 	}
 	if ok, errMsg := callService(ctx, client, cfg, token, service); !ok {
-		return "could not ask home assistant to reload the restored files: " + errMsg
+		return prefix + errMsg
+	}
+	return ""
+}
+
+// serviceFor maps opts.ApplyAfterPull to the homeassistant service an
+// apply issues, or "" for "off". One mapping for Apply and
+// ReloadAfterRollback, so a rollback can never reload with a different
+// service than the apply it undoes.
+func serviceFor(applyAfterPull string) string {
+	switch applyAfterPull {
+	case "reload":
+		return "reload_all"
+	case "restart":
+		return "restart"
 	}
 	return ""
 }

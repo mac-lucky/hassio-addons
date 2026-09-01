@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 )
 
 const (
@@ -19,16 +21,14 @@ const (
 	integrationStashFile = "integration_stash.json"
 )
 
-// writeStashFile rewrites <stashDir>/filename with payload's JSON via a
-// ".tmp" sibling and a rename, so a crash mid-write leaves the previous
-// stash intact - a truncated one would parse as fewer ops and under-revert.
+// writeStashFile rewrites <stashDir>/filename with payload's JSON
+// atomically (fsync before rename, see fsx.WriteFileAtomic), so a crash
+// mid-write leaves the previous stash intact - a truncated or zero-length
+// one would parse as fewer ops and under-revert.
 func writeStashFile(stashDir, filename string, payload any) error {
 	if err := os.MkdirAll(stashDir, 0o755); err != nil { // #nosec G301 -- 0755 deliberate: Home Assistant's own process must traverse/read these dirs
 		return err
 	}
-	path := filepath.Join(stashDir, filename)
-	tmpPath := path + ".tmp"
-
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -38,10 +38,7 @@ func writeStashFile(stashDir, filename string, payload any) error {
 	// option value the manifest did not reference out of secrets.yaml).
 	// Defence in depth - refs are substituted in stashPriorOptions - but the
 	// file survives five applies and rides along in Supervisor backups.
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return fsx.WriteFileAtomic(filepath.Join(stashDir, filename), data, 0o600)
 }
 
 // readStashFile JSON-decodes <stashDir>/filename into a T, reporting a

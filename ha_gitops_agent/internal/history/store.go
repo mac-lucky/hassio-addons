@@ -198,7 +198,6 @@ func (s *Store) rotate() {
 	// 0600 for Append's reason; atomic-with-fsync for state.json's.
 	if err := fsx.WriteFileAtomic(s.path, buf, 0o600); err != nil {
 		slog.Warn("history rotate failed", "path", s.path, "error", err)
-		_ = os.Remove(s.path + ".tmp")
 		return
 	}
 

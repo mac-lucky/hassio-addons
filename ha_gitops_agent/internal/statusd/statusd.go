@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/httpx"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/humanize"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 )
 
@@ -116,8 +117,8 @@ const maxAttrLen = 500
 func mergeAttrs(attrs map[string]any) map[string]any {
 	merged := make(map[string]any, len(attrs)+2)
 	for k, v := range attrs {
-		if s, ok := v.(string); ok && len(s) > maxAttrLen {
-			v = s[:maxAttrLen] + "... (truncated)"
+		if s, ok := v.(string); ok {
+			v = humanize.Truncate(s, maxAttrLen)
 		}
 		merged[k] = v
 	}

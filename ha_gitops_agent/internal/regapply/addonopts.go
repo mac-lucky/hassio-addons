@@ -366,25 +366,27 @@ func pollAddonStarted(ctx context.Context, client AddonHTTPClient, token, slug s
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("add-on %s did not report state \"started\" within %s after restart", slug, addonRestartPollTimeout)
 		}
-		// A cancelled ctx makes the fetch fail instantly and the sleep
-		// return immediately - without this check, the rest of the deadline
-		// would be a tight loop of doomed requests.
-		if err := ctx.Err(); err != nil {
+		if err := sleepAddonCtx(ctx, addonRestartPollInterval); err != nil {
 			return fmt.Errorf("add-on %s: restart poll cancelled: %w", slug, err)
 		}
-		sleepAddonCtx(ctx, addonRestartPollInterval)
 	}
 }
 
-func sleepAddonCtx(ctx context.Context, d time.Duration) {
+// sleepAddonCtx sleeps for d, returning ctx.Err() when the context ends
+// the wait early - load-bearing for pollAddonStarted, where ignoring it
+// would turn the rest of the deadline into a tight loop of doomed
+// requests (applier's sleepCtx carries the same contract).
+func sleepAddonCtx(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
-		return
+		return ctx.Err()
 	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
+		return nil
 	}
 }
 
@@ -971,17 +973,15 @@ func addonInverseReplayAndPersist(
 		entry := executed[pos]
 		label := fmt.Sprintf("%s addon:%s", entry.Kind, entry.Slug)
 
-		// Committed only after a successful write, the registry replay's
-		// discipline: a plain truncation would let the NEXT successful
-		// write persist a journal missing an entry this failure skipped,
-		// dropping it from every later retry with its options still live.
-		shortenedIdx := removeInt(outstanding, pos)
-		if err := writeAddonStash(stashDir, entriesFor(executed, shortenedIdx)); err != nil {
+		shortened, err := shrinkJournal(outstanding, pos, executed, func(entries []addonStashEntry) error {
+			return writeAddonStash(stashDir, entries)
+		})
+		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: stash write failed: %v", label, err))
 			notInvertedReversed = append(notInvertedReversed, entry)
 			continue
 		}
-		outstanding = shortenedIdx
+		outstanding = shortened
 
 		if err := invertAddonOp(ctx, client, token, entry, originals, restartOnChangeState); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", label, err))

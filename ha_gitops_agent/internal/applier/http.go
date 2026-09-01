@@ -121,13 +121,9 @@ func healthProbe(ctx context.Context, client HTTPClient, cfg Config, token strin
 		if !time.Now().Before(deadline) {
 			return false
 		}
-		// Checked explicitly: a cancelled ctx makes probeOnce fail instantly
-		// and sleepCtx return immediately, which would otherwise turn the
-		// rest of the timeout into a busy loop.
-		if ctx.Err() != nil {
+		if sleepCtx(ctx, cfg.HealthProbeInterval) != nil {
 			return false
 		}
-		sleepCtx(ctx, cfg.HealthProbeInterval)
 	}
 }
 
@@ -149,16 +145,21 @@ func probeOnce(ctx context.Context, client HTTPClient, cfg Config, token string)
 	return resp.StatusCode == 200
 }
 
-// sleepCtx sleeps for d, returning early if ctx is done first, so a long
-// health-probe wait still responds promptly to process shutdown.
-func sleepCtx(ctx context.Context, d time.Duration) {
+// sleepCtx sleeps for d, returning ctx.Err() when the context ends the
+// wait early. The error return is load-bearing for every deadline-poll
+// loop built on it: a cancelled ctx makes the probe fail instantly and
+// the sleep return immediately, and a caller that ignores it turns the
+// rest of its wall-clock deadline into a busy loop.
+func sleepCtx(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
-		return
+		return ctx.Err()
 	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
+		return nil
 	}
 }

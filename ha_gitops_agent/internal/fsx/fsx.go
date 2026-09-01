@@ -17,8 +17,17 @@ import (
 // zero-length file where the previous good version was. For the small
 // /data records whose loss silently resets the agent's memory
 // (state.json, history.jsonl).
-func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	tmp := path + ".tmp"
+	// The tmp is this function's own detail, cleaned up on every failure
+	// path here rather than by callers: a stale one is litter in a volume
+	// Supervisor backs up, and can hold credential-bearing state. A no-op
+	// ENOENT after the successful rename.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- callers pass fixed /data paths
 	if err != nil {
 		return err
