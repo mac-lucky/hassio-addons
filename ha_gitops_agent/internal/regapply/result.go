@@ -97,4 +97,13 @@ type stashEntry struct {
 	// False means no entry existed yet, so invert deletes the key.
 	OriginalsExisted  bool
 	OriginalsSnapshot map[string]any
+
+	// Adopted marks an update whose managed entry did not exist before the
+	// op - the write into managed IS the adoption (registries.Plan emits a
+	// no-drift update for exactly that), so its inverse must delete the key
+	// again. Otherwise a rolled-back adopt leaves the agent claiming a
+	// user-made object, and removing it from the manifest later DELETES
+	// that object. This polarity is deliberate: absent from an old stash it
+	// decodes false, which leaves managed alone - the old behaviour.
+	Adopted bool
 }

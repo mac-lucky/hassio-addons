@@ -1201,3 +1201,77 @@ func TestApplyPlanWithOnlyErrorOpsDoesNoIOAndKeepsThemPending(t *testing.T) {
 		t.Errorf("skipped_errors = %+v, want the error op passed through", result.SkippedErrors)
 	}
 }
+
+// Rolling back an adopt must release ownership: the no-drift update that
+// records a pre-existing object into managed IS the adoption, and leaving
+// the key after its inverse would let a later manifest removal delete a
+// user-made object.
+func TestRollbackRegistryReleasesAnAdoptedObject(t *testing.T) {
+	stashDir := t.TempDir()
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "floor", "old", map[string]any{"name": "Old floor"}, "F-OLD")}
+	managed := map[string]string{}
+	applyWS := newFakeWS()
+	applyWS.results["config/floor_registry/list"] = []any{[]any{realisticFloor}}
+
+	applyResult := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir)
+	if !applyResult.OK {
+		t.Fatalf("apply result = %+v", applyResult)
+	}
+	if managed["floor:old"] != "F-OLD" {
+		t.Fatalf("managed after adopt = %+v", managed)
+	}
+
+	rollbackWS := newFakeWS()
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil)
+	if !result.OK {
+		t.Fatalf("rollback result = %+v", result)
+	}
+	if _, still := managed["floor:old"]; still {
+		t.Errorf("managed = %+v, want the adopted key released", managed)
+	}
+}
+
+// The counterpart: an update of an ALREADY-managed object keeps its key on
+// rollback - ownership predates the op, so its inverse must not touch it.
+func TestRollbackRegistryKeepsAPreManagedKey(t *testing.T) {
+	stashDir := t.TempDir()
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "floor", "old", map[string]any{"name": "New name"}, "F-OLD")}
+	managed := map[string]string{"floor:old": "F-OLD"}
+	applyWS := newFakeWS()
+	applyWS.results["config/floor_registry/list"] = []any{[]any{realisticFloor}}
+
+	if applyResult := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir); !applyResult.OK {
+		t.Fatalf("apply result = %+v", applyResult)
+	}
+
+	rollbackWS := newFakeWS()
+	if result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !result.OK {
+		t.Fatalf("rollback result = %+v", result)
+	}
+	if managed["floor:old"] != "F-OLD" {
+		t.Errorf("managed = %+v, want the pre-managed key kept", managed)
+	}
+}
+
+// An update whose live object vanished between plan and apply must refuse
+// rather than stash a nil prior whose inverse can only send nulls.
+func TestApplyPlanRefusesAnUpdateOfAVanishedObject(t *testing.T) {
+	stashDir := t.TempDir()
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "floor", "old", map[string]any{"name": "New name"}, "F-GONE")}
+	managed := map[string]string{"floor:old": "F-GONE"}
+	applyWS := newFakeWS()
+
+	result := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir)
+
+	if result.OK {
+		t.Fatalf("result = %+v, want a refusal", result)
+	}
+	if !strings.Contains(result.Error, "no longer exists") {
+		t.Errorf("error = %q, want it to say the object is gone", result.Error)
+	}
+	for _, call := range applyWS.calls {
+		if call.msgType == "config/floor_registry/update" {
+			t.Errorf("update was sent despite the missing prior: %+v", call)
+		}
+	}
+}

@@ -719,6 +719,19 @@ func executeFlowOp(
 	case registries.KindDelete:
 		entryID := op.LiveID
 		liveEntry := liveByEntryID[entryID]
+		if liveEntry == nil {
+			// Vanished between plan and apply. deleteEntry would map the
+			// 404 to success and stash an entry with no domain, whose
+			// inverse can only start a flow with handler "" - a rollback
+			// that can never succeed. Nothing changed live, so nothing goes
+			// in the stash; the bookkeeping still clears.
+			slog.Info("regapply: apply_flow_plan: config entry already absent, nothing to delete",
+				"key", op.Key, "entry_id", entryID)
+			delete(managed, key)
+			delete(hashes, key)
+			delete(dataSnapshots, key)
+			return integrationStashEntry{}, "", nil
+		}
 		domain, _ := liveEntry["domain"].(string)
 		title, _ := liveEntry["title"].(string)
 		data := dataSnapshots[key]
@@ -910,6 +923,11 @@ func applyFlowPlanInner(
 			failures = append(failures, fmt.Sprintf("%s integration:%s failed: %v", op.Kind, op.Key, execErr))
 			continue
 		}
+		if entry.Kind == "" {
+			// The op needed no live change (an already-absent delete), so
+			// there is nothing to stash or invert.
+			continue
+		}
 		executed = append(executed, entry)
 		// A create whose title could not be written (see executeFlowOp)
 		// stays applied, stashed and tracked - it just also gets reported,
@@ -999,17 +1017,24 @@ func integrationInverseReplayAndPersist(
 	secrets *secretref.Resolver,
 ) (rolledBack bool, errMsg string) {
 	var failures []string
-	remaining := append([]integrationStashEntry(nil), executed...)
+	outstanding := make([]int, len(executed))
+	for i := range executed {
+		outstanding[i] = i
+	}
 
 	for pos := len(executed) - 1; pos >= 0; pos-- {
 		entry := executed[pos]
 		label := fmt.Sprintf("%s integration:%s", entry.Kind, entry.Key)
 
-		remaining = remaining[:pos]
-		if err := writeIntegrationStash(stashDir, remaining); err != nil {
+		// Committed only after a successful write - see
+		// addonInverseReplayAndPersist for why a plain truncation loses a
+		// skipped entry from every later retry.
+		shortenedIdx := removeInt(outstanding, pos)
+		if err := writeIntegrationStash(stashDir, entriesFor(executed, shortenedIdx)); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: stash write failed: %v", label, err))
 			continue
 		}
+		outstanding = shortenedIdx
 
 		if err := invertFlowOp(ctx, client, dialer, token, entry, managed, hashes, dataSnapshots, secrets); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", label, err))

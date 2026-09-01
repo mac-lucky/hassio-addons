@@ -92,10 +92,12 @@ func loadRegistryStashOps(raw any) []stashEntry {
 		forwardParams, _ := itemMap["forward_params"].(map[string]any)
 		originalsExisted, _ := itemMap["entity_originals_existed"].(bool)
 		originalsSnapshot, _ := itemMap["entity_originals_snapshot"].(map[string]any)
+		adopted, _ := itemMap["adopted"].(bool)
 		entries = append(entries, stashEntry{
 			Kind: kind, RType: rtype, Key: key, LiveID: liveID,
 			PriorObject: priorObject, ForwardParams: forwardParams,
 			OriginalsExisted: originalsExisted, OriginalsSnapshot: originalsSnapshot,
+			Adopted: adopted,
 		})
 	}
 	return entries
@@ -203,8 +205,10 @@ func removeInt(s []int, v int) []int {
 	return out
 }
 
-func entriesFor(executed []stashEntry, idx []int) []stashEntry {
-	out := make([]stashEntry, len(idx))
+// entriesFor picks the entries at idx, in idx's order. Generic so the
+// addon and integration replays share it for their own entry types.
+func entriesFor[T any](executed []T, idx []int) []T {
+	out := make([]T, len(idx))
 	for i, x := range idx {
 		out[i] = executed[x]
 	}
@@ -269,8 +273,16 @@ func invertOne(
 			}
 			restoreParams[fieldName] = val
 		}
-		_, err := ws.Cmd(ctx, msgType(entry.RType, "update"), restoreParams)
-		return err
+		if _, err := ws.Cmd(ctx, msgType(entry.RType, "update"), restoreParams); err != nil {
+			return err
+		}
+		if entry.Adopted {
+			// The update was the adoption, so the inverse releases the
+			// object: leaving the key would let a later manifest removal
+			// delete a user-made object the agent no longer manages.
+			delete(managed, fullKey)
+		}
+		return nil
 
 	case registries.KindDelete:
 		createParams := stripReadonlyFields(entry.RType, entry.PriorObject)
@@ -320,6 +332,9 @@ type stashOpOnDisk struct {
 	// state.EntityOriginals.
 	EntityOriginalsExisted  bool           `json:"entity_originals_existed,omitempty"`
 	EntityOriginalsSnapshot map[string]any `json:"entity_originals_snapshot,omitempty"`
+	// See stashEntry.Adopted; omitted when false so an old stash and a
+	// non-adopting update read identically.
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 type stashFileOnDisk struct {
@@ -333,6 +348,7 @@ func toStashOnDisk(executed []stashEntry) []stashOpOnDisk {
 			Kind: e.Kind, RType: e.RType, Key: e.Key, LiveID: e.LiveID,
 			LiveObject: e.PriorObject, ForwardParams: e.ForwardParams,
 			EntityOriginalsExisted: e.OriginalsExisted, EntityOriginalsSnapshot: e.OriginalsSnapshot,
+			Adopted: e.Adopted,
 		}
 	}
 	return out

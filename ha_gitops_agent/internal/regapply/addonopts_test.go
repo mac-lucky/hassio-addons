@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -1248,5 +1249,48 @@ func TestApplyAddonPlanScrubsASecretOutOfAnIncompleteRollbackNote(t *testing.T) 
 	}
 	if strings.Contains(result.Error, addonResolvedSecret) {
 		t.Errorf("apply error carries the resolved secret through the rollback note: %q", result.Error)
+	}
+}
+
+// A stash write failure must leave its entry reachable by a later retry:
+// the truncation is committed only after a successful write. The old plain
+// truncation let the NEXT successful write persist a journal missing an
+// entry the failure had skipped, with its options still live.
+func TestAddonInverseReplayKeepsASkippedEntryInTheJournal(t *testing.T) {
+	setSupervisorToken(t)
+	stashDir := t.TempDir()
+	entries := []addonStashEntry{
+		{Kind: addonopts.KindUpdate, Slug: "addon_a", PriorOptions: map[string]any{"x": 1}, ForwardOptions: map[string]any{"x": 2}},
+		{Kind: addonopts.KindUpdate, Slug: "addon_b", PriorOptions: map[string]any{"x": 1}, ForwardOptions: map[string]any{"x": 2}},
+		{Kind: addonopts.KindUpdate, Slug: "addon_c", PriorOptions: map[string]any{"x": 1}, ForwardOptions: map[string]any{"x": 2}},
+	}
+	if err := writeAddonStashReal(stashDir, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := writeAddonStash
+	failedOnce := false
+	writeAddonStash = func(dir string, e []addonStashEntry) error {
+		if !failedOnce {
+			failedOnce = true
+			return errors.New("[Errno 28] No space left on device")
+		}
+		return writeAddonStashReal(dir, e)
+	}
+	defer func() { writeAddonStash = orig }()
+
+	rolledBack, errMsg, _ := addonInverseReplayAndPersist(
+		context.Background(), newFakeAddonHTTP(), "token", entries,
+		map[string]map[string]any{}, map[string]bool{}, stashDir)
+
+	if rolledBack || errMsg == "" {
+		t.Fatalf("rolledBack = %v, errMsg = %q; want a reported failure", rolledBack, errMsg)
+	}
+	after, err := readAddonStash(stashDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0].Slug != "addon_c" {
+		t.Errorf("journal after replay = %+v, want exactly the skipped addon_c entry", after)
 	}
 }

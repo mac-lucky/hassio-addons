@@ -139,6 +139,13 @@ func executeOne(
 			return stashEntry{}, err
 		}
 		prior := liveIndex[op.RType][op.LiveID]
+		if prior == nil {
+			// The object left between plan and apply. Updating it anyway
+			// would stash a nil prior, whose inverse sends "field: null" for
+			// every touched field and jams the rollback.
+			return stashEntry{}, fmt.Errorf("live object %s no longer exists; re-check to plan against current state", op.LiveID)
+		}
+		_, wasManaged := managed[fullKey]
 		reqParams := make(map[string]any, len(params)+1)
 		reqParams[reqIDField] = op.LiveID
 		for k, v := range params {
@@ -153,7 +160,7 @@ func executeOne(
 		// THIS op touched, $ref-resolved, never the full prior object.
 		return stashEntry{
 			Kind: registries.KindUpdate, RType: op.RType, Key: op.Key, LiveID: op.LiveID,
-			PriorObject: prior, ForwardParams: params,
+			PriorObject: prior, ForwardParams: params, Adopted: !wasManaged,
 		}, nil
 
 	case registries.KindDelete:

@@ -321,16 +321,22 @@ func executeDashboardUpdate(
 	_, hasContent := op.Params["content"]
 	twoCall := hasMetadata && hasContent
 	fullKey := "dashboard:" + op.Key
+	// Before any write into dashboardManaged: that write IS the adoption,
+	// and the entry has to say so for invertDashboardOp to release it.
+	_, wasManaged := dashboardManaged[fullKey]
 
 	prior := map[string]any{}
 	forward := map[string]any{}
 
 	if metadata, ok := op.Params["metadata"].(map[string]any); ok {
+		if liveObj == nil {
+			// The dashboard left between plan and apply; updating a nil
+			// prior would jam its own rollback with "field: null" restores.
+			return fmt.Errorf("dashboard %s no longer exists; re-check to plan against current state", op.LiveID)
+		}
 		priorMeta := map[string]any{}
 		for f := range metadata {
-			if liveObj != nil {
-				priorMeta[f] = liveObj[f]
-			}
+			priorMeta[f] = liveObj[f]
 		}
 		updateParams := make(map[string]any, len(metadata)+1)
 		updateParams["dashboard_id"] = op.LiveID
@@ -345,7 +351,16 @@ func executeDashboardUpdate(
 
 		if twoCall {
 			dashboardManaged[fullKey] = op.LiveID
-			entry := stashEntry{Kind: registries.KindUpdate, RType: "dashboard", Key: op.Key, LiveID: op.LiveID, PriorObject: prior, ForwardParams: forward}
+			// Fresh copies, not prior/forward themselves: those two are
+			// mutated by the content half below, and this interim entry must
+			// keep describing exactly what has run so far even if the final
+			// stash write fails and it is all a rollback ever sees.
+			entry := stashEntry{
+				Kind: registries.KindUpdate, RType: "dashboard", Key: op.Key, LiveID: op.LiveID,
+				PriorObject:   map[string]any{"metadata": priorMeta},
+				ForwardParams: map[string]any{"metadata": metadata},
+				Adopted:       !wasManaged,
+			}
 			if err := appendDashboardStashEntry(stashDir, preExisting, executed, entry); err != nil {
 				return err
 			}
@@ -361,7 +376,10 @@ func executeDashboardUpdate(
 	}
 
 	dashboardManaged[fullKey] = op.LiveID
-	entry := stashEntry{Kind: registries.KindUpdate, RType: "dashboard", Key: op.Key, LiveID: op.LiveID, PriorObject: prior, ForwardParams: forward}
+	entry := stashEntry{
+		Kind: registries.KindUpdate, RType: "dashboard", Key: op.Key, LiveID: op.LiveID,
+		PriorObject: prior, ForwardParams: forward, Adopted: !wasManaged,
+	}
 	if twoCall {
 		return replaceLastDashboardStashEntry(stashDir, preExisting, executed, entry)
 	}
@@ -377,16 +395,24 @@ func executeDashboardDelete(
 	liveObj map[string]any, liveContentForID map[string]any, dashboardManaged map[string]string,
 	stashDir string, preExisting []stashEntry, executed *[]stashEntry,
 ) error {
+	if liveObj == nil {
+		// Already gone live. Deleting again would fail, and stashing an
+		// empty prior would let a rollback recreate the dashboard with none
+		// of its real metadata - an admin-only one coming back admin-open
+		// included. Nothing changed live, so nothing goes in the stash.
+		slog.Info("regapply: apply_dashboard_plan: dashboard already absent, nothing to delete", "key", op.Key)
+		delete(dashboardManaged, "dashboard:"+op.Key)
+		return nil
+	}
+
 	if _, err := ws.Cmd(ctx, msgLovelaceDashboardsDelete, map[string]any{"dashboard_id": op.LiveID}); err != nil {
 		return err
 	}
 
 	priorMeta := map[string]any{}
 	for _, f := range []string{"title", "icon", "show_in_sidebar", "require_admin"} {
-		if liveObj != nil {
-			if v, ok := liveObj[f]; ok {
-				priorMeta[f] = v
-			}
+		if v, ok := liveObj[f]; ok {
+			priorMeta[f] = v
 		}
 	}
 	prior := map[string]any{"metadata": priorMeta}
@@ -442,12 +468,22 @@ func invertDashboardOp(ctx context.Context, ws WSClient, entry stashEntry, dashb
 				}
 			}
 		}
+		if entry.Adopted {
+			// The update was the adoption; releasing the key keeps a later
+			// manifest removal from deleting a user-made dashboard.
+			delete(dashboardManaged, fullKey)
+		}
 		return nil
 
 	case registries.KindDelete:
 		priorMeta, _ := entry.PriorObject["metadata"].(map[string]any)
 		createParams := map[string]any{"url_path": entry.Key, "allow_single_word": true}
 		for k, v := range priorMeta {
+			if v == nil {
+				// A live "icon: null" was stashed verbatim; create's schema
+				// is not update's and treats null as a value, not a clear.
+				continue
+			}
 			createParams[k] = v
 		}
 		if _, hasTitle := createParams["title"]; !hasTitle {

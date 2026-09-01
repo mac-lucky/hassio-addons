@@ -45,6 +45,20 @@ func Reason(entry map[string]any) string {
 	return text
 }
 
+// CreatedUnidentified reports whether attempts[key] records a create whose
+// flow COMPLETED but whose result could not be identified afterwards. The
+// one failure shape a later adopt-by-match HEALS rather than repeats: the
+// subentry exists untracked, the data is proven to drive its flow to
+// completion, and adoption is the only way it ever comes under management.
+func CreatedUnidentified(attempts map[string]map[string]any, key string) bool {
+	entry, ok := attempts[key]
+	if !ok {
+		return false
+	}
+	created, _ := entry["created"].(bool)
+	return created
+}
+
 // Refusal reports whether attempts[key] records a failed attempt at
 // exactly currentHash, with the per-item error message that says so. The
 // two ways out are editing the manifest (a changed hash) and the

@@ -952,19 +952,27 @@ func addonInverseReplayAndPersist(
 	originals map[string]map[string]any, restartOnChangeState map[string]bool, stashDir string,
 ) (rolledBack bool, errMsg string, notInverted []addonStashEntry) {
 	var failures []string
-	remaining := append([]addonStashEntry(nil), executed...)
+	outstanding := make([]int, len(executed))
+	for i := range executed {
+		outstanding[i] = i
+	}
 	var notInvertedReversed []addonStashEntry // built newest-first, this loop's own order
 
 	for pos := len(executed) - 1; pos >= 0; pos-- {
 		entry := executed[pos]
 		label := fmt.Sprintf("%s addon:%s", entry.Kind, entry.Slug)
 
-		remaining = remaining[:pos]
-		if err := writeAddonStash(stashDir, remaining); err != nil {
+		// Committed only after a successful write, the registry replay's
+		// discipline: a plain truncation would let the NEXT successful
+		// write persist a journal missing an entry this failure skipped,
+		// dropping it from every later retry with its options still live.
+		shortenedIdx := removeInt(outstanding, pos)
+		if err := writeAddonStash(stashDir, entriesFor(executed, shortenedIdx)); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: stash write failed: %v", label, err))
 			notInvertedReversed = append(notInvertedReversed, entry)
 			continue
 		}
+		outstanding = shortenedIdx
 
 		if err := invertAddonOp(ctx, client, token, entry, originals, restartOnChangeState); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", label, err))

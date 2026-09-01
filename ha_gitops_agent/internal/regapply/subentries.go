@@ -536,16 +536,20 @@ func executeSubentryOp(
 			return flowErr
 		}
 
+		// Both failures below record "created": true - the flow completed,
+		// only identifying its product failed - so subentries.Plan can let
+		// a later adopt-by-match through as the recovery instead of the
+		// failure memory stranding the untracked subentry forever.
 		after, err := listSubentriesOf(ctx, dialer, entryID)
 		if err != nil {
-			attempts[key] = map[string]any{"hash": subentries.HashData(data), "error": err.Error()}
+			attempts[key] = map[string]any{"hash": subentries.HashData(data), "error": err.Error(), "created": true}
 			return fmt.Errorf("created the subentry, but could not list the config entry afterwards to find it: %w", err)
 		}
 		matchUniqueID, _ := op.Params["match_unique_id"].(string)
 		matchTitle, _ := op.Params["match_title"].(string)
 		subentryID, err := discoverCreatedSubentry(before, after, subentryType, matchUniqueID, matchTitle)
 		if err != nil {
-			attempts[key] = map[string]any{"hash": subentries.HashData(data), "error": err.Error()}
+			attempts[key] = map[string]any{"hash": subentries.HashData(data), "error": err.Error(), "created": true}
 			return err
 		}
 

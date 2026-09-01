@@ -499,9 +499,13 @@ func Plan(
 					"live subentry of type '%s' matched by %s has no usable subentry_id field", subentryType, matchedBy)))
 				continue
 			}
-			if refusal, blocked := failmemory.Refusal(attempts, key, currentHash); blocked {
+			if refusal, blocked := failmemory.Refusal(attempts, key, currentHash); blocked &&
+				!failmemory.CreatedUnidentified(attempts, key) {
 				// An adopt drives a real reconfigure flow, so a doomed one
 				// would re-drive every cycle exactly like a doomed update.
+				// The exception: a create that completed but could not be
+				// identified afterwards - this adopt IS its recovery, and a
+				// reconfigure that then fails re-records without the marker.
 				ops = append(ops, errorOp(id, refusal))
 				continue
 			}
