@@ -45,8 +45,14 @@ const (
 
 	// waitIdleGrace is extra time, on top of shutdownTimeout, for an
 	// in-flight apply/rollback: those run detached from the request, so
-	// only recon.WaitIdle sees them.
-	waitIdleGrace = 10 * time.Second
+	// only recon.WaitIdle sees them. Deliberately NOT the apply's own
+	// worst case (a restart-mode health probe alone can run 300s):
+	// Supervisor's container stop kills the process on its own schedule
+	// regardless, so a longer wait here only defers the same cut. What
+	// makes the cut survivable is the persisted rollback pointer - the
+	// stash is on disk before the first write, and Roll Back works after
+	// a restart.
+	waitIdleGrace = 30 * time.Second
 )
 
 // shutdownTimeout bounds both HTTP servers' graceful shutdown and, in

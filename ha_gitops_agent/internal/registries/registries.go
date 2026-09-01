@@ -12,6 +12,7 @@ package registries
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -455,9 +456,18 @@ func helperDomainsFor(desired Desired, managed map[string]string) []string {
 		if idx := strings.Index(k, ":"); idx >= 0 {
 			prefix = k[:idx]
 		}
-		if !IsRegistryRType(prefix) {
-			domains[prefix] = true
+		if IsRegistryRType(prefix) {
+			continue
 		}
+		if !supportedHelperDomainSet[prefix] {
+			// A migrated or hand-edited state.json: treating an unknown
+			// prefix as a helper domain would plan "<prefix>/list" and
+			// "<prefix>/delete" against commands Home Assistant may not
+			// have - or, worse, against ones it does.
+			slog.Warn("registries: ignoring registry_managed entry with unknown prefix", "key", k)
+			continue
+		}
+		domains[prefix] = true
 	}
 	result := make([]string, 0, len(domains))
 	for d := range domains {

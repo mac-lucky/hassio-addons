@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -358,6 +359,9 @@ func New(opts options.Options, workdir string) *GitSync {
 // nothing secret is written under Workdir/.git; auth reaches git through
 // the process environment of that one call (see credentialEnv).
 func (g *GitSync) EnsureClone(ctx context.Context) error {
+	if err := g.guardReadArgs(); err != nil {
+		return err
+	}
 	gitDir := filepath.Join(g.Workdir, ".git")
 	if info, err := os.Stat(gitDir); err == nil && info.IsDir() {
 		origin, _ := g.currentOrigin(ctx)
@@ -396,6 +400,9 @@ func (g *GitSync) EnsureClone(ctx context.Context) error {
 // argv - readable via /proc - and never written to origin or any config
 // file on disk.
 func (g *GitSync) Fetch(ctx context.Context) (string, error) {
+	if err := g.guardReadArgs(); err != nil {
+		return "", err
+	}
 	if _, err := g.runGit(ctx, []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}, g.Workdir, g.credentialEnv()); err != nil {
 		// Exit 128 covers a missing branch and every auth or network failure
 		// alike, so an exit code decides rather than git's prose. Only a
@@ -448,6 +455,32 @@ func (g *GitSync) credentialEnv() []string {
 		"GIT_CONFIG_KEY_0=http.extraheader",
 		"GIT_CONFIG_VALUE_0=Authorization: Basic " + basicAuth,
 	}
+}
+
+// remoteHelperURL matches git's "<transport>::<address>" remote-helper
+// syntax, whose ext:: transport runs an arbitrary command.
+var remoteHelperURL = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+.-]*::`)
+
+// guardReadArgs validates the two option values that ride git's command
+// line on the READ path - clone and fetch. guardWriteBranch already covers
+// the push paths, and its own doc comment names this exact hole: Fetch
+// takes the branch as a trailing positional, where a leading "-" parses as
+// an option, and the repo URL rides argv the same way. An "ext::" URL is
+// command execution outright. Both values are operator-set options, so
+// this is a guard rail rather than a trust boundary - but the check is two
+// string tests, and the write path already refuses the same shapes.
+func (g *GitSync) guardReadArgs() error {
+	if strings.HasPrefix(g.Opts.RepoURL, "-") {
+		return fmt.Errorf("gitsync: refusing a repo_url starting with '-'")
+	}
+	if remoteHelperURL.MatchString(g.Opts.RepoURL) {
+		return fmt.Errorf("gitsync: refusing the git remote-helper URL syntax in repo_url (%q transport)",
+			strings.SplitN(g.Opts.RepoURL, "::", 2)[0])
+	}
+	if strings.HasPrefix(g.Opts.Branch, "-") {
+		return fmt.Errorf("gitsync: refusing a branch name starting with '-': %s", g.Opts.Branch)
+	}
+	return nil
 }
 
 // guardWriteBranch validates opts.Branch as a PUSH TARGET (Import,

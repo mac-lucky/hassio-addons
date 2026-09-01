@@ -1740,11 +1740,20 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// this apply's paths: the manifest is the full set of paths this
 	// agent currently manages, and internal/differ.Compute only ever
 	// proposes a "delete" for a path still listed here.
+	//
+	// From result.Changed, not pending: the applier skips a change the
+	// path guard rejects, and recording a path it refused to write would
+	// claim ownership - and a standing no-op delete - the agent never
+	// earned.
+	written := pathSet(result.Changed)
 	manifest := make(map[string]bool, len(state.Manifest)+len(pending))
 	for _, p := range state.Manifest {
 		manifest[p] = true
 	}
 	for _, change := range pending {
+		if !written[change.Path] {
+			continue
+		}
 		if change.Kind == differKindDelete {
 			delete(manifest, change.Path)
 		} else {
@@ -2070,6 +2079,13 @@ func (r *Reconciler) applyFileLayer(ctx context.Context, pending []differ.Change
 	if result.Warnings != "" {
 		r.withMu(func() { r.lastWarnings = result.Warnings })
 		r.logEvent("config warnings after apply: " + result.Warnings)
+	}
+
+	// A successful apply can still carry notes - path-guard skips, or the
+	// post-reload "did not confirm healthy" warning. The immediate HTTP
+	// response is their only other reader, and a tick apply has none.
+	if result.OK && result.Error != "" {
+		r.logEvent("warning: " + result.Error)
 	}
 
 	if !result.OK {
@@ -2403,6 +2419,16 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 	r.logEvent("rolling back from " + stashDir)
 
 	result := r.applier.RollbackFrom(stashDir, ConfigRoot)
+
+	// The apply this undoes told Home Assistant to load its files; without
+	// the counterpart, HA keeps RUNNING the applied config over restored
+	// bytes until something else reloads it - and the dashboard would say
+	// "in sync" over a runtime matching neither side.
+	if result.OK && len(result.Changed) > 0 {
+		if warn := r.applier.ReloadAfterRollback(ctx, r.opts); warn != "" {
+			r.logEvent("warning: " + warn)
+		}
+	}
 
 	registryError := ""
 	registryRolledBack := true

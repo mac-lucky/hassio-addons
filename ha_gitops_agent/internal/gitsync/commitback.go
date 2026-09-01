@@ -292,7 +292,7 @@ func (g *GitSync) copyLiveIntoWorkdir(ctx context.Context, configRoot, p string)
 	// /data. Git records only the executable bit, so the tighter mode
 	// never reaches the repository. The next cycle's forced checkout
 	// restores anything removed here.
-	if err := os.WriteFile(repoPath, content, 0o600); err != nil { // #nosec G304 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
+	if err := os.WriteFile(repoPath, content, 0o600); err != nil { // #nosec G304,G703 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
 		return false, err
 	}
 	if err := g.encryptInWorkdir(ctx, repoPath, p, content); err != nil {

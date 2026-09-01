@@ -509,14 +509,12 @@ func StateSave(cfg Config, state State) error {
 		return err
 	}
 
-	tmpPath := cfg.StatePath + ".tmp"
 	// 0600 like regapply's stash files, and for the same reason: addon
 	// originals hold another add-on's real pre-management option values, a
-	// prior password included, and history/attempt errors can quote them.
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, cfg.StatePath)
+	// prior password included, and attempt errors can quote them. Atomic
+	// with an fsync: a zero-length state.json after a power cut would
+	// silently un-own every managed file and object.
+	return fsx.WriteFileAtomic(cfg.StatePath, data, 0o600)
 }
 
 func nullableString(s string) any {

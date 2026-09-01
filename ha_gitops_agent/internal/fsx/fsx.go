@@ -6,9 +6,36 @@
 package fsx
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
+
+// WriteFileAtomic writes data to path through a same-directory tmp file,
+// fsyncing BEFORE the rename: on ext4/overlayfs the rename can be durable
+// ahead of the data, so a power cut mid-write would otherwise leave a
+// zero-length file where the previous good version was. For the small
+// /data records whose loss silently resets the agent's memory
+// (state.json, history.jsonl).
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm) // #nosec G304 -- callers pass fixed /data paths
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
 // Realpath resolves p as far as symlinks allow, like Python's
 // os.path.realpath: existing components are followed, a nonexistent tail

@@ -387,15 +387,17 @@ type fakeApplier struct {
 	rollbackResult applier.Result
 	state          applier.State
 
-	applyCalls          [][]applier.Change
-	applyCtxs           []context.Context
-	stateSaveCalls      []applier.State
-	stateSaveErr        error
-	rollbackCalls       []string
-	pruneStashDirsCalls []string
-	makeStashDirCalls   int
-	makeStashDirResult  string
-	makeStashDirErr     error
+	applyCalls               [][]applier.Change
+	applyCtxs                []context.Context
+	stateSaveCalls           []applier.State
+	stateSaveErr             error
+	rollbackCalls            []string
+	reloadAfterRollbackCalls int
+	reloadAfterRollbackWarn  string
+	pruneStashDirsCalls      []string
+	makeStashDirCalls        int
+	makeStashDirResult       string
+	makeStashDirErr          error
 }
 
 func newFakeApplier() *fakeApplier {
@@ -443,6 +445,11 @@ func (f *fakeApplier) StateSave(state applier.State) error {
 func (f *fakeApplier) RollbackFrom(stashDir, configRoot string) applier.Result {
 	f.rollbackCalls = append(f.rollbackCalls, stashDir)
 	return f.rollbackResult
+}
+
+func (f *fakeApplier) ReloadAfterRollback(_ context.Context, _ options.Options) string {
+	f.reloadAfterRollbackCalls++
+	return f.reloadAfterRollbackWarn
 }
 
 func (f *fakeApplier) PruneStashDirs(keep int, exclude string) {

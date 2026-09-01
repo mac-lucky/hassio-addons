@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 )
 
 // DefaultPath is where the agent keeps its run history, beside state.json
@@ -193,14 +195,10 @@ func (s *Store) rotate() {
 	}
 	buf := data[start:]
 
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, buf, 0o600); err != nil { // 0600 for Append's reason
+	// 0600 for Append's reason; atomic-with-fsync for state.json's.
+	if err := fsx.WriteFileAtomic(s.path, buf, 0o600); err != nil {
 		slog.Warn("history rotate failed", "path", s.path, "error", err)
-		return
-	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		slog.Warn("history rotate failed", "path", s.path, "error", err)
-		_ = os.Remove(tmpPath)
+		_ = os.Remove(s.path + ".tmp")
 		return
 	}
 

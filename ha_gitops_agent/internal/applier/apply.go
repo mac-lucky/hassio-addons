@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
@@ -53,6 +55,11 @@ func Apply(
 	for _, change := range changes {
 		if err := guardChangePath(cfg, change.Path, configRootReal); err != nil {
 			skipNotes = append(skipNotes, err.Error())
+		} else if note := nonRegularLiveNote(configRoot, change.Path); note != "" {
+			// Skipped like a guard rejection rather than failing the batch:
+			// stashing a symlinked live file would refuse the copy and
+			// abort every sibling change with it.
+			skipNotes = append(skipNotes, note)
 		} else {
 			goodChanges = append(goodChanges, change)
 		}
@@ -128,6 +135,45 @@ func Apply(
 	}
 
 	return Result{OK: true, Changed: changedPaths, Error: joinNotes(skipNote, errMsg), StashDir: stashDir, Warnings: warnings}, nil
+}
+
+// ReloadAfterRollback asks Home Assistant to re-read restored files, with
+// the same service the rolled-back apply issued (opts.ApplyAfterPull).
+// Without it a rollback leaves /config holding the old bytes while HA
+// keeps RUNNING the applied config - matching neither side - until some
+// later apply or manual restart. Best-effort: the files are already
+// restored either way, so the return is "" or a warning to surface.
+func ReloadAfterRollback(ctx context.Context, cfg Config, opts options.Options, client HTTPClient) string {
+	if opts.ApplyAfterPull != "reload" && opts.ApplyAfterPull != "restart" {
+		return ""
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	token, err := options.SupervisorToken()
+	if err != nil {
+		return "could not ask home assistant to reload the restored files: " + err.Error()
+	}
+	service := "reload_all"
+	if opts.ApplyAfterPull == "restart" {
+		service = "restart"
+	}
+	if ok, errMsg := callService(ctx, client, cfg, token, service); !ok {
+		return "could not ask home assistant to reload the restored files: " + errMsg
+	}
+	return ""
+}
+
+// nonRegularLiveNote reports a change whose live path exists as something
+// other than a regular file - a user-made symlink into a shared location,
+// typically. "" means the path is regular or absent and the change may
+// proceed.
+func nonRegularLiveNote(configRoot, relPath string) string {
+	info, err := os.Lstat(filepath.Join(configRoot, relPath))
+	if err != nil || info.Mode().IsRegular() {
+		return ""
+	}
+	return fmt.Sprintf("skipped %s: the live path is not a regular file, so this agent leaves it alone", relPath)
 }
 
 func joinNotes(parts ...string) string {

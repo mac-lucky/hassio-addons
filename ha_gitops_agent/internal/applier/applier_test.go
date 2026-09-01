@@ -665,11 +665,55 @@ func TestSymlinkDestinationRefused(t *testing.T) {
 	if result.OK {
 		t.Fatalf("result = %+v, want failure", result)
 	}
-	if !strings.Contains(result.Error, "non-regular") {
+	if !strings.Contains(result.Error, "not a regular file") {
 		t.Errorf("error = %q, want it to mention the refusal", result.Error)
 	}
 	if _, statErr := os.Lstat(outsideTarget); !os.IsNotExist(statErr) {
 		t.Fatal("outside target must not have been created through the dangling symlink")
+	}
+}
+
+// One symlinked live file skips, its siblings still apply: aborting the
+// whole batch over a user-made symlink used to fail every apply forever.
+func TestSymlinkedLiveFileSkipsWithoutFailingTheBatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks behave differently on windows")
+	}
+	t.Setenv("SUPERVISOR_TOKEN", "test-token")
+	cfg := testConfig(t)
+	repoRoot := t.TempDir()
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(repoRoot, "automations.yaml"), "linked\n")
+	writeText(t, filepath.Join(repoRoot, "scripts.yaml"), "plain\n")
+	// A symlink resolving INSIDE the config root: the path guard allows it
+	// (correctly), so before the skip existed the stash refused the copy
+	// and the whole batch died with it.
+	shared := filepath.Join(configRoot, "shared", "automations.yaml")
+	writeText(t, shared, "shared content\n")
+	if err := os.Symlink(shared, filepath.Join(configRoot, "automations.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	writeText(t, filepath.Join(configRoot, "scripts.yaml"), "old\n")
+
+	changes := []Change{
+		{Path: "automations.yaml", Kind: ChangeUpdate},
+		{Path: "scripts.yaml", Kind: ChangeUpdate},
+	}
+	result, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.OK {
+		t.Fatalf("result = %+v, want ok with a skip note", result)
+	}
+	if !strings.Contains(result.Error, "not a regular file") {
+		t.Errorf("error = %q, want the skip note", result.Error)
+	}
+	if got := readText(t, filepath.Join(configRoot, "scripts.yaml")); got != "plain\n" {
+		t.Errorf("scripts.yaml = %q, want the sibling applied", got)
+	}
+	if got := readText(t, shared); got != "shared content\n" {
+		t.Errorf("symlink target = %q, want untouched", got)
 	}
 }
 

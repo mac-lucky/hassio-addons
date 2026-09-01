@@ -3713,8 +3713,10 @@ func (s *stateOnlyApplier) StateSave(applier.State) error { return nil }
 func (s *stateOnlyApplier) RollbackFrom(string, string) applier.Result {
 	return applier.Result{}
 }
-func (s *stateOnlyApplier) PruneStashDirs(int, string)    {}
-func (s *stateOnlyApplier) MakeStashDir() (string, error) { return "", nil }
+
+func (s *stateOnlyApplier) ReloadAfterRollback(context.Context, options.Options) string { return "" }
+func (s *stateOnlyApplier) PruneStashDirs(int, string)                                  {}
+func (s *stateOnlyApplier) MakeStashDir() (string, error)                               { return "", nil }
 
 // noHistory keeps the reconciler above off /data/history.jsonl, which the
 // real store would stat and read on this machine.

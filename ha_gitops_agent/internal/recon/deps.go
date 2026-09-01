@@ -175,6 +175,9 @@ type Applier interface {
 	StateLoad() applier.State
 	StateSave(state applier.State) error
 	RollbackFrom(stashDir, configRoot string) applier.Result
+	// ReloadAfterRollback asks Home Assistant to re-read what RollbackFrom
+	// restored; "" or a warning to surface. See applier.ReloadAfterRollback.
+	ReloadAfterRollback(ctx context.Context, opts options.Options) string
 	PruneStashDirs(keep int, exclude string)
 	MakeStashDir() (string, error)
 }
@@ -196,6 +199,10 @@ func (r *realApplier) StateSave(state applier.State) error {
 
 func (r *realApplier) RollbackFrom(stashDir, configRoot string) applier.Result {
 	return applier.RollbackFrom(r.cfg, stashDir, configRoot)
+}
+
+func (r *realApplier) ReloadAfterRollback(ctx context.Context, opts options.Options) string {
+	return applier.ReloadAfterRollback(ctx, r.cfg, opts, nil)
 }
 
 func (r *realApplier) PruneStashDirs(keep int, exclude string) {
