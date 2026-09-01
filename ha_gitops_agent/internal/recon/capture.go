@@ -299,8 +299,10 @@ type captureRouting struct {
 // how much drifted rather than with the tracked-file count.
 // written is the previous manifest as a set: the paths the last apply put
 // live, and so the only ones whose absence live can mean a deletion.
+// standingConflicts is the conflict record from the previous cycle, consulted
+// only when this cycle cannot classify at all.
 func (r *Reconciler) classifyChanges(
-	ctx context.Context, tip string, changes []differ.Change, bases captureBases, written map[string]bool,
+	ctx context.Context, tip string, changes []differ.Change, bases captureBases, written, standingConflicts map[string]bool,
 ) captureRouting {
 	var routing captureRouting
 
@@ -325,9 +327,19 @@ func (r *Reconciler) classifyChanges(
 		moved, err := r.git.ChangedBetween(ctx, base, tip)
 		if err != nil {
 			// Cannot tell which side moved, so nothing may be captured this
-			// cycle. Apply-only is the pre-feature behaviour, not a loss.
+			// cycle. Apply-only is the pre-feature behaviour for a path with
+			// no record - but one already on record as conflicted stays
+			// conflicted: routing it to apply here would persist an emptied
+			// conflict list and overwrite the very live edit the record was
+			// protecting, all on the strength of one failed git diff.
 			slog.Warn("recon: capture: could not compare the merge base with the tip, applying only", "base", base, "error", err)
-			routing.apply = changes
+			for _, change := range changes {
+				if standingConflicts[change.Path] {
+					routing.conflicts = append(routing.conflicts, change)
+				} else {
+					routing.apply = append(routing.apply, change)
+				}
+			}
 			return routing
 		}
 		movedByBase[base] = pathSet(moved)
@@ -399,7 +411,8 @@ func (r *Reconciler) captureLiveChanges(
 		return changes, 0
 	}
 
-	routing := r.classifyChanges(ctx, tip, changes, r.resolveBases(ctx, tip, state), pathSet(state.Manifest))
+	routing := r.classifyChanges(ctx, tip, changes, r.resolveBases(ctx, tip, state),
+		pathSet(state.Manifest), pathSet(state.ConflictedPaths))
 	if len(routing.deferred) > 0 {
 		// Named, not counted: a deferred path is in no card and no plan, so
 		// this line is the only place it appears at all.

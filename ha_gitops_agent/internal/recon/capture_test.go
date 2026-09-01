@@ -506,6 +506,38 @@ func TestAConflictedPathIsRefusedByApplyEvenFromAStalePlan(t *testing.T) {
 	}
 }
 
+// A transient diff failure must not dissolve the conflict record: the batch
+// error branch routes everything to apply, and before this test existed that
+// included the very paths the record was protecting, persisting an emptied
+// list on the way.
+func TestADiffErrorKeepsAStandingConflictOutOfTheApply(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "tip1"
+	fakes.applier.state = applier.State{
+		Manifest: []string{"a.yaml", "b.yaml"}, LastGoodSHA: "base1",
+		ConflictedPaths:    []string{"a.yaml"},
+		LastConflictBranch: "gitops/conflict-20260805T120000Z",
+	}
+	fakes.differ.changes = []differ.Change{
+		{Path: "a.yaml", Kind: "update"},
+		{Path: "b.yaml", Kind: "update"},
+	}
+	fakes.git.changedBetweenErr = errors.New("object store hiccup")
+
+	r := fakes.reconciler(captureOpts())
+	r.runCycle(context.Background())
+
+	if got := appliedPaths(fakes.applier); !slices.Equal(got, []string{"b.yaml"}) {
+		t.Errorf("applied = %v, want [b.yaml]: a diff error must not release a recorded conflict", got)
+	}
+	if got := r.Status().Conflicts; !slices.Equal(got, []string{"a.yaml"}) {
+		t.Errorf("conflicts = %+v, want [a.yaml] still standing", got)
+	}
+	if len(fakes.git.parkCalls) != 0 {
+		t.Errorf("ParkConflicts called %d time(s), want none: the set did not change", len(fakes.git.parkCalls))
+	}
+}
+
 func TestAConflictClearsOnceTheTwoSidesAgree(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.git.sha = "tip1"
