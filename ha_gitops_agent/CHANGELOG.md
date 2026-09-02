@@ -8,6 +8,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.5] - 2026-09-02
+
+A follow-up security release: an adversarial review of 0.6.4 turned up
+gaps in the sync engine's trust boundaries, all closed here. No new
+options; one new file appears under /data (see below).
+
+### Added
+
+- `git_token`, `age_key` and `webhook_secret` can now hold a
+  `secret://<name>` reference instead of the literal value, resolved from
+  the live secrets.yaml once at startup. Add-on options are readable in
+  the clear over the Supervisor API (`format: password` only masks the
+  UI), so anything with hassio-API access could read the forge token and
+  the age private key straight out of them; a reference keeps only the
+  pointer there. Literal values keep working unchanged; a reference that
+  does not resolve stops the add-on instead of being used literally.
+
+### Security
+
+- The refusal to decrypt sops documents naming a remote key backend (kms,
+  vault and friends) could be bypassed. The check walked the YAML document
+  literally, but sops resolves aliases, merge keys and tagged keys when it
+  reads the same metadata - so a repository could smuggle a `hc_vault`
+  master key past the check and make the agent's decrypt call reach out to
+  a repository-chosen URL on every cycle, dry run included. The check now
+  reads the metadata the way sops does and refuses anything it cannot.
+- Rolling back now re-checks every path in the backup manifest the way the
+  apply did: absolute paths, `..`, and parent directories swapped for
+  symlinks since the apply are refused instead of followed, so a rollback
+  can no longer be redirected to write or delete outside /homeassistant.
+  Exclusion patterns are deliberately not re-checked - a stash records
+  what the apply actually touched, so clearing `age_key` between an apply
+  and its rollback no longer strands the restore.
+- The fingerprints the agent stores in state.json for declared
+  integrations, subentries and HACS entries are now keyed (HMAC) with a
+  random key kept in the new `/data/failmemory.key`. They were plain
+  hashes of the resolved data - secret values included - so anyone holding
+  a shared state.json could test password guesses against them offline.
+  Fingerprints written by earlier versions are still recognised, so
+  nothing re-plans or re-runs after the update.
+- The dashboard now makes invisible Unicode formatting characters visible
+  (as `\u{...}` escapes) in diffs, paths, error text and the activity
+  feed. A repository commit could otherwise use bidirectional override
+  characters to make the pending-changes diff read differently from the
+  bytes an Apply would write - the Trojan Source trick - defeating the
+  review the dry-run gate exists for.
+
+### Changed
+
+- CI now verifies the gitleaks release tarball against a pinned sha256
+  before running it; it was the one executed artifact a forge-side swap
+  could have replaced silently.
+
 ## [0.6.4] - 2026-09-02
 
 A hardening release: a full audit of the agent produced fixes across the
