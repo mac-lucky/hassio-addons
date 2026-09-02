@@ -5,6 +5,35 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-09-02
+
+### Security
+
+- The add-on no longer mounts the Home Assistant config directory or /ssl.
+  Nothing in the add-on ever read either mount, but a custom Vector config
+  (the `custom_config_path` option) could: a hostile file planted on /share
+  could declare a `file` source for `.storage/` auth tokens, `secrets.yaml`
+  or TLS private keys and an `http` sink to carry them off. Both mounts are
+  gone and /share is now read-only.
+- Vector's state directory (the journald read cursor) moved from
+  `/share/vector` to the add-on's private `/data`. On /share, any add-on
+  with a share mapping could rewrite the cursor to quietly suppress log
+  shipping, or fill the directory to stop the shipper. The old state on
+  /share is deliberately not imported for the same reason; the first start
+  after this update re-reads the current boot's journal once, so a burst of
+  already-shipped lines can reappear in VictoriaLogs. The leftover
+  `/share/vector` folder is unused and safe to delete.
+
+### Fixed
+
+- `custom_config_path` under the add-on's own config folder works now. The
+  documented `/addon_configs/...` form never could: that name only exists on
+  the host, and the mount it refers to was shadowed by the (now removed)
+  full-config mount. The folder is mounted at `/config`, so put the file
+  there (host path `/addon_configs/<repo>_vector/`) and point
+  `custom_config_path` at `/config/<file>.yaml`; `/share` paths keep
+  working, read-only.
+
 ## [1.7.0] - 2026-08-28
 
 ### Changed
