@@ -25,11 +25,8 @@ map:
   - type: addon_config
     read_only: false
 
-# Web UI for Vector's built-in dashboard
-ports:
-  8686/tcp: null
-ports_description:
-  8686/tcp: Vector API (optional)
+# No ports: Vector's API binds 127.0.0.1:8686 inside the container, so a
+# Supervisor port mapping could never reach it anyway.
 
 # Configuration options
 options:
@@ -51,8 +48,11 @@ options:
   custom_config_path: ""
 
 # Schema validation
+# victorialogs_endpoint is url? not url: with custom_config_path set none of
+# the other options apply and no throwaway endpoint should be needed. The
+# generator still refuses to start without one in generated-config mode.
 schema:
-  victorialogs_endpoint: url
+  victorialogs_endpoint: url?
   victorialogs_username: str?
   victorialogs_password: password?
   hostname: str?

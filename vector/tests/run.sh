@@ -179,6 +179,31 @@ run_case template-units
 check "exits 0"             test "${rc}" -eq 0
 check "@-prefixed unit is quoted" grep -q -- '- "@reboot.service"' "${VECTOR_CONFIG}"
 
+# The two VRL placeholders are substituted one after the other, so a hostname
+# carrying the other token would be rewritten again by the second pass and
+# silently take the instance value
+run_case hostname-placeholder
+check "exits non-zero"        test "${rc}" -ne 0
+check "names the placeholder" grep -q "__INSTANCE__" "${LOG}"
+
+# Backslash starts an escape in the double-quoted YAML scalar the endpoint
+# lands in; a trailing one swallows the closing quote
+run_case endpoint-backslash
+check "exits non-zero"          test "${rc}" -ne 0
+check "rejected as invalid"     grep -q "invalid characters" "${LOG}"
+
+# An explicit empty instance used to fail with "contains invalid characters"
+run_case empty-instance
+check "exits non-zero"       test "${rc}" -ne 0
+check "says it is empty"     grep -q "must not be empty" "${LOG}"
+
+# [""] must fail like ["a", ""] does, not read as "unset": the old guard
+# captured jq's output with $(), which strips the newline a lone empty entry
+# produces
+run_case journal-empty-unit
+check "exits non-zero"          test "${rc}" -ne 0
+check "rejects the empty unit"  grep -q "Invalid journal unit name" "${LOG}"
+
 # jq's `//` treats false as empty, so a boolean option set to false is easy to
 # read back as true - pin both directions
 run_case no-source
@@ -196,6 +221,26 @@ check "explains the line break" grep -q "line breaks" "${LOG}"
 run_case custom-missing
 check "exits non-zero"        test "${rc}" -ne 0
 check "names the missing path" grep -q does-not-exist "${LOG}"
+
+# The full custom-config branch, end to end: a valid file is accepted, and no
+# option validation runs in this mode (the fixture below carries no endpoint
+# problem, but the branch exits before any of those checks)
+printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: blackhole\n    inputs: [s]\n' \
+    > /share/vector/custom.yaml
+run_case custom-present
+check "a valid custom config is accepted" test "${rc}" -eq 0
+check "and announced" grep -q "Custom configuration validation passed" "${LOG}"
+
+# A failing custom config must be reported without printing anything from it:
+# the validator quotes literal values back (an invalid enum echoes the value,
+# an unquoted numeric password comes back as invalid type: integer), and the
+# masker only knows URL-shaped credentials
+printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: elasticsearch\n    inputs: [s]\n    endpoints: ["http://127.0.0.1:1"]\n    compression: CUSTOMSENTINEL9z\n' \
+    > /share/vector/custom.yaml
+run_case custom-present
+check     "a failing custom config is fatal"     test "${rc}" -ne 0
+check     "and says so"                          grep -q "Custom configuration validation failed" "${LOG}"
+check_not "without echoing the config's values"  grep -Fq CUSTOMSENTINEL9z "${LOG}"
 
 # A custom config is arbitrary YAML from a share every add-on can write, and it
 # can declare the same secret backend - the credentials must not be reachable

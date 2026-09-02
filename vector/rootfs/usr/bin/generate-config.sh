@@ -65,9 +65,22 @@ validate_list() {
 validate_safe_string() {
     local value="$1"
     local name="$2"
+    # Checked separately so an empty value gets an honest message instead of
+    # "contains invalid characters"
+    if [[ -z "${value}" ]]; then
+        bashio::log.fatal "${name} must not be empty"
+        bashio::exit.nok
+    fi
     # Allow alphanumeric, dots, hyphens, underscores, and spaces
     if [[ ! "${value}" =~ ^[a-zA-Z0-9._\ -]+$ ]]; then
         bashio::log.fatal "${name} contains invalid characters. Only alphanumeric, dots, hyphens, underscores allowed."
+        bashio::exit.nok
+    fi
+    # The VRL placeholders are substituted one after the other over the same
+    # file, so a value carrying a placeholder token would be matched again by
+    # the later pass and silently end up as the other option's value
+    if [[ "${value}" == *__HOSTNAME__* ]] || [[ "${value}" == *__INSTANCE__* ]]; then
+        bashio::log.fatal "${name} must not contain __HOSTNAME__ or __INSTANCE__"
         bashio::exit.nok
     fi
 }
@@ -99,9 +112,12 @@ run_vector_validate() {
 emit_journal_units() {
     local option="$1"
     local yaml_key="$2"
-    [[ -n "$(jq -r --arg o "${option}" '.[$o] // [] | .[]' "${VECTOR_OPTIONS_FILE}")" ]] || return 0
-
+    # Validate before the any-content guard: [""] must be rejected the same
+    # way ["a", ""] is. The old guard captured jq's output with $(), which
+    # strips trailing newlines and collapsed a lone empty entry to "unset".
     validate_list ".${option} // [] | .[]" "${UNIT_NAME_RE}" 'journal unit name'
+    [[ "$(jq -r --arg o "${option}" '.[$o] // [] | length' "${VECTOR_OPTIONS_FILE}")" -gt 0 ]] || return 0
+
     echo "    ${yaml_key}:" >> "${VECTOR_CONFIG}"
     # @json quotes the value: a unit starting with @ is a reserved YAML indicator
     jq -r --arg o "${option}" '.[$o][] | "      - " + (. | @json)' \
@@ -117,12 +133,69 @@ validate_url_for_yaml() {
         bashio::log.fatal "VictoriaLogs endpoint contains invalid characters"
         bashio::exit.nok
     fi
+    # Backslash starts an escape sequence in the double-quoted YAML scalar the
+    # endpoint lands in: a trailing one swallows the closing quote, and a \x22
+    # style escape decodes to a character the class above is meant to ban.
+    # Checked with == not =~ because bash strips backslashes from an unquoted
+    # =~ pattern before the regex engine sees them.
+    if [[ "${url}" == *\\* ]]; then
+        bashio::log.fatal "VictoriaLogs endpoint contains invalid characters"
+        bashio::exit.nok
+    fi
     # Must start with http:// or https://
     if [[ ! "${url}" =~ ^https?:// ]]; then
         bashio::log.fatal "VictoriaLogs endpoint must start with http:// or https://"
         bashio::exit.nok
     fi
 }
+
+# Check for custom config with path validation (TOCTOU-safe). This runs before
+# any option validation: none of the option-driven settings apply in this mode,
+# so a user running purely on a custom config does not need a throwaway
+# endpoint just to satisfy the checks below.
+if [[ -n "${custom_config_path}" ]]; then
+    # Falling back to the generated config would silently ignore what the user asked for
+    if [[ ! -f "${custom_config_path}" ]]; then
+        bashio::log.fatal "Custom config not found: ${custom_config_path}"
+        bashio::log.fatal "Fix custom_config_path or clear it to use the generated configuration"
+        bashio::exit.nok
+    fi
+    # Resolve the ACTUAL path (not -m which doesn't require existence)
+    # This prevents symlink attacks between check and use
+    real_path=$(realpath "${custom_config_path}" 2>/dev/null || echo "")
+    if [[ -z "${real_path}" ]]; then
+        bashio::log.fatal "Invalid custom config path!"
+        bashio::exit.nok
+    fi
+    # Only allow paths under /config (this add-on's own config dir, the
+    # addon_config map) or /share. /addon_configs is a host-side name that
+    # never exists inside an add-on container; the same folder is mounted
+    # here at /config.
+    if [[ ! "${real_path}" =~ ^/(config|share)/ ]]; then
+        bashio::log.fatal "Custom config must be in /config (the add-on's config folder, /addon_configs on the host) or /share!"
+        bashio::exit.nok
+    fi
+    # Use the resolved real_path for the copy to prevent TOCTOU
+    bashio::log.info "Using custom configuration from: ${real_path}"
+    mkdir -p "$(dirname "${VECTOR_CONFIG}")"
+    # Vector's default data_dir for a custom config that sets none - it does
+    # not exist in the image and validation fails on that alone. /data/vector
+    # is the persistent choice a custom config should prefer.
+    mkdir -p /var/lib/vector /data/vector
+    install -m 600 "${real_path}" "${VECTOR_CONFIG}"
+    # Validate custom config before accepting it. The output is discarded, not
+    # printed: the validator quotes offending values back verbatim (an invalid
+    # enum or a wrongly-typed scalar echoes the literal value), this file is
+    # arbitrary user YAML that can hold a credential anywhere, and
+    # mask_credentials_stream only knows URL-shaped ones.
+    if ! run_vector_validate > /dev/null; then
+        bashio::log.fatal "Custom configuration validation failed!"
+        bashio::log.fatal "Run 'vector validate' against your file to see the details"
+        bashio::exit.nok
+    fi
+    bashio::log.info "Custom configuration validation passed"
+    exit 0
+fi
 
 # Validate required configuration
 if [[ -z "${victorialogs_endpoint}" ]]; then
@@ -165,43 +238,6 @@ fi
 # Validate hostname and instance to prevent injection
 validate_safe_string "${hostname}" "hostname"
 validate_safe_string "${instance}" "instance"
-
-# Check for custom config with path validation (TOCTOU-safe)
-if [[ -n "${custom_config_path}" ]]; then
-    # Falling back to the generated config would silently ignore what the user asked for
-    if [[ ! -f "${custom_config_path}" ]]; then
-        bashio::log.fatal "Custom config not found: ${custom_config_path}"
-        bashio::log.fatal "Fix custom_config_path or clear it to use the generated configuration"
-        bashio::exit.nok
-    fi
-    # Resolve the ACTUAL path (not -m which doesn't require existence)
-    # This prevents symlink attacks between check and use
-    real_path=$(realpath "${custom_config_path}" 2>/dev/null || echo "")
-    if [[ -z "${real_path}" ]]; then
-        bashio::log.fatal "Invalid custom config path!"
-        bashio::exit.nok
-    fi
-    # Only allow paths under /config (this add-on's own config dir, the
-    # addon_config map) or /share. /addon_configs is a host-side name that
-    # never exists inside an add-on container; the same folder is mounted
-    # here at /config.
-    if [[ ! "${real_path}" =~ ^/(config|share)/ ]]; then
-        bashio::log.fatal "Custom config must be in /config (the add-on's config folder, /addon_configs on the host) or /share!"
-        bashio::exit.nok
-    fi
-    # Use the resolved real_path for the copy to prevent TOCTOU
-    bashio::log.info "Using custom configuration from: ${real_path}"
-    mkdir -p "$(dirname "${VECTOR_CONFIG}")"
-    install -m 600 "${real_path}" "${VECTOR_CONFIG}"
-    # Validate custom config before accepting it
-    if ! run_vector_validate; then
-        bashio::log.fatal "Custom configuration validation failed!"
-        bashio::log.fatal "Run 'vector validate' against your file to see the details"
-        bashio::exit.nok
-    fi
-    bashio::log.info "Custom configuration validation passed"
-    exit 0
-fi
 
 # journald is the only source, so disabling it leaves nothing to collect
 if [[ "${collect_journal}" != "true" ]]; then
@@ -307,7 +343,7 @@ msg = to_string(.message) ?? ""
 # Extract level from message content first (more accurate for HA logs).
 # Home Assistant logs format: "2026-01-11 09:04:15 WARNING (MainThread)..."
 # with an optional ANSI colour prefix.
-level_match = parse_regex(msg, r'^(?:\x1b\[\d+m?)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') ?? {}
+level_match = parse_regex(msg, r'^(?:\x1b\[[\d;]*m)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') ?? {}
 if is_string(level_match.level) {
   lvl = downcase(string!(level_match.level))
   if lvl == "warning" { lvl = "warn" }

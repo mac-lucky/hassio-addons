@@ -144,11 +144,16 @@ maps it. If the path does not exist the add-on refuses to start rather than
 falling back to the generated configuration, so a typo cannot leave you running
 a config you did not intend.
 
-None of the other options apply while a custom config is in use. That includes
+None of the other options apply while a custom config is in use, and none of
+them are validated - `victorialogs_endpoint` may be left empty. That includes
 the basic auth credentials: `/share` is writable by every add-on that maps it,
 and a custom config could declare the same secret backend and read the password
 back out, so the backend serves nothing in this mode. Put the credentials
 directly in your own config, or use Vector's own secrets support.
+
+Set `data_dir: /data/vector` in your config so Vector's state (the journald
+cursor, disk buffers) survives restarts; without it Vector falls back to
+`/var/lib/vector`, which is recreated empty on every container start.
 
 If a custom config fails validation the add-on will not print it. Run
 `vector validate` against your file to see the details.
@@ -196,8 +201,8 @@ If you see "connection refused" errors:
 ## Vector API
 
 Vector's API is enabled but bound to `127.0.0.1:8686` inside the container, so
-it is not reachable from the network even if you map the port. It is there for
-`vector top` and similar commands run from an add-on shell.
+it is not reachable from the network. It is there for `vector top` and similar
+commands run from an add-on shell.
 
 ## Support
 

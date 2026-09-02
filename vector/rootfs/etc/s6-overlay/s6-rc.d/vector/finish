@@ -6,8 +6,19 @@
 # ==============================================================================
 
 declare exit_code=${1}
+declare signal=${2:-0}
 
-if [[ "${exit_code}" -ne 0 ]] && [[ "${exit_code}" -ne 256 ]]; then
+if [[ "${exit_code}" -eq 256 ]]; then
+    # Killed by a signal; $2 says which. SIGTERM (15) is a normal stop, but
+    # anything else - SIGKILL from the OOM killer, SIGSEGV from a crash -
+    # deserves a trace and a pause, or a crash loop restarts instantly and
+    # silently forever.
+    if [[ "${signal}" -ne 15 ]]; then
+        bashio::log.warning "Vector was killed by signal ${signal}"
+        bashio::log.info "Waiting before restart..."
+        sleep 5
+    fi
+elif [[ "${exit_code}" -ne 0 ]]; then
     bashio::log.warning "Vector exited with code ${exit_code}"
 
     # Check if we should sleep before restart
