@@ -5,6 +5,15 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-09-02
+
+### Fixed
+
+- sshd connection lines from the SSH add-on no longer arrive as `error`. The
+  Docker journald driver marks every stderr line PRIORITY=3 and sshd logs its
+  routine connection traffic there; the level fallback now maps that chatter
+  to `info` and leaves real failures alone.
+
 ## [1.8.1] - 2026-09-02
 
 ### Security
