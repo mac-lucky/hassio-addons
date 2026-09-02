@@ -86,6 +86,24 @@ func UnresolvedMessage(noun, id string, err error) string {
 	return fmt.Sprintf("declared data for %s '%s' references a secret that could not be resolved: %v", noun, id, err)
 }
 
+// ResolveString returns s untouched unless it is written as a reference,
+// in which case the named value from the live secrets file replaces it.
+// A malformed reference (the scheme with an empty name, or whitespace in
+// it) is an error, never handed back as a literal: internal/options
+// resolves credential options through this, and a typo that silently
+// authenticated somewhere as the text "secret://foo" would be far harder
+// to notice than a refused startup. The one place the malformed-reference
+// rule and its message live; resolveValue's string case delegates here.
+func (r *Resolver) ResolveString(s string) (string, error) {
+	if !hasScheme(s) {
+		return s, nil
+	}
+	if !isRef(s) {
+		return "", fmt.Errorf("'%s' is not a usable secret reference; write %s<name>", s, Scheme)
+	}
+	return r.resolve(s[len(Scheme):])
+}
+
 // ContainsRef reports whether v is, or contains at any depth, a value
 // written as a reference. Callers rendering a declared value use it to
 // decide the value must be masked: a diff line reaches the dashboard and
@@ -309,10 +327,7 @@ func (r *Resolver) resolveValue(v any, found map[string]bool) (any, error) {
 		if !hasScheme(value) {
 			return value, nil
 		}
-		if !isRef(value) {
-			return nil, fmt.Errorf("'%s' is not a usable secret reference; write %s<name>", value, Scheme)
-		}
-		secret, err := r.resolve(value[len(Scheme):])
+		secret, err := r.ResolveString(value)
 		if err != nil {
 			return nil, err
 		}

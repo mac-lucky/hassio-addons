@@ -12,6 +12,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
 )
 
 // Supervisor is the base URL for the Supervisor API, reachable from any
@@ -125,6 +127,40 @@ var validApplyAfterPull = map[string]bool{
 // ErrMissingSupervisorToken is returned by SupervisorToken when
 // SUPERVISOR_TOKEN is not set in the environment.
 var ErrMissingSupervisorToken = errors.New("options: SUPERVISOR_TOKEN is not set in the environment")
+
+// ResolveSecretRefs replaces "secret://<name>" values in the
+// credential-bearing options with the named entries from the live secrets
+// file, so those options can hold a pointer instead of the secret itself.
+// Add-on options are NOT private: `format: password` only masks the UI,
+// and Supervisor's API returns the whole options object in the clear to
+// anything holding a hassio token - which for age_key means the private
+// identity for everything sops-encrypted in the repository. The live
+// /homeassistant/secrets.yaml is plaintext (encryption applies only to
+// the copy pushed to git), so age_key itself resolves from it with no
+// chicken-and-egg.
+//
+// Literal values pass through untouched, so existing installs are
+// unaffected. An unresolvable or malformed reference is an error the
+// caller must treat as fatal: falling back to the literal text would
+// authenticate somewhere as "secret://..." and read as a wrong password,
+// not as the typo it is.
+func (o *Options) ResolveSecretRefs(resolver *secretref.Resolver) error {
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{
+		{"git_token", &o.GitToken},
+		{"age_key", &o.AgeKey},
+		{"webhook_secret", &o.WebhookSecret},
+	} {
+		resolved, err := resolver.ResolveString(*field.value)
+		if err != nil {
+			return fmt.Errorf("options: %s: %w", field.name, err)
+		}
+		*field.value = resolved
+	}
+	return nil
+}
 
 // Load reads path into an Options. This is the add-on's boot path, so a
 // missing or malformed key falls back to its config.yaml default rather

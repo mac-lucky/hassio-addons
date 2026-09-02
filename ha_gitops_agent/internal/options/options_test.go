@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref/secrettest"
 )
 
 // writeOptions writes data as JSON to <dir>/options.json, returning its
@@ -677,5 +680,48 @@ func TestLoadRejectsNonNumericAutoUpdateInterval(t *testing.T) {
 			t.Errorf("AutoUpdateIntervalMinutes for %v = %d, want %d",
 				v, opts.AutoUpdateIntervalMinutes, defaultAutoUpdateIntervalMinutes)
 		}
+	}
+}
+
+func TestResolveSecretRefsResolvesCredentialOptions(t *testing.T) {
+	resolver := secrettest.From(t, "forge_token: "+secrettest.Resolved+"\n")
+	opts := Options{
+		GitToken:      "secret://forge_token",
+		AgeKey:        "AGE-SECRET-KEY-1LITERAL",
+		WebhookSecret: "",
+	}
+
+	if err := opts.ResolveSecretRefs(resolver); err != nil {
+		t.Fatal(err)
+	}
+	if opts.GitToken != secrettest.Resolved {
+		t.Errorf("GitToken = %q, want the resolved secret", opts.GitToken)
+	}
+	// Literals and empty values pass through untouched, so existing
+	// installs keep working.
+	if opts.AgeKey != "AGE-SECRET-KEY-1LITERAL" {
+		t.Errorf("AgeKey = %q, want the literal untouched", opts.AgeKey)
+	}
+	if opts.WebhookSecret != "" {
+		t.Errorf("WebhookSecret = %q, want empty untouched", opts.WebhookSecret)
+	}
+}
+
+// A reference that cannot resolve must be fatal, never passed through as
+// the literal: "secret://typo" used as a token reads as a wrong password
+// at the forge, not as the configuration mistake it is.
+func TestResolveSecretRefsFailsClosed(t *testing.T) {
+	resolver := secrettest.From(t, "")
+
+	missing := Options{GitToken: "secret://no_such_key"}
+	if err := missing.ResolveSecretRefs(resolver); err == nil {
+		t.Error("err = nil for a reference to a missing key")
+	} else if !strings.Contains(err.Error(), "git_token") {
+		t.Errorf("err = %v, want it to name the option", err)
+	}
+
+	malformed := Options{AgeKey: "secret://"}
+	if err := malformed.ResolveSecretRefs(resolver); err == nil {
+		t.Error("err = nil for a malformed reference")
 	}
 }

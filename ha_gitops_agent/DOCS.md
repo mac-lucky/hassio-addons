@@ -55,6 +55,18 @@ running as the same user could in principle read its
 Any error message or log line that would otherwise echo it back - the
 raw token or its base64-encoded form - has it redacted first.
 
+The options store itself is the weakest link: `format: password` only
+masks the UI, and Supervisor's API hands the whole options object back
+in the clear to anything holding a hassio-API token - other add-ons,
+diagnostic tools, support bundles. To keep the token off that surface,
+set the option to `secret://<name>` instead of the literal value and
+put the real token under that key in your live
+`/homeassistant/secrets.yaml`, the same file Home Assistant's own
+`!secret` reads. The reference is resolved once at startup; a name
+that does not resolve stops the add-on instead of being used
+literally, and a changed secret is picked up on the next add-on
+restart. `age_key` and `webhook_secret` accept the same form.
+
 ### `interval_minutes`
 
 How often (1-1440 minutes) the agent fetches the remote branch and
@@ -139,6 +151,14 @@ never written into the repository, never logged, and never passed to
 is ever printed or committed. If the key is malformed, or the `sops`
 binary is missing, the add-on fails to start rather than quietly
 syncing without encryption.
+
+Because add-on options are readable over the Supervisor API (see
+`git_token` above), this is the option most worth writing as
+`secret://<name>`, with the real `AGE-SECRET-KEY-1...` line under that
+key in the live `secrets.yaml`. That file is plaintext on the machine -
+encryption only applies to the copy pushed to git - so the key resolves
+from it without any circularity, and the API then only ever sees the
+pointer.
 
 ### `auto_update_addons`
 

@@ -10,7 +10,7 @@ configuration:
     description: Username for HTTPS authentication, if the repository is private.
   git_token:
     name: Git token
-    description: Personal access token or app password used for HTTPS authentication.
+    description: Personal access token or app password used for HTTPS authentication. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
   interval_minutes:
     name: Sync interval (minutes)
     description: How often to fetch the remote branch and reconcile, from 1 to 1440 minutes.
@@ -28,10 +28,10 @@ configuration:
     description: Enables the "Preview Import" and "Import from Home Assistant" buttons, which copy every non-excluded file under /homeassistant into the repository and push them as a single commit directly onto the tracked branch. This is the only thing the add-on ever writes to that branch - it never runs on its own, only on a button click, the push is fast-forward only and is never forced, and it never deletes anything from the repository. Secrets, databases, backups, .storage and anything the repository's .gitignore matches are skipped. git_token needs push rights. Leave this off unless you are seeding a repository.
   webhook_secret:
     name: Webhook secret
-    description: Set to enable a POST /webhook trigger (on port 8098) that reconciles immediately, gated by this shared secret. Leave empty to disable.
+    description: Set to enable a POST /webhook trigger (on port 8098) that reconciles immediately, gated by this shared secret. Leave empty to disable. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
   age_key:
     name: Age private key
-    description: An age private key (AGE-SECRET-KEY-1...) used to encrypt secret values with SOPS before they are pushed to git, and to decrypt them when applying. secrets.yaml is encrypted whole; in every other YAML, JSON or dotenv file only the values of secret-shaped keys are encrypted, so the file stays readable and reviewable. Generate one with age-keygen and keep a copy somewhere safe - if you lose it, the encrypted values cannot be recovered. Leave empty to keep secrets out of git entirely, which is the previous behavior.
+    description: An age private key (AGE-SECRET-KEY-1...) used to encrypt secret values with SOPS before they are pushed to git, and to decrypt them when applying. secrets.yaml is encrypted whole; in every other YAML, JSON or dotenv file only the values of secret-shaped keys are encrypted, so the file stays readable and reviewable. Generate one with age-keygen and keep a copy somewhere safe - if you lose it, the encrypted values cannot be recovered. Leave empty to keep secrets out of git entirely, which is the previous behavior. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
   auto_update_addons:
     name: Auto-update apps
     description: Slugs of installed apps this agent is allowed to update on its own whenever the Supervisor reports an update for them. Leave the list empty to disable auto-updates entirely; the agent never updates itself, whatever the list says. An app's slug is the last part of its page URL in Home Assistant, for example a0d7b954_esphome in /hassio/addon/a0d7b954_esphome/info.
