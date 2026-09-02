@@ -64,7 +64,8 @@ configuration:
   custom_config_path:
     name: Custom Config Path
     description: >-
-      Path to a custom Vector configuration file.
-      When set, the add-on will use this config instead of generating one, and
-      it will refuse to start if the file is missing.
-      Example: /share/vector/custom.yaml
+      Path to a custom Vector configuration file, under /config (this add-on's
+      own config folder, /addon_configs on the host - the recommended place) or
+      /share. When set, the add-on will use this config instead of generating
+      one, and it will refuse to start if the file is missing.
+      Example: /config/custom.yaml

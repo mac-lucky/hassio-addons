@@ -13,13 +13,14 @@ timeout: 60
 # System access for log collection
 journald: true
 
-# Directory mappings
+# Directory mappings. Only what the add-on actually uses: addon_config mounts
+# this add-on's own config folder (host /addon_configs/<slug>) at /config, and
+# /share is readable, both solely for custom_config_path. Do not add the
+# legacy "config" or "ssl" maps back: nothing here reads them, they expose the
+# HA config's .storage and TLS keys to a hostile custom config, and the legacy
+# "config" map makes the Supervisor ignore "addon_config" entirely.
 map:
-  - type: config
-    read_only: true
   - type: share
-    read_only: false
-  - type: ssl
     read_only: true
   - type: addon_config
     read_only: false

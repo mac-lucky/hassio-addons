@@ -130,14 +130,19 @@ Once running, you can query your logs using LogsQL:
 
 For advanced users, you can provide a complete custom Vector configuration:
 
-1. Create your Vector config file (e.g., `/share/vector/custom.yaml`)
-2. Set `custom_config_path: "/share/vector/custom.yaml"`
+1. Create your Vector config file in this add-on's config folder - on the host
+   that is `/addon_configs/<repo>_vector/custom.yaml` (visible in the Samba /
+   VSCode "addon_configs" share) - or under `/share`
+2. Set `custom_config_path: "/config/custom.yaml"` (the add-on sees its own
+   config folder at `/config`) or `custom_config_path: "/share/vector/custom.yaml"`
 3. The add-on will use your config instead of generating one
 
-The file has to live under `/share` or `/addon_configs` and must be valid Vector
-YAML. If the path does not exist the add-on refuses to start rather than falling
-back to the generated configuration, so a typo cannot leave you running a config
-you did not intend.
+The path is checked inside the add-on container, so it must start with
+`/config/` or `/share/`, and the file must be valid Vector YAML. The add-on's
+config folder is the better home: `/share` is writable by every add-on that
+maps it. If the path does not exist the add-on refuses to start rather than
+falling back to the generated configuration, so a typo cannot leave you running
+a config you did not intend.
 
 None of the other options apply while a custom config is in use. That includes
 the basic auth credentials: `/share` is writable by every add-on that maps it,
