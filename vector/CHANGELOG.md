@@ -5,6 +5,49 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-09-02
+
+### Security
+
+- A failing custom config no longer has its contents echoed into the add-on
+  log. The validator quotes offending values back verbatim (a wrongly typed
+  or misspelled field prints the literal value, credentials included), which
+  contradicted the promise that a custom config is never printed. The
+  validator's output is now dropped entirely; run `vector validate` against
+  your file to see the details, as the log already suggested.
+
+### Fixed
+
+- A custom config that sets no `data_dir` failed validation on every start,
+  because Vector's default directory does not exist in the image. It is
+  created now; set `data_dir: /data/vector` in your config if you want the
+  journald cursor to survive restarts.
+- A hostname containing the literal text `__INSTANCE__` would silently take
+  the instance value in shipped logs, because the two template placeholders
+  were substituted one after the other. Such values are now rejected.
+- An endpoint URL containing a backslash could break the generated YAML in
+  confusing ways; it is now rejected up front like the other unsafe
+  characters.
+- A signal-killed Vector (out-of-memory, a crash) restarted instantly and
+  silently, forever. The supervisor script now logs which signal ended it
+  and waits five seconds, like it always did for ordinary error exits.
+- `journal_include_units`/`journal_exclude_units` containing only an empty
+  string were silently ignored; an empty unit name is now always an error,
+  matching what already happened when it appeared next to a valid one.
+- Log level detection now understands multi-parameter ANSI colour prefixes
+  (bold plus colour), not just single-parameter ones.
+- An empty `instance` value now says it must not be empty instead of
+  claiming it contains invalid characters.
+
+### Changed
+
+- With `custom_config_path` set, the other options are no longer validated,
+  and `victorialogs_endpoint` may be left empty - a custom config never
+  needed a throwaway endpoint, now it does not have to carry one.
+- The declared 8686 port mapping is gone. Vector's API binds to localhost
+  inside the container, so mapping the port never exposed anything; the
+  option only suggested otherwise.
+
 ## [1.8.0] - 2026-09-02
 
 ### Security
