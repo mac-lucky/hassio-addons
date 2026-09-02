@@ -136,8 +136,9 @@ validate_url_for_yaml() {
     # Backslash starts an escape sequence in the double-quoted YAML scalar the
     # endpoint lands in: a trailing one swallows the closing quote, and a \x22
     # style escape decodes to a character the class above is meant to ban.
-    # Checked with == not =~ because bash strips backslashes from an unquoted
-    # =~ pattern before the regex engine sees them.
+    # Checked with == not =~ because bash strips backslashes from a pattern
+    # written inline in [[ ]] before the regex engine sees them (a pattern
+    # held in a variable would survive, but the glob is plainer still).
     if [[ "${url}" == *\\* ]]; then
         bashio::log.fatal "VictoriaLogs endpoint contains invalid characters"
         bashio::exit.nok

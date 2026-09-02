@@ -224,9 +224,10 @@ check "names the missing path" grep -q does-not-exist "${LOG}"
 
 # The full custom-config branch, end to end: a valid file is accepted, and no
 # option validation runs in this mode (the fixture below carries no endpoint
-# problem, but the branch exits before any of those checks)
-printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: blackhole\n    inputs: [s]\n' \
-    > /share/vector/custom.yaml
+# problem, but the branch exits before any of those checks). Shared with the
+# backend-lockout case below so the two cannot drift apart.
+valid_custom_config='sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: blackhole\n    inputs: [s]\n'
+printf '%b' "${valid_custom_config}" > /share/vector/custom.yaml
 run_case custom-present
 check "a valid custom config is accepted" test "${rc}" -eq 0
 check "and announced" grep -q "Custom configuration validation passed" "${LOG}"
@@ -244,8 +245,7 @@ check_not "without echoing the config's values"  grep -Fq CUSTOMSENTINEL9z "${LO
 
 # A custom config is arbitrary YAML from a share every add-on can write, and it
 # can declare the same secret backend - the credentials must not be reachable
-printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: blackhole\n    inputs: [s]\n' \
-    > /share/vector/custom.yaml
+printf '%b' "${valid_custom_config}" > /share/vector/custom.yaml
 current="custom-present"
 jq -s '.[0] * .[1]' "${TESTS_DIR}/fixtures/base.json" \
     "${TESTS_DIR}/fixtures/custom-present.json" > "${VECTOR_OPTIONS_FILE}"
