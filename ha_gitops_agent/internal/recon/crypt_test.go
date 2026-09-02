@@ -13,8 +13,9 @@ import (
 // fakeSops stands in for the binary, so nothing is really encrypted.
 const testAgeIdentity = "AGE-SECRET-KEY-1QUUCUYTP2443EWJWQKK6LCAAUGS09XXGDHLVQV82Z2Y6200NDGAQJ8SUFT"
 
-// encryptedFixture is sops-shaped enough for sopscrypt.IsEncrypted.
-const encryptedFixture = "mqtt_password: ENC[AES256_GCM,data:xx]\nsops:\n    mac: FAKEMAC\n    version: 3.13.2\n"
+// encryptedFixture is sops-shaped enough for sopscrypt.IsEncrypted, which
+// requires a key source next to the mac and version.
+const encryptedFixture = "mqtt_password: ENC[AES256_GCM,data:xx]\nsops:\n    age:\n        - recipient: age1test\n          enc: x\n    mac: FAKEMAC\n    version: 3.13.2\n"
 
 // fakeSops records every sops argv and answers with canned plaintext,
 // so these tests never spawn a real process.

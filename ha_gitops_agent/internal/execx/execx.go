@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -45,10 +47,23 @@ func (CommandRunner) Run(ctx context.Context, dir string, env []string, args ...
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204 -- argv is built by the calling package from fixed git/sops subcommands plus repo config and paths, never unsanitized input. Covers internal/gitsync and internal/sopscrypt; a new caller must re-justify it.
 	cmd.Dir = dir
 	cmd.Env = env
+	// CommandContext's default cancel kills only the direct child; a timed
+	// out git fetch would orphan its git-remote-https grandchild, which
+	// keeps its connection and keeps running until it finishes on its own.
+	// Start the child in its own process group and kill the whole group.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 	// The buffers below make Run wait on pipe-copy goroutines that finish
-	// only when every DESCENDANT closes the write end - a killed git leaves
-	// git-remote-https holding it, and without a WaitDelay that wait is
-	// forever, past the deadline, with the caller's operation lock held.
+	// only when every DESCENDANT closes the write end. The group kill above
+	// reaps the usual holders, but a descendant that called setsid escapes
+	// it, and without a WaitDelay that wait is forever, past the deadline,
+	// with the caller's operation lock held.
 	cmd.WaitDelay = 10 * time.Second
 
 	stdout := &cappedBuffer{limit: maxOutputBytes}

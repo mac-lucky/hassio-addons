@@ -946,6 +946,11 @@ func TestIsEncryptedRejectsPlaintext(t *testing.T) {
 		"notes: we should look at sops one day\nmac: aa:bb:cc\nversion: 3\n",
 		"sops: not-a-mapping\n",
 		"sops:\n  version: 3.9.0\n",
+		// Spoofed metadata: mac and version but no key source. Nothing
+		// could ever decrypt it, so it is not an encrypted document -
+		// GuardSecretsAt should refuse it as tracked-in-clear instead of
+		// the pipeline failing later on an impossible decrypt.
+		"mqtt_password: hunter2\nsops:\n  mac: x\n  version: 3.9.0\n",
 	}
 	for _, content := range negatives {
 		if IsEncrypted([]byte(content)) {

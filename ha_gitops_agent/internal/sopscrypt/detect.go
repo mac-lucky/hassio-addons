@@ -735,12 +735,44 @@ func IsEncrypted(data []byte) bool {
 	if err := yaml.Unmarshal(data, &doc); err == nil {
 		meta := mappingValue(documentRoot(&doc), "sops")
 		// Tolerant about the shape of mac and version: the point is only
-		// that this is a sops document, not which version wrote it.
-		if mappingValue(meta, "mac") != nil && mappingValue(meta, "version") != nil {
+		// that this is a sops document, not which version wrote it. The key
+		// source is required on top, because a spoofed "sops: {mac: x,
+		// version: y}" block over plaintext values satisfies the first two
+		// but could never decrypt - classifying it as "not encrypted" here
+		// lets GuardSecretsAt refuse it honestly instead of the pipeline
+		// failing later with "encrypted, but undecryptable".
+		if mappingValue(meta, "mac") != nil && mappingValue(meta, "version") != nil && hasKeySource(meta) {
 			return true
 		}
 	}
 	return isDotenvCiphertext(data)
+}
+
+// keySourceMetadataKeys are the metadata keys sops stores recipients
+// under - one per supported backend, plus key_groups for Shamir splits. A
+// real sops file always carries at least one, or nothing could decrypt it.
+var keySourceMetadataKeys = []string{"age", "kms", "gcp_kms", "azure_kv", "hc_vault", "pgp", "key_groups"}
+
+// hasKeySource reports whether meta names at least one key source. It
+// decodes rather than walking nodes: merge keys ("<<: *anchor") resolve
+// only during decode, and a key source hidden behind one must still count.
+// UnsupportedKeySource returns early on "not encrypted", so missing one
+// here would fail that guard OPEN; for the same reason a mapping that does
+// not decode counts as having one - let the guard look and refuse.
+func hasKeySource(meta *yaml.Node) bool {
+	if meta == nil {
+		return false
+	}
+	var decoded map[string]any
+	if err := meta.Decode(&decoded); err != nil {
+		return true
+	}
+	for _, key := range keySourceMetadataKeys {
+		if v, ok := decoded[key]; ok && v != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isDotenvCiphertext reports whether data is sops ciphertext from the

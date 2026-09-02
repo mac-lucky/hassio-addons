@@ -61,6 +61,9 @@
       </div>
       {{/* Versions and result line live here, not on the summary, which
            stays scannable. */}}
-      <p class="meta-line">{{if .Version}}<code>{{.Version}}{{if .UpdateAvailable}} -&gt; {{.LatestVersion}}{{end}}</code> &middot; {{end}}{{.LastResult}}{{if .LastCheckedUTC}} &middot; checked <span title="{{.LastCheckedUTC}}" data-utc="{{.LastCheckedUTC}}" data-utc-rel>{{humanTime .LastCheckedUTC}} UTC</span>{{end}}{{if .LastUpdatedUTC}} &middot; updated <span title="{{.LastUpdatedUTC}}" data-utc="{{.LastUpdatedUTC}}">{{humanTime .LastUpdatedUTC}} UTC</span>{{end}}</p>
+      {{/* printable on all three: versions come from whatever an add-on
+           repository publishes and LastResult can embed a Supervisor error,
+           so format characters could otherwise spoof what the admin reads. */}}
+      <p class="meta-line">{{if .Version}}<code>{{printable .Version}}{{if .UpdateAvailable}} -&gt; {{printable .LatestVersion}}{{end}}</code> &middot; {{end}}{{printable .LastResult}}{{if .LastCheckedUTC}} &middot; checked <span title="{{.LastCheckedUTC}}" data-utc="{{.LastCheckedUTC}}" data-utc-rel>{{humanTime .LastCheckedUTC}} UTC</span>{{end}}{{if .LastUpdatedUTC}} &middot; updated <span title="{{.LastUpdatedUTC}}" data-utc="{{.LastUpdatedUTC}}">{{humanTime .LastUpdatedUTC}} UTC</span>{{end}}</p>
     </div>
     {{end}}

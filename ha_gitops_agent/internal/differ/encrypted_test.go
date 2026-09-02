@@ -9,10 +9,13 @@ import (
 )
 
 // sopsDoc is the minimal shape sopscrypt.IsEncrypted recognizes: a
-// top-level "sops" mapping carrying a mac and a version.
+// top-level "sops" mapping carrying a key source, a mac and a version.
 const sopsDoc = `mqtt:
     password: ENC[AES256_GCM,data:Zm9v,iv:YmFy,tag:YmF6,type:str]
 sops:
+    age:
+        - recipient: age1test
+          enc: x
     mac: ENC[AES256_GCM,data:bWFj,iv:aXY=,tag:dGFn,type:str]
     version: 3.9.0
 `

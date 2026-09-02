@@ -92,5 +92,38 @@ func copyFileTransformed(src, dst, rel string, transform TransformRepoFileFunc) 
 			return err
 		}
 	}
-	return os.WriteFile(dst, data, srcInfo.Mode()) // #nosec G304,G703 -- dst is a change path resolved under a guarded root, and just Lstat-confirmed regular-or-absent above
+	return writeFileAtomic(dst, data, srcInfo.Mode().Perm())
+}
+
+// writeFileAtomic writes dst through a same-directory temp file, fsynced
+// before the rename, so a crash mid-write cannot leave dst half-written
+// (the stash still covers a crash between files). Not fsx.WriteFileAtomic:
+// its fixed "<path>.tmp" name is fine in the agent's own /data, but dst
+// here sits in live config, where "<name>.tmp" can be a real, unmanaged
+// user file that a temp must not clobber.
+func writeFileAtomic(dst string, data []byte, perm os.FileMode) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(dst), ".gitops-agent-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err = f.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

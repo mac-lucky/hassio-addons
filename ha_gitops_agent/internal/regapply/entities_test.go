@@ -69,8 +69,11 @@ func TestApplyEntityPlanNewFieldOnAlreadyManagedEntityOnlyRecordsTheNewField(t *
 }
 
 // Something else may set hidden_by/disabled_by to a non-user value after
-// Plan's guard ran; a restore could never send that value back to HA.
-func TestApplyEntityPlanClampsPoisonedLiveByFieldWhenRecording(t *testing.T) {
+// Plan's guard ran - the plan is cached and applied later, so the window is
+// the whole dry-run review. The stale op must be refused, not written: firing
+// it would overwrite the integration's ownership and record a clamped null in
+// place of its actual state.
+func TestApplyEntityPlanRefusesStaleOpWhenLiveByFieldClaimedSincePlan(t *testing.T) {
 	stashDir := t.TempDir()
 	ops := []registries.RegOp{entityOp(registries.KindUpdate, "light.x", map[string]any{"hidden_by": "user"})}
 	originals := map[string]map[string]any{}
@@ -79,12 +82,37 @@ func TestApplyEntityPlanClampsPoisonedLiveByFieldWhenRecording(t *testing.T) {
 
 	result := ApplyEntityPlan(context.Background(), staticDialer(ws), ops, originals, stashDir)
 
+	if result.OK {
+		t.Fatalf("result = %+v, want refusal", result)
+	}
+	if !strings.Contains(result.Error, "no longer user-owned") || !strings.Contains(result.Error, `hidden by "integration"`) {
+		t.Errorf("error = %q, want it to name the stale ownership", result.Error)
+	}
+	if len(ws.callsFor("config/entity_registry/update")) != 0 {
+		t.Errorf("update calls = %+v, want none - the stale op must never fire", ws.callsFor("config/entity_registry/update"))
+	}
+	if len(originals) != 0 {
+		t.Errorf("originals = %+v, want empty - nothing was applied, nothing may be recorded", originals)
+	}
+}
+
+// The apply-time guard mirrors the plan-time one: null and "user" pass, so a
+// live state the plan already saw does not block its own apply.
+func TestApplyEntityPlanUserOwnedByFieldStillApplies(t *testing.T) {
+	stashDir := t.TempDir()
+	ops := []registries.RegOp{entityOp(registries.KindUpdate, "light.x", map[string]any{"hidden_by": nil})}
+	originals := map[string]map[string]any{}
+	ws := newFakeWS()
+	ws.results["config/entity_registry/list"] = []any{[]any{map[string]any{"entity_id": "light.x", "hidden_by": "user"}}}
+
+	result := ApplyEntityPlan(context.Background(), staticDialer(ws), ops, originals, stashDir)
+
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
 	}
-	want := map[string]map[string]any{"entity:light.x": {"hidden_by": nil}}
+	want := map[string]map[string]any{"entity:light.x": {"hidden_by": "user"}}
 	if !reflect.DeepEqual(originals, want) {
-		t.Errorf("originals = %+v, want %+v - the poisoned live value must never be recorded", originals, want)
+		t.Errorf("originals = %+v, want %+v", originals, want)
 	}
 }
 

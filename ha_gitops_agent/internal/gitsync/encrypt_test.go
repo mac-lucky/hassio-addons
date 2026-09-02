@@ -27,8 +27,9 @@ const (
 // fakeCipherPrefix is the line fakeSops hides a file's plaintext behind.
 const fakeCipherPrefix = "fakedata: "
 
-// fakeSopsMeta makes fakeSops's output satisfy sopscrypt.IsEncrypted.
-const fakeSopsMeta = "sops:\n    mac: FAKEMAC\n    version: 3.13.2\n"
+// fakeSopsMeta makes fakeSops's output satisfy sopscrypt.IsEncrypted,
+// which requires a key source next to the mac and version.
+const fakeSopsMeta = "sops:\n    age:\n        - recipient: age1test\n          enc: x\n    mac: FAKEMAC\n    version: 3.13.2\n"
 
 // fakeSops stands in for the binary: an in-place "encrypt" that base64-hides
 // content behind a sops-shaped envelope, and a "decrypt" that gives it back.

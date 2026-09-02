@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
 )
@@ -131,6 +132,17 @@ func executeEntityOp(
 	key := "entity:" + op.Key
 	liveObj := liveByID[op.Key]
 
+	// Re-check ownership against this call's fresh live fetch. Plan ran the
+	// same guard, but the plan is cached and executed later - the whole
+	// dry-run review window - and an integration that claimed disabled_by/
+	// hidden_by in between would otherwise be silently overwritten, with a
+	// clamped null recorded as the "original" in place of its actual state.
+	if liveObj != nil {
+		if msg := entityByFieldGuard(liveObj); msg != "" {
+			return stashEntry{}, fmt.Errorf("no longer user-owned since the plan was built: %s", msg)
+		}
+	}
+
 	existingOriginals, hasOriginals := originals[key]
 	var priorSnapshot map[string]any
 	if hasOriginals {
@@ -185,11 +197,36 @@ func executeEntityOp(
 	}, nil
 }
 
+// entityByFieldGuard mirrors entities.byFieldGuard - copied, not imported,
+// for the same reason as entityKindRestore. executeEntityOp runs it against
+// the fresh live fetch so a plan built before an integration claimed the
+// entity refuses to fire instead of overwriting that ownership.
+func entityByFieldGuard(liveObj map[string]any) string {
+	var msgs []string
+	for _, field := range [...]string{"disabled_by", "hidden_by"} {
+		v, ok := liveObj[field]
+		if !ok || v == nil {
+			continue
+		}
+		s, _ := v.(string)
+		if s == "" || s == "user" {
+			continue
+		}
+		verb := "disabled"
+		if field == "hidden_by" {
+			verb = "hidden"
+		}
+		msgs = append(msgs, fmt.Sprintf("%s by %q, not by a user; refusing to touch it", verb, s))
+	}
+	return strings.Join(msgs, "; ")
+}
+
 // byFieldsClamped are the two entity_registry fields whose only valid
-// outgoing values are null/"user". clampByFieldOriginal is a second net
-// behind entities.disabledByGuard/hiddenByGuard, covering the TOCTOU gap
-// between Plan's live fetch and this one: anything else is recorded as null
-// so a later restore cannot send a value the update schema rejects.
+// outgoing values are null/"user". clampByFieldOriginal is a last net
+// behind the plan-time and apply-time guards: both pass a non-string live
+// value through (mirroring HA's schema, which only ever holds strings), so
+// anything left that is neither null nor "user" is recorded as null rather
+// than a value a later restore could never send back.
 var byFieldsClamped = map[string]bool{"disabled_by": true, "hidden_by": true}
 
 func clampByFieldOriginal(entityID, field string, liveVal any) any {
