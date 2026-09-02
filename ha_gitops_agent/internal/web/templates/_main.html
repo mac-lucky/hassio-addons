@@ -242,7 +242,7 @@ there is no restore point outside this add-on for that change.`)}}
     <div class="change change-error">
       <div class="change-summary">
         <span class="badge badge-error">conflict</span>
-        <span class="path">{{.}}</span>
+        <span class="path">{{printable .}}</span>
       </div>
     </div>
     {{end}}
@@ -266,7 +266,7 @@ there is no restore point outside this add-on for that change.`)}}
     <div class="change change-error">
       <div class="change-summary">
         <span class="badge badge-error">{{.RType}}</span>
-        <span class="path">{{.Name}}</span>
+        <span class="path">{{printable .Name}}</span>
         {{/* Per item: each failed for its own reason. The key rides
              hx-vals via retryVals; the name repeats for screen readers. */}}
         <button
@@ -275,9 +275,9 @@ there is no restore point outside this add-on for that change.`)}}
           hx-vals="{{retryVals .Key}}"
           hx-disabled-elt="this"
           {{if $.Status.Busy}}disabled{{end}}
-        >Retry<span class="sr-only"> {{.Name}}</span><span class="spinner" aria-hidden="true"></span></button>
+        >Retry<span class="sr-only"> {{printable .Name}}</span><span class="spinner" aria-hidden="true"></span></button>
       </div>
-      <pre class="op-error">{{.Error}}</pre>
+      <pre class="op-error">{{printable .Error}}</pre>
     </div>
     {{end}}
   </div>
@@ -355,7 +355,7 @@ there is no restore point outside this add-on for that change.`)}}
       <summary>
         <span class="chevron"></span>
         <span class="badge badge-{{.Kind}}">{{.Kind}}</span>
-        <span class="path">{{.Path}}</span>
+        <span class="path">{{printable .Path}}</span>
       </summary>
       {{template "diff" .DiffText}}
     </details>
@@ -375,16 +375,16 @@ there is no restore point outside this add-on for that change.`)}}
     <div class="change change-error">
       <div class="change-summary">
         <span class="badge badge-error">error</span>
-        <span class="path">{{.RType}}:{{.Key}}</span>
+        <span class="path">{{.RType}}:{{printable .Key}}</span>
       </div>
-      <pre class="op-error">{{.Error}}</pre>
+      <pre class="op-error">{{printable .Error}}</pre>
     </div>
     {{else}}
     <details class="change">
       <summary>
         <span class="chevron"></span>
         <span class="badge badge-{{.Kind}}">{{.Kind}}</span>
-        <span class="path">{{.RType}}:{{.Key}}</span>
+        <span class="path">{{.RType}}:{{printable .Key}}</span>
       </summary>
       {{template "diff" .DiffText}}
     </details>
@@ -437,7 +437,7 @@ there is no restore point outside this add-on for that change.`)}}
   {{if .Status.Events}}
   <ul class="activity" tabindex="0">
     {{range reverseEvents .Status.Events}}
-    <li><span class="ts" title="{{.TS}}" data-utc="{{.TS}}">{{humanTime .TS}}</span><span class="msg">{{.Message}}</span></li>
+    <li><span class="ts" title="{{.TS}}" data-utc="{{.TS}}">{{humanTime .TS}}</span><span class="msg">{{printable .Message}}</span></li>
     {{end}}
   </ul>
   {{else}}

@@ -174,8 +174,13 @@ func (c *Crypter) DecryptFile(ctx context.Context, absPath string) ([]byte, erro
 		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: could not read it to check its key source: %v",
 			filepath.Base(absPath), err)
 	}
-	if source := UnsupportedKeySource(data); source != "" {
-		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: it declares a %s master key, and this agent decrypts only with its configured age key",
+	source, verifiable := UnsupportedKeySource(data)
+	if !verifiable {
+		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: its sops metadata cannot be read the way sops reads it",
+			filepath.Base(absPath))
+	}
+	if source != "" {
+		return nil, fmt.Errorf("sopscrypt: refusing to decrypt %s: its metadata names key source %q, and this agent decrypts only with its configured age key",
 			filepath.Base(absPath), source)
 	}
 	// Named on the way out too, mirroring EncryptFileInPlace: sops

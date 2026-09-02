@@ -301,12 +301,18 @@ func NormalizeRepository(declared string) (string, bool) {
 // exactly the edit that should unblock a download that failed at the
 // previous one. Unexported - regapply reads the hash off Params["hash"].
 func hashEntry(item map[string]any) string {
-	return failmemory.Hash(map[string]any{
+	return failmemory.Hash(fingerprint(item))
+}
+
+// fingerprint is the map hashEntry digests, kept separate so Refusal can
+// compare the stored hash against the same fields in either hash form.
+func fingerprint(item map[string]any) map[string]any {
+	return map[string]any{
 		"id":         asString(item["id"]),
 		"repository": asString(item["repository"]),
 		"category":   asString(item["category"]),
 		"version":    asString(item["version"]),
-	})
+	}
 }
 
 func asString(v any) string {
@@ -411,14 +417,14 @@ func Plan(
 		// Below the branches above, not before them: an adopt is never
 		// blocked by failure memory and an installed repository plans
 		// nothing, so neither has any use for a fingerprint.
-		hash := hashEntry(item)
-		if refusal, blocked := failmemory.Refusal(attempts, key, hash); blocked {
+		fp := fingerprint(item)
+		if refusal, blocked := failmemory.Refusal(attempts, key, fp); blocked {
 			ops = append(ops, errorOp(id, refusal))
 			continue
 		}
 
 		params := map[string]any{
-			"repository": repository, "category": category, "hash": hash,
+			"repository": repository, "category": category, "hash": failmemory.Hash(fp),
 			// Empty when HACS has never heard of this repository - the driver
 			// reads that as "add it as a custom repository first".
 			"repository_id": liveID,

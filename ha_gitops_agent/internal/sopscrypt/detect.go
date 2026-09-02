@@ -777,38 +777,72 @@ func isDotenvCiphertext(data []byte) bool {
 var remoteKeySources = []string{"kms", "gcp_kms", "azure_kv", "hc_vault", "pgp"}
 
 // UnsupportedKeySource returns the name of a non-age master key the
-// document declares, or "" when it declares none. The metadata is
-// repository content and sops honours it, so a planted hc_vault key would
-// make the decrypt call connect to a URL the repository picked and leak
-// that URL through decryptFailures into last_error, the dashboard and
-// /status.json - for a document this agent's age identity cannot decrypt
-// anyway.
-func UnsupportedKeySource(data []byte) string {
+// document declares ("" when it declares none), and whether the metadata
+// could be read at all. The metadata is repository content and sops
+// honours it, so a planted hc_vault key would make the decrypt call
+// connect to a URL the repository picked and leak that URL through
+// decryptFailures into last_error, the dashboard and /status.json - for
+// a document this agent's age identity cannot decrypt anyway.
+//
+// The metadata is read by VALUE decoding, not by walking the yaml.Node
+// tree: sops reads it the same way (yaml.Unmarshal into its metadata
+// struct), which resolves aliases and merge keys, while a node walk sees
+// only the literal document - so "hc_vault: *v" or "<<: *m" would smuggle
+// a backend past a node-based check that sops then honours. Every shape
+// assertion fails CLOSED with verifiable=false: a mapping with any
+// non-string key decodes as map[any]any, so a single tagged key planted
+// beside a real hc_vault entry would otherwise make a comma-ok assertion
+// silently drop the whole mapping and wave the document through. The
+// caller must refuse to decrypt an unverifiable document rather than let
+// sops interpret metadata this check could not read.
+func UnsupportedKeySource(data []byte) (source string, verifiable bool) {
 	if !IsEncrypted(data) {
-		return ""
+		return "", true
 	}
 	if isDotenvCiphertext(data) {
-		return dotenvKeySource(data)
+		return dotenvKeySource(data), true
 	}
-	var doc yaml.Node
+	var doc map[string]any
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return ""
+		return "", false
 	}
-	meta := mappingValue(documentRoot(&doc), "sops")
-	for _, source := range remoteKeySources {
-		if declaresKey(meta, source) {
-			return source
-		}
+	meta, ok := doc["sops"].(map[string]any)
+	if !ok {
+		// IsEncrypted's node walk found sops metadata that this value
+		// view cannot read as a plain mapping: a differential, not a
+		// document sops writes.
+		return "", false
+	}
+	if source := remoteKeySourceIn(meta); source != "" {
+		return source, true
 	}
 	// key_groups holds the same per-backend lists one level down, so a
-	// document can name a backend without a top-level entry for it.
-	if groups := mappingValue(meta, "key_groups"); groups != nil {
-		for _, group := range groups.Content {
-			for _, source := range remoteKeySources {
-				if declaresKey(group, source) {
-					return source
-				}
+	// document can name a backend without a top-level entry for it. An
+	// absent key and an explicit null both land as nil here.
+	if groupsRaw := meta["key_groups"]; groupsRaw != nil {
+		groups, ok := groupsRaw.([]any)
+		if !ok {
+			return "", false
+		}
+		for _, group := range groups {
+			gm, ok := group.(map[string]any)
+			if !ok {
+				return "", false
 			}
+			if source := remoteKeySourceIn(gm); source != "" {
+				return source, true
+			}
+		}
+	}
+	return "", true
+}
+
+// remoteKeySourceIn returns the first remote backend meta carries a
+// non-empty entry for, or "".
+func remoteKeySourceIn(meta map[string]any) string {
+	for _, source := range remoteKeySources {
+		if declaresValue(meta[source]) {
+			return source
 		}
 	}
 	return ""
@@ -842,21 +876,23 @@ func dotenvKeySource(data []byte) string {
 	return ""
 }
 
-// declaresKey reports whether node carries a non-empty entry for key.
+// declaresValue reports whether v is a non-empty metadata entry.
 // Emptiness matters: sops writes several of these as empty lists on every
-// document, and counting those would refuse every file it wrote.
-func declaresKey(node *yaml.Node, key string) bool {
-	value := mappingValue(node, key)
-	if value == nil {
+// document, and counting those would refuse every file it wrote. A value
+// of a shape sops never writes counts as declared, so an odd encoding
+// errs toward refusing.
+func declaresValue(v any) bool {
+	switch value := v.(type) {
+	case nil:
 		return false
-	}
-	switch value.Kind {
-	case yaml.SequenceNode, yaml.MappingNode:
-		return len(value.Content) > 0
-	case yaml.ScalarNode:
-		return value.Value != "" && value.Tag != "!!null"
+	case []any:
+		return len(value) > 0
+	case map[string]any:
+		return len(value) > 0
+	case string:
+		return value != ""
 	default:
-		return false
+		return true
 	}
 }
 

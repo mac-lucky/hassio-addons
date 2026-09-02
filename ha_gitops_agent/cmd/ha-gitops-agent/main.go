@@ -13,10 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/failmemory"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/hook"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/recon"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/web"
 )
@@ -27,6 +29,11 @@ var version = "dev"
 const (
 	// optionsPath is where Supervisor writes the add-on's options.
 	optionsPath = "/data/options.json"
+
+	// hashKeyPath persists failmemory's HMAC key, beside state.json but
+	// never inside it: state.json is documented as safe to share, and the
+	// key is what keeps its hashes from verifying secret guesses offline.
+	hashKeyPath = "/data/failmemory.key"
 
 	// bindAddr must match ingress_port in config.yaml.
 	bindAddr = "0.0.0.0:8099"
@@ -80,6 +87,14 @@ func run() int {
 		opts = options.Options{}
 	}
 
+	// Before configureEncryption: age_key may itself be a secret://
+	// reference. Fatal on failure - a reference that fell through as its
+	// literal text would authenticate as "secret://..." somewhere.
+	if err := opts.ResolveSecretRefs(secretref.NewResolver(recon.ConfigRoot)); err != nil {
+		slog.Error("fatal: cannot resolve a secret reference in the add-on options", "error", err)
+		return 1
+	}
+
 	crypter, err := configureEncryption(opts.AgeKey)
 	if err != nil {
 		// Fatal, not "carry on unencrypted": the user configured a key,
@@ -91,6 +106,13 @@ func run() int {
 		// The recipient is the public half, safe to print: it is what the
 		// user checks their key against when a repository will not decrypt.
 		slog.Info("secret encryption enabled", "recipient", crypter.Recipient())
+	}
+
+	// Not fatal: a failed load keeps hashing in the legacy unkeyed form,
+	// stable across restarts, so nothing replans - state.json just stays
+	// as guessable as it was before the key existed.
+	if err := failmemory.LoadKey(hashKeyPath); err != nil {
+		slog.Warn("hash key unavailable; state hashes stay unkeyed", "error", err)
 	}
 
 	reconciler := recon.New(opts, recon.Deps{Crypter: crypter})

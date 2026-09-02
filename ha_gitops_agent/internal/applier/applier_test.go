@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -818,6 +819,132 @@ func TestRollbackFromReportsIncompleteWhenStashedCopyMissing(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, "kept.yaml") {
 		t.Errorf("error = %q", result.Error)
+	}
+}
+
+// newStash writes a stash directory holding just manifest, for the
+// RollbackFrom tests; stashed file copies go in with writeText afterwards.
+func newStash(t *testing.T, manifest string) string {
+	t.Helper()
+	stashDir := filepath.Join(t.TempDir(), "backup", "20260101T000000Z")
+	if err := os.MkdirAll(stashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeText(t, filepath.Join(stashDir, "manifest.json"), manifest)
+	return stashDir
+}
+
+// A rollback restores what the manifest says the apply touched; an
+// exclusion pattern that changed between the two (age_key cleared, so
+// secrets.yaml became excluded) must not strand the restore - one refused
+// file would flip OK to false and skip the HA reload and every registry
+// rollback behind it.
+func TestRollbackFromRestoresPathsExcludedSinceTheApply(t *testing.T) {
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(configRoot, "secrets.yaml"), "live\n")
+	stashDir := newStash(t, `{"files": {"secrets.yaml": "existed"}, "created_dirs": []}`)
+	writeText(t, filepath.Join(stashDir, "secrets.yaml"), "stashed\n")
+
+	cfg := DefaultConfig()
+	cfg.IsExcluded = func(string) bool { return true }
+	result := RollbackFrom(cfg, stashDir, configRoot)
+
+	if !result.OK || !result.RolledBack {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := readText(t, filepath.Join(configRoot, "secrets.yaml")); got != "stashed\n" {
+		t.Errorf("secrets.yaml = %q, want the stashed copy restored", got)
+	}
+}
+
+func TestRollbackFromRefusesDotPath(t *testing.T) {
+	configRoot := t.TempDir()
+	stashDir := newStash(t, `{"files": {".": "absent", "": "absent"}, "created_dirs": []}`)
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, err := os.Stat(configRoot); err != nil {
+		t.Error("config root itself was removed")
+	}
+}
+
+func TestRollbackFromRefusesManifestPathEscapingConfigRoot(t *testing.T) {
+	outside := t.TempDir()
+	configRoot := t.TempDir()
+	victim := filepath.Join(outside, "victim.yaml")
+	writeText(t, victim, "untouched\n")
+	rel := filepath.Join("..", "..", filepath.Base(outside), "victim.yaml")
+	stashDir := newStash(t, `{"files": {`+strconv.Quote(rel)+`: "absent"}, "created_dirs": []}`)
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := readText(t, victim); got != "untouched\n" {
+		t.Errorf("victim.yaml = %q, want untouched", got)
+	}
+}
+
+func TestRollbackFromRefusesWriteThroughSymlinkedParent(t *testing.T) {
+	// A parent directory swapped for a symlink between the apply and the
+	// rollback would redirect the restore write outside the config root;
+	// the guard runs again at rollback time and must catch it.
+	outside := t.TempDir()
+	configRoot := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(configRoot, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	stashDir := newStash(t, `{"files": {"sub/file.yaml": "existed"}, "created_dirs": []}`)
+	writeText(t, filepath.Join(stashDir, "sub", "file.yaml"), "stashed\n")
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "file.yaml")); !os.IsNotExist(err) {
+		t.Error("restore write escaped the config root through the symlinked parent")
+	}
+}
+
+func TestRollbackFromRefusesDeleteThroughSymlinkedParent(t *testing.T) {
+	outside := t.TempDir()
+	writeText(t, filepath.Join(outside, "file.yaml"), "keep me\n")
+	configRoot := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(configRoot, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	stashDir := newStash(t, `{"files": {"sub/file.yaml": "absent"}, "created_dirs": []}`)
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := readText(t, filepath.Join(outside, "file.yaml")); got != "keep me\n" {
+		t.Errorf("file.yaml = %q, want it kept", got)
+	}
+}
+
+func TestRollbackDoesNotRemoveCreatedDirResolvingOutsideConfigRoot(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outside, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configRoot := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(configRoot, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	stashDir := newStash(t, `{"files": {}, "created_dirs": ["sub/empty"]}`)
+
+	RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if _, err := os.Stat(filepath.Join(outside, "empty")); err != nil {
+		t.Error("created-dir cleanup escaped the config root through the symlinked parent")
 	}
 }
 

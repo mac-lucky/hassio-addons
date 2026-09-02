@@ -4305,3 +4305,38 @@ func TestRetryRefusesAnOversizedKey(t *testing.T) {
 		t.Errorf("retry calls = %v, want none", got)
 	}
 }
+
+// A stored bidi override would make the rendered diff read differently
+// from the bytes Apply writes (Trojan Source, CVE-2021-42574); the diff
+// is the approval gate, so format characters must come out as visible
+// escapes, not pass through invisibly.
+func TestDiffLinesEscapeFormatCharacters(t *testing.T) {
+	lines := diffLinesFunc("+shell_command: rm -rf /  #\u202e harmless\n context\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2", len(lines))
+	}
+	if strings.ContainsRune(lines[0].Text, '\u202e') {
+		t.Errorf("bidi override passed through invisibly: %q", lines[0].Text)
+	}
+	if !strings.Contains(lines[0].Text, `\u{202E}`) {
+		t.Errorf("bidi override not visibly escaped: %q", lines[0].Text)
+	}
+	if lines[1].Text != " context" {
+		t.Errorf("plain line altered: %q", lines[1].Text)
+	}
+}
+
+func TestEscapeFormatCharsLeavesNormalTextAlone(t *testing.T) {
+	const s = "sensor: temperature  # zolta latka, ASCII and plain letters"
+	if got := escapeFormatChars(s); got != s {
+		t.Errorf("escapeFormatChars(%q) = %q", s, got)
+	}
+}
+
+func TestEscapeFormatCharsIsDistinguishableFromLiteralEscapes(t *testing.T) {
+	real := escapeFormatChars("a\u202eb")
+	literal := escapeFormatChars(`a\u{202E}b`)
+	if real == literal {
+		t.Errorf("a real U+202E and the literal text of its escape render identically: %q", real)
+	}
+}

@@ -297,8 +297,7 @@ func Plan(
 
 		if liveID, isManaged := managed[key]; isManaged {
 			if _, exists := liveByEntryID[liveID]; exists {
-				currentHash := HashData(data)
-				if storedHash := hashes[key]; storedHash != "" && storedHash != currentHash {
+				if storedHash := hashes[key]; storedHash != "" && !failmemory.Matches(storedHash, data) {
 					// The hash covers RESOLVED data, so "changed" can also mean a
 					// referenced secret was rotated, with no repository diff.
 					rotated := ""
@@ -348,7 +347,7 @@ func Plan(
 			ops = append(ops, errorOp(id, fmt.Sprintf(
 				"ambiguous adopt: %d live integration entries for domain '%s' titled %s", len(matches), domain, difftext.PyRepr(title))))
 		default:
-			if refusal, blocked := failmemory.Refusal(attempts, key, HashData(data)); blocked {
+			if refusal, blocked := failmemory.Refusal(attempts, key, data); blocked {
 				ops = append(ops, errorOp(id, refusal))
 				continue
 			}

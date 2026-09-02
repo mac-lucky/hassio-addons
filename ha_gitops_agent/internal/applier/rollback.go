@@ -49,10 +49,21 @@ func RollbackFrom(cfg Config, stashDir, configRoot string) Result {
 	}
 	sort.Strings(relPaths)
 
+	configRootReal := fsx.Realpath(configRoot)
 	var restored []string
 	var failures []string
 	for _, relPath := range relPaths {
 		status := files[relPath]
+		// Re-run at rollback time because the manifest could be stale or
+		// corrupt and a parent directory swapped for a symlink since the
+		// apply; also keeps the backupSrc join below inside the stash.
+		// Why containment only, not guardChangePath: see
+		// guardPathContained's comment.
+		if err := guardPathContained(relPath, configRootReal); err != nil {
+			slog.Warn("applier: rollback_from refused path", "path", relPath, "error", err)
+			failures = append(failures, fmt.Sprintf("%s: %v", relPath, err))
+			continue
+		}
 		dest := filepath.Join(configRoot, relPath)
 		switch status {
 		case "existed":
@@ -154,7 +165,9 @@ func stringSlice(v any) []string {
 // removeEmptyCreatedDirs removes configRoot-relative directories the
 // rolled-back apply created and that are now empty. Deepest-first, so a
 // parent emptied by its own child goes with it. Never configRoot itself,
-// and never a directory with anything left in it.
+// never a directory that resolves outside it (a corrupt manifest entry, or
+// a parent swapped for a symlink since the apply), and never a directory
+// with anything left in it.
 func removeEmptyCreatedDirs(createdDirs []string, configRoot string) {
 	configRootReal := fsx.Realpath(configRoot)
 	sorted := append([]string(nil), createdDirs...)
@@ -163,10 +176,10 @@ func removeEmptyCreatedDirs(createdDirs []string, configRoot string) {
 	})
 
 	for _, relDir := range sorted {
-		absDir := filepath.Join(configRoot, relDir)
-		if fsx.Realpath(absDir) == configRootReal {
+		if guardPathContained(relDir, configRootReal) != nil {
 			continue
 		}
+		absDir := filepath.Join(configRoot, relDir)
 		info, err := os.Stat(absDir)
 		if err != nil || !info.IsDir() {
 			continue

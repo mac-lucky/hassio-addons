@@ -14,6 +14,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
@@ -111,6 +113,7 @@ var funcMap = template.FuncMap{
 	"humanTime":      humanTime,
 	"inventoryGroup": inventoryGroupFunc,
 	"join":           strings.Join,
+	"printable":      escapeFormatChars,
 	"retryVals":      retryVals,
 	"reverseEvents":  reverseEvents,
 }
@@ -185,9 +188,45 @@ func diffLinesFunc(diffText string) []diffLineView {
 		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
 			class = "diff-del"
 		}
-		out = append(out, diffLineView{Class: class, Text: line})
+		out = append(out, diffLineView{Class: class, Text: escapeFormatChars(line)})
 	}
 	return out
+}
+
+// escapeFormatChars replaces Unicode format characters (category Cf) with
+// visible \u{XXXX} escapes. The diff is the approval gate for repository
+// content, and format characters are invisible by definition: a stored
+// bidi override reorders the rendered text (the Trojan Source trick,
+// CVE-2021-42574) so the hunk the reviewer approves reads differently
+// from the bytes Apply will write. html/template escapes only HTML
+// metacharacters, so these must be handled here. Escaped rather than
+// stripped: the reviewer should see that the file carries them.
+func escapeFormatChars(s string) string {
+	hasFormat := strings.ContainsFunc(s, isFormatChar)
+	if !hasFormat && !strings.Contains(s, `\u{`) {
+		return s
+	}
+	// A literal `\u{` in the content is doubled first, so a real format
+	// character and text that merely spells its escape render
+	// differently - without this the encoding is not injective and a
+	// planted literal could shrug off a real one as a false alarm.
+	s = strings.ReplaceAll(s, `\u{`, `\\u{`)
+	if !hasFormat {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if isFormatChar(r) {
+			fmt.Fprintf(&b, "\\u{%04X}", r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func isFormatChar(r rune) bool {
+	return unicode.Is(unicode.Cf, r)
 }
 
 // calloutView is one error/warning card, as {{define "callout"}} renders

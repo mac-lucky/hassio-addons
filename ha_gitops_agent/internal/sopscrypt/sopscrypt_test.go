@@ -1008,8 +1008,9 @@ func TestUnsupportedKeySourceReadsFlatMetadata(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := UnsupportedKeySource([]byte(base + c.line)); got != c.want {
-				t.Errorf("UnsupportedKeySource() = %q, want %q", got, c.want)
+			got, verifiable := UnsupportedKeySource([]byte(base + c.line))
+			if got != c.want || !verifiable {
+				t.Errorf("UnsupportedKeySource() = %q, %v, want %q, true", got, verifiable, c.want)
 			}
 		})
 	}
@@ -1365,14 +1366,18 @@ func TestDotenvRoundTripWithRealSops(t *testing.T) {
 
 func TestUnsupportedKeySourceSpotsRemoteBackends(t *testing.T) {
 	const body = "mqtt:\n    password: ENC[AES256_GCM,data:Zm9v,iv:YmFy,tag:YmF6,type:str]\n"
-	meta := func(inner string) []byte {
-		return []byte(body + "sops:\n" + inner + "    mac: ENC[AES256_GCM,data:bWFj,iv:aXY=,tag:dGFn,type:str]\n    version: 3.13.2\n")
+	// doc assembles one document: an optional prelude (for anchors the
+	// sops block references), the body, and the sops mapping around inner.
+	doc := func(prelude, inner string) []byte {
+		return []byte(prelude + body + "sops:\n" + inner + "    mac: ENC[AES256_GCM,data:bWFj,iv:aXY=,tag:dGFn,type:str]\n    version: 3.13.2\n")
 	}
+	meta := func(inner string) []byte { return doc("", inner) }
 
 	cases := []struct {
-		name string
-		doc  []byte
-		want string
+		name         string
+		doc          []byte
+		want         string
+		unverifiable bool
 	}{
 		{
 			name: "age only is what the agent writes",
@@ -1400,6 +1405,56 @@ func TestUnsupportedKeySourceSpotsRemoteBackends(t *testing.T) {
 			want: "hc_vault",
 		},
 		{
+			// sops resolves the alias when it reads its metadata, so the
+			// guard must see through it too or the repository can smuggle
+			// a vault URL past it.
+			name: "hc_vault hidden behind a YAML alias",
+			doc: doc("x: &v\n    - vault_address: http://127.0.0.1:9/\n      enc: x\n",
+				"    hc_vault: *v\n"),
+			want: "hc_vault",
+		},
+		{
+			name: "hc_vault merged into the sops mapping with a merge key",
+			doc: doc("m: &m\n    hc_vault:\n        - vault_address: http://127.0.0.1:9/\n          enc: x\n",
+				"    !!merge <<: *m\n"),
+			want: "hc_vault",
+		},
+		{
+			name: "key_groups entry hidden behind a YAML alias",
+			doc: doc("g: &g\n    - hc_vault:\n        - vault_address: http://127.0.0.1:9/\n          enc: x\n",
+				"    key_groups: *g\n"),
+			want: "hc_vault",
+		},
+		{
+			// A document the node parser accepts but value decoding does
+			// not (duplicate keys) cannot be checked the way sops reads
+			// it, so the guard refuses instead of passing it through.
+			name:         "metadata that cannot be value-decoded fails closed",
+			doc:          meta("    kms: []\n    kms: []\n"),
+			unverifiable: true,
+		},
+		{
+			// One tagged key makes yaml.v3 decode the sops mapping as
+			// map[any]any; a lenient assertion would drop the mapping and
+			// let the hc_vault entry beside it through to sops.
+			name: "tagged key beside a backend fails closed",
+			doc: meta("    hc_vault:\n        - vault_address: http://127.0.0.1:9/\n          enc: x\n" +
+				"    !foo bar: x\n"),
+			unverifiable: true,
+		},
+		{
+			name: "binary-tagged key beside a backend fails closed",
+			doc: meta("    hc_vault:\n        - vault_address: http://127.0.0.1:9/\n          enc: x\n" +
+				"    !!binary aGk=: x\n"),
+			unverifiable: true,
+		},
+		{
+			name: "tagged key inside a key_groups entry fails closed",
+			doc: meta("    key_groups:\n        - hc_vault:\n            - vault_address: http://127.0.0.1:9/\n              enc: x\n" +
+				"          !foo bar: x\n"),
+			unverifiable: true,
+		},
+		{
 			name: "plaintext config is not a sops document at all",
 			doc:  []byte("mqtt:\n  password: hunter2\n"),
 			want: "",
@@ -1407,8 +1462,9 @@ func TestUnsupportedKeySourceSpotsRemoteBackends(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := UnsupportedKeySource(tc.doc); got != tc.want {
-				t.Errorf("UnsupportedKeySource() = %q, want %q", got, tc.want)
+			got, verifiable := UnsupportedKeySource(tc.doc)
+			if got != tc.want || verifiable != !tc.unverifiable {
+				t.Errorf("UnsupportedKeySource() = %q, %v, want %q, %v", got, verifiable, tc.want, !tc.unverifiable)
 			}
 		})
 	}

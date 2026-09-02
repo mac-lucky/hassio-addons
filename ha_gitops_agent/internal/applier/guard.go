@@ -9,9 +9,8 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 )
 
-// guardChangePath is the path-traversal guard: an error if path is
-// excluded, absolute, contains ".." after normalization, or resolves (via
-// fsx.Realpath, catching symlink tricks too) outside configRootReal.
+// guardChangePath is the path-traversal guard for APPLY-time changes: the
+// containment checks of guardPathContained, plus the exclusion list.
 //
 // Kept separate from gitsync.guardDriftPath and
 // dashboards.containDashboardConfigPath, which share only the containment
@@ -21,12 +20,25 @@ func guardChangePath(cfg Config, path, configRootReal string) error {
 	if cfg.IsExcluded(path) {
 		return fmt.Errorf("refusing to touch excluded path: %s", path)
 	}
+	return guardPathContained(path, configRootReal)
+}
+
+// guardPathContained errors if path is absolute, empty, the root itself,
+// contains ".." after normalization, or resolves (via fsx.Realpath,
+// catching symlink tricks too) outside configRootReal. No exclusion
+// check: RollbackFrom uses this alone, because a stash manifest records
+// what the apply actually touched, and an exclusion pattern that changed
+// since then (age_key cleared, an older binary's pattern set) must not
+// strand the restore of a file the apply provably wrote.
+func guardPathContained(path, configRootReal string) error {
 	if filepath.IsAbs(path) {
 		return fmt.Errorf("refusing to touch absolute path: %s", path)
 	}
 
 	normalized := filepath.Clean(path)
-	if normalized == ".." || strings.HasPrefix(normalized, ".."+string(filepath.Separator)) {
+	// "." covers the empty path too; without this, a manifest entry of
+	// "" or "." marked "absent" would reach os.Remove(configRoot).
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("refusing to touch path outside config root: %s", path)
 	}
 

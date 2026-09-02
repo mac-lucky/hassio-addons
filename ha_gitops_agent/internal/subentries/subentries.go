@@ -432,8 +432,6 @@ func Plan(
 			ops = append(ops, errorOp(id, secretref.UnresolvedMessage("subentry", id, resolveErr)))
 			continue
 		}
-		currentHash := HashData(data)
-
 		if subentryID, isManaged := managed[key]; isManaged {
 			if parentID, liveType, exists := locateSubentry(liveSubentriesByEntryID, subentryID); exists {
 				if liveType != subentryType {
@@ -447,10 +445,10 @@ func Plan(
 						subentryType, liveType)))
 					continue
 				}
-				if hashes[key] == currentHash {
+				if failmemory.Matches(hashes[key], data) {
 					continue
 				}
-				if refusal, blocked := failmemory.Refusal(attempts, key, currentHash); blocked {
+				if refusal, blocked := failmemory.Refusal(attempts, key, data); blocked {
 					ops = append(ops, errorOp(id, refusal))
 					continue
 				}
@@ -499,7 +497,7 @@ func Plan(
 					"live subentry of type '%s' matched by %s has no usable subentry_id field", subentryType, matchedBy)))
 				continue
 			}
-			if refusal, blocked := failmemory.Refusal(attempts, key, currentHash); blocked &&
+			if refusal, blocked := failmemory.Refusal(attempts, key, data); blocked &&
 				!failmemory.CreatedUnidentified(attempts, key) {
 				// An adopt drives a real reconfigure flow, so a doomed one
 				// would re-drive every cycle exactly like a doomed update.
@@ -526,7 +524,7 @@ func Plan(
 				len(candidates), subentryType, parentID, matchedBy,
 				difftext.PyRepr(matchedValue(matchedBy, matchUniqueID, matchTitle)))))
 		default:
-			if refusal, blocked := failmemory.Refusal(attempts, key, currentHash); blocked {
+			if refusal, blocked := failmemory.Refusal(attempts, key, data); blocked {
 				ops = append(ops, errorOp(id, refusal))
 				continue
 			}
