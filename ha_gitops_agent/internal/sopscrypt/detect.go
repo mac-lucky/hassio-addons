@@ -740,7 +740,10 @@ func IsEncrypted(data []byte) bool {
 		// version: y}" block over plaintext values satisfies the first two
 		// but could never decrypt - classifying it as "not encrypted" here
 		// lets GuardSecretsAt refuse it honestly instead of the pipeline
-		// failing later with "encrypted, but undecryptable".
+		// failing later with "encrypted, but undecryptable". Note the
+		// asymmetry: hasKeySource fails toward "encrypted" when it cannot
+		// decode the metadata (see its comment) - do not "make it
+		// consistent" with the nil-returning checks around it.
 		if mappingValue(meta, "mac") != nil && mappingValue(meta, "version") != nil && hasKeySource(meta) {
 			return true
 		}
@@ -749,9 +752,10 @@ func IsEncrypted(data []byte) bool {
 }
 
 // keySourceMetadataKeys are the metadata keys sops stores recipients
-// under - one per supported backend, plus key_groups for Shamir splits. A
-// real sops file always carries at least one, or nothing could decrypt it.
-var keySourceMetadataKeys = []string{"age", "kms", "gcp_kms", "azure_kv", "hc_vault", "pgp", "key_groups"}
+// under: every remote backend plus age and Shamir key_groups. A real sops
+// file always carries at least one, or nothing could decrypt it. Derived
+// from remoteKeySources so a backend added there cannot drift out of here.
+var keySourceMetadataKeys = append([]string{"age", "key_groups"}, remoteKeySources...)
 
 // hasKeySource reports whether meta names at least one key source. It
 // decodes rather than walking nodes: merge keys ("<<: *anchor") resolve

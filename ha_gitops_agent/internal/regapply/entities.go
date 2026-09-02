@@ -137,10 +137,9 @@ func executeEntityOp(
 	// dry-run review window - and an integration that claimed disabled_by/
 	// hidden_by in between would otherwise be silently overwritten, with a
 	// clamped null recorded as the "original" in place of its actual state.
-	if liveObj != nil {
-		if msg := entityByFieldGuard(liveObj); msg != "" {
-			return stashEntry{}, fmt.Errorf("no longer user-owned since the plan was built: %s", msg)
-		}
+	// A nil liveObj passes: reading a nil map yields no fields to refuse.
+	if msg := entityByFieldGuard(liveObj); msg != "" {
+		return stashEntry{}, fmt.Errorf("no longer user-owned since the plan was built: %s", msg)
 	}
 
 	existingOriginals, hasOriginals := originals[key]

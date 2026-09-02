@@ -92,38 +92,9 @@ func copyFileTransformed(src, dst, rel string, transform TransformRepoFileFunc) 
 			return err
 		}
 	}
-	return writeFileAtomic(dst, data, srcInfo.Mode().Perm())
-}
-
-// writeFileAtomic writes dst through a same-directory temp file, fsynced
-// before the rename, so a crash mid-write cannot leave dst half-written
-// (the stash still covers a crash between files). Not fsx.WriteFileAtomic:
-// its fixed "<path>.tmp" name is fine in the agent's own /data, but dst
-// here sits in live config, where "<name>.tmp" can be a real, unmanaged
-// user file that a temp must not clobber.
-func writeFileAtomic(dst string, data []byte, perm os.FileMode) (err error) {
-	f, err := os.CreateTemp(filepath.Dir(dst), ".gitops-agent-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() {
-		if err != nil {
-			_ = f.Close()
-			_ = os.Remove(tmp)
-		}
-	}()
-	if err = f.Chmod(perm); err != nil {
-		return err
-	}
-	if _, err = f.Write(data); err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
+	// The Random variant, not WriteFileAtomic: dst sits in live config,
+	// where a fixed "<name>.tmp" can be a real, unmanaged user file. The
+	// atomicity keeps a crash mid-write from leaving dst half-written; the
+	// stash still covers a crash between files.
+	return fsx.WriteFileAtomicRandom(dst, data, srcInfo.Mode().Perm())
 }
