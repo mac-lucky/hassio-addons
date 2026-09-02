@@ -298,6 +298,8 @@ check     "host set on every event" \
     test "$(grep -c '"host"' "${VRL_OUT}")" -eq "$(grep -c . "${TESTS_DIR}/events.ndjson")"
 check_not "message secret redacted"  grep -Fq hunter2sentinel /tmp/messages.txt
 check     "level comes from the message" grep -q '"level": "warn"' "${VRL_OUT}"
+check     "sshd connection line is not an error" \
+    test "$(grep -c '"level": "error"' "${VRL_OUT}")" -eq 1
 check     "message-less event gets a placeholder" \
     grep -Fq '"message": "(no message)"' "${VRL_OUT}"
 # _CMDLINE still ships as its own field, as every journald field does; what must

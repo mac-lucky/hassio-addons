@@ -357,6 +357,14 @@ if is_string(level_match.level) {
   .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
 }
 
+# Docker's journald driver stamps every stderr line PRIORITY=3, so a daemon
+# that writes routine traffic to stderr (sshd in the SSH add-on) arrives as an
+# error. Downgrade the connection chatter; a real sshd failure does not start
+# like this.
+if .level == "error" && match(msg, r'^(Connection from|Connection closed by|Connection reset by|Close session|Starting session|Received disconnect|Disconnected from|Accepted publickey|Server listening on)') {
+  .level = "info"
+}
+
 # Add timestamp if missing
 if !exists(.timestamp) { .timestamp = now() }
 TRANSFORMS_VRL
