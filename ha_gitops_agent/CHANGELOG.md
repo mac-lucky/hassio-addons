@@ -8,6 +8,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.6] - 2026-09-02
+
+Hardening follow-ups from a fresh review of 0.6.5. No new options.
+
+### Fixed
+
+- Entity ownership is now re-checked at the moment an entity op is applied,
+  not only when the plan was built. Plans are applied later than they are
+  planned - the whole time a dry-run diff sits on the dashboard waiting for
+  Apply - and an integration that claimed an entity's `disabled_by` or
+  `hidden_by` in between was silently overwritten, with its actual state
+  lost from the restore record. Such an op is now refused and surfaces as
+  an error; the next cycle re-plans around it.
+- A timed-out git operation no longer leaves its transport helper
+  (`git-remote-https`, `ssh`) running as an orphan holding a connection.
+  Subprocesses now run in their own process group and the whole group is
+  killed on timeout.
+- Files written into /homeassistant are now written atomically (temp file,
+  fsync, rename), so a power cut mid-write cannot leave one half-written.
+  The pre-write backup already made this recoverable; now it does not
+  happen in the first place.
+
+### Security
+
+- Version strings and status lines on the add-on updates card are now
+  escaped like every other external text on the dashboard. An add-on
+  repository's published version or a Supervisor error message could carry
+  invisible Unicode direction-override characters and misrender what the
+  card shows.
+- A file carrying spoofed sops metadata (a `sops:` block with a mac and
+  version but no key source at all) is now classified as what it is:
+  plaintext. Nothing could ever decrypt such a file; treating it as
+  encrypted meant a secrets-shaped file with a spoofed block sailed past
+  the tracked-in-clear guard and failed later with a confusing decrypt
+  error instead of an honest refusal.
+
 ## [0.6.5] - 2026-09-02
 
 A follow-up security release: an adversarial review of 0.6.4 turned up
