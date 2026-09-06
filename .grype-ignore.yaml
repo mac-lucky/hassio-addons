@@ -1,0 +1,14 @@
+# Grype ignore rules for the images this repository publishes. The nightly
+# registry scan in forgejo-fleet-ops merges this file into the org baseline
+# for every image whose org.opencontainers.image.source label points here.
+#
+# Scope each rule by location so it only ever matches the component named,
+# and drop the rule once upstream ships a fix.
+ignore:
+  # tempio is a Go binary shipped by hassio-addons/debian-base and
+  # hassio-addons/base. Its standard-library findings are fixed only when
+  # the base image is rebuilt with a newer Go; nothing in this repo compiles
+  # it, so the rebuild here cannot change them.
+  - package:
+      type: go-module
+      location: "/usr/bin/tempio"
