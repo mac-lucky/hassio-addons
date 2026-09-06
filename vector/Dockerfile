@@ -20,11 +20,15 @@ ARG BUILD_ARCH
 # Copy Vector binary from official Debian image
 COPY --from=vector /usr/bin/vector /usr/local/bin/vector
 
-# hadolint ignore=DL3008
+# DL3005: the pinned debian-base lags Debian's security fixes (openssl, gnutls,
+# glibc); upgrading at build time is what keeps the published image clean.
+# hadolint ignore=DL3005,DL3008
 RUN set -eux; \
     \
-    # Install dependencies (systemd provides journalctl)
+    # Upgrade what the base image ships, then install dependencies
+    # (systemd provides journalctl)
     apt-get update; \
+    apt-get upgrade -y --no-install-recommends; \
     apt-get install -y --no-install-recommends \
         jq \
         systemd; \
