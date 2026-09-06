@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.7] - 2026-09-06
+
+Rebuild only, no functional change.
+
+### Security
+
+- Built with Go 1.27.1 and golang.org/x/crypto 0.56.0. The 0.6.6 image was
+  built with an older toolchain and carried fixable standard-library and
+  x/crypto vulnerabilities; the Alpine packages are refreshed as well.
+
 ## [0.6.6] - 2026-09-02
 
 Hardening follow-ups from a fresh review of 0.6.5. No new options.
