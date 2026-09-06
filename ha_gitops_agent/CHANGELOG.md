@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.8] - 2026-09-06
+
+Rebuild only, no functional change.
+
+### Security
+
+- The release build no longer reuses cached image layers. 0.6.7 was built
+  from a cached layer and still shipped the base image's OpenSSL 3.3.3
+  instead of the patched 3.3.7 that `apk upgrade` fetches on a fresh build.
+
 ## [0.6.7] - 2026-09-06
 
 Rebuild only, no functional change.
