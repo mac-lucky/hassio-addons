@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.9] - 2026-09-07
+
+Rebuild only, no functional change.
+
+### Security
+
+- OpenSSL and curl are now actually upgraded. The base image pins the
+  versions it shipped with in `/etc/apk/world`, so `apk upgrade` had been
+  skipping them; the pins are dropped before the upgrade.
+
 ## [0.6.8] - 2026-09-06
 
 Rebuild only, no functional change.

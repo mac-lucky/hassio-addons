@@ -6,7 +6,7 @@ ARG BUILD_FROM=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db8691
 
 # Keep in sync with config.yaml's version (which has a comment pointing back
 # here) - stamped into the binary as main.version below.
-ARG BUILD_VERSION=0.6.8
+ARG BUILD_VERSION=0.6.9
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG BUILD_VERSION
@@ -32,7 +32,12 @@ LABEL org.opencontainers.image.title="GitOps Agent" \
 # cannot act on.
 # apk upgrade first: the digest-pinned base can lag Alpine package fixes, and
 # upgrading at build picks them up without waiting for a base-image rebuild.
-RUN apk upgrade --no-cache && apk add --no-cache git ca-certificates sops
+# The base image pins every package it installed in /etc/apk/world
+# (libssl3=3.3.3-r0, curl=8.12.1-r1, ...), which is why a plain `apk upgrade`
+# left the OpenSSL and curl fixes on the shelf through two releases. Drop the
+# pins first; the base image's versions are a build snapshot, not a
+# compatibility requirement.
+RUN sed -i 's/=.*$//' /etc/apk/world && apk upgrade --no-cache && apk add --no-cache git ca-certificates sops
 
 COPY --from=builder /ha-gitops-agent /ha-gitops-agent
 
