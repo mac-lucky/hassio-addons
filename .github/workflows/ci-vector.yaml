@@ -1,0 +1,230 @@
+name: Vector CI/CD
+
+# Not triggered by pushes or pull requests directly: ci.yaml calls this when
+# vector/ changes, so every pull request reports one gate check whatever it
+# touches.
+on:
+  # release-vector.yaml calls this on a tag, which is the only way the images
+  # ever reach GHCR. Branch and pull request runs build every architecture and
+  # throw the result away, so a Dockerfile that cannot build still fails before
+  # it is tagged.
+  workflow_call:
+    inputs:
+      publish:
+        description: Push the built images to GHCR.
+        type: boolean
+        default: false
+  workflow_dispatch:
+
+env:
+  ADDON_SLUG: vector
+
+jobs:
+  information:
+    name: Gather Information
+    runs-on: ubuntu-latest
+    outputs:
+      architectures: ${{ steps.info.outputs.architectures }}
+      build_date: ${{ steps.info.outputs.build_date }}
+      description: ${{ steps.info.outputs.description }}
+      name: ${{ steps.info.outputs.name }}
+      version: ${{ steps.info.outputs.version }}
+      vector_version: ${{ steps.info.outputs.vector_version }}
+      base_images: ${{ steps.info.outputs.base_images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Get add-on information
+        id: info
+        run: |
+          architectures=$(yq -o=json -I=0 '.arch' vector/config.yaml)
+          echo "architectures=${architectures}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+          echo "description=$(yq -r '.description' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "name=$(yq -r '.name' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "version=$(yq -r '.version' vector/config.yaml)" >> $GITHUB_OUTPUT
+          echo "vector_version=$(yq -r '.args.VECTOR_VERSION' vector/build.yaml)" >> $GITHUB_OUTPUT
+          echo "base_images=$(yq -o=json -I=0 '.build_from' vector/build.yaml)" >> $GITHUB_OUTPUT
+
+  lint-addon:
+    name: Addon Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run addon lint
+        uses: frenck/action-addon-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7 # v2.21.1
+        with:
+          path: "./vector"
+
+  lint-hadolint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: vector/Dockerfile
+          failure-threshold: warning
+          ignore: DL3018
+
+  lint-yaml:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run yamllint
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
+        with:
+          file_or_dir: vector/
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 200
+              truthy:
+                allowed-values: ['true', 'false', 'on', 'off']
+              comments:
+                min-spaces-from-content: 1
+
+  lint-shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: "./vector/rootfs"
+          severity: warning
+
+  test-generator:
+    name: Config Generator
+    needs:
+      - information
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Build test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: vector
+          file: vector/Dockerfile
+          load: true
+          tags: hassio-addon-vector:test
+          build-args: |
+            BUILD_ARCH=amd64
+            BUILD_FROM=${{ fromJSON(needs.information.outputs.base_images).amd64 }}
+            VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
+          cache-from: type=gha,scope=test-amd64
+          cache-to: type=gha,scope=test-amd64,mode=max
+
+      - name: Run generator tests
+        run: |
+          docker run --rm -v "${{ github.workspace }}/vector/tests:/tests:ro" \
+            --entrypoint /bin/bash hassio-addon-vector:test /tests/run.sh
+
+  build:
+    name: Build (${{ matrix.architecture }})
+    needs:
+      - information
+      - lint-addon
+      - lint-hadolint
+      - lint-yaml
+      - lint-shellcheck
+      - test-generator
+    # aarch64 builds on a native arm runner; emulating it on ubuntu-latest made
+    # the aarch64 leg the slowest job in the run whenever the cache went cold.
+    runs-on: ${{ matrix.architecture == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: ${{ fromJson(needs.information.outputs.architectures) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # amd64 and aarch64 run on native runners; QEMU would only be needed for
+      # the dead armv7/armhf/i386 case branches below.
+      - name: Set up QEMU
+        if: ${{ matrix.architecture != 'amd64' && matrix.architecture != 'aarch64' }}
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Login to GHCR
+        if: ${{ inputs.publish }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set platform
+        id: platform
+        run: |
+          case "${{ matrix.architecture }}" in
+            amd64) platform="linux/amd64" ;;
+            aarch64) platform="linux/arm64" ;;
+            armv7) platform="linux/arm/v7" ;;
+            armhf) platform="linux/arm/v6" ;;
+            i386) platform="linux/386" ;;
+          esac
+          echo "platform=${platform}" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          # A release never reuses layers: the apk/apt upgrade layer is only as
+          # fresh as the build that produced it, and a cached one shipped the
+          # base image's OpenSSL under a new add-on version. Branch and PR
+          # builds keep the cache.
+          no-cache: ${{ inputs.publish || false }}
+          context: vector
+          file: vector/Dockerfile
+          platforms: ${{ steps.platform.outputs.platform }}
+          push: ${{ inputs.publish || false }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:${{ needs.information.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/hassio-addon-vector-${{ matrix.architecture }}:latest
+          build-args: |
+            BUILD_ARCH=${{ matrix.architecture }}
+            BUILD_DATE=${{ needs.information.outputs.build_date }}
+            BUILD_DESCRIPTION=${{ needs.information.outputs.description }}
+            BUILD_FROM=${{ fromJSON(needs.information.outputs.base_images)[matrix.architecture] }}
+            BUILD_NAME=${{ needs.information.outputs.name }}
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=${{ needs.information.outputs.version }}
+            VECTOR_VERSION=${{ needs.information.outputs.vector_version }}
+          # The test-generator scope holds amd64 layers, so only the amd64 leg
+          # can reuse it; listing it for aarch64 was dead config.
+          cache-from: |
+            type=gha,scope=build-${{ matrix.architecture }}
+            ${{ matrix.architecture == 'amd64' && 'type=gha,scope=test-amd64' || '' }}
+          cache-to: type=gha,scope=build-${{ matrix.architecture }},mode=max
+          labels: |
+            org.opencontainers.image.title=${{ needs.information.outputs.name }}
+            org.opencontainers.image.description=${{ needs.information.outputs.description }}
+            org.opencontainers.image.created=${{ needs.information.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.information.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}

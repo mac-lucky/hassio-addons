@@ -1,16 +1,9 @@
 name: GitOps Agent CI/CD
 
+# Not triggered by pushes or pull requests directly: ci.yaml calls this when
+# ha_gitops_agent/ changes, so every pull request reports one gate check
+# whatever it touches.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "ha_gitops_agent/**"
-      - ".github/workflows/ci-gitops-agent.yaml"
-  pull_request:
-    paths:
-      - "ha_gitops_agent/**"
-      - ".github/workflows/ci-gitops-agent.yaml"
   # release-gitops-agent.yaml calls this on a tag, which is the only way the
   # images ever reach GHCR. Branch and pull request runs build every
   # architecture and throw the result away, so a Dockerfile that cannot build

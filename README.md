@@ -10,7 +10,7 @@ A collection of Home Assistant add-ons focused on observability and configuratio
 
 ### Vector Log Collector
 
-[![Vector CI](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci.yaml/badge.svg)](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci.yaml)
+[![CI](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci.yaml/badge.svg)](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci.yaml)
 
 High-performance log collector that sends Home Assistant logs to VictoriaLogs.
 
