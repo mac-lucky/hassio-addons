@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.10] - 2026-09-19
+
+Rebuild only, no functional change.
+
+### Security
+
+- Picks up Alpine's OpenSSL 3.3.7-r1 (CVE-2026-63073, CVE-2026-34182,
+  CVE-2026-75803 and six High-severity fixes), published after 0.6.9 was
+  built.
+
 ## [0.6.9] - 2026-09-07
 
 Rebuild only, no functional change.
