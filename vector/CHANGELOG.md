@@ -5,6 +5,20 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-09-20
+
+### Fixed
+
+- Home Assistant tracebacks arrive as one event instead of one per frame. The
+  journald driver stamps every stderr line PRIORITY=3, so each frame of a Python
+  traceback was counted and stored as its own error: a single failure showed up
+  fifteen times and the stack was spread over fifteen rows. Lines that do not
+  open a new Home Assistant log line now merge into the one that does. Only the
+  homeassistant container is routed through the reduce; every other unit goes
+  straight to the sink. A merged entry is capped at 200 lines or ten seconds,
+  and because it is only complete once the next log line arrives, an isolated
+  error can arrive up to about three seconds later than before.
+
 ## [1.8.3] - 2026-09-06
 
 ### Security

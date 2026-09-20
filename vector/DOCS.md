@@ -89,6 +89,19 @@ When `collect_journal` is enabled, the add-on collects all systemd journal entri
 
 Use `journal_include_units` to collect only specific units, or `journal_exclude_units` to filter out noisy services.
 
+### Multi-line tracebacks
+
+The journald docker driver stamps every stderr line `PRIORITY=3`, so each frame of a Python
+traceback would otherwise arrive as its own `error` entry. Lines that do not open a new Home
+Assistant log line are merged into the one that does, giving one entry per error with the
+stack attached and the level taken from the opening line.
+
+This applies to the container named `homeassistant`, which is what Supervisor calls Core. Logs
+from any other container are passed through one line at a time, unchanged. Because a merged
+entry is only complete once the next log line arrives, an isolated error can reach VictoriaLogs
+up to about three seconds later than it used to; a merged entry is capped at 200 lines or ten
+seconds, whichever comes first.
+
 ## VictoriaLogs Integration
 
 Logs are sent to VictoriaLogs using the Elasticsearch-compatible bulk API:

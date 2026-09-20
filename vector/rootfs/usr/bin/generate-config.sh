@@ -308,6 +308,47 @@ transforms:
     inputs:
       - journald
     file: ${VECTOR_VRL}
+
+  # Docker's journald driver stamps every stderr line PRIORITY=3, and a Python
+  # traceback is one stderr line per frame. Each frame therefore arrived as its
+  # own error event: one real Home Assistant error became fifteen, the stack was
+  # scattered across fifteen rows, and the error count read about fifteen times
+  # what it was. Rejoin them onto the line that opened the traceback, which is
+  # the one carrying the real level.
+  #
+  # Only the homeassistant container is routed through the reduce. Everything
+  # else goes straight to the sink, so nothing is buffered that does not need to
+  # be, and a stall here cannot hold up another add-on's logs.
+  split_multiline:
+    type: route
+    inputs:
+      - enrich_logs
+    route:
+      homeassistant: '.container_name == "homeassistant"'
+
+  join_multiline:
+    type: reduce
+    inputs:
+      - split_multiline.homeassistant
+    group_by:
+      - container_name
+    # A new group starts at the next line that looks like a fresh Home Assistant
+    # log line; anything else is a continuation and merges into the open one.
+    # A block scalar, not a quoted one: the VRL regex literal is r'...' and a
+    # single-quoted YAML scalar would end at its first quote.
+    starts_when: >-
+      match(to_string(.message) ?? "", r'^(?:\x1b\[[\d;]*m)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}')
+    merge_strategies:
+      message: concat_newline
+      timestamp: discard
+    # A group that goes quiet is flushed 2s after its last line. The other two
+    # bound a group that keeps being fed: end_every_period_ms caps it in time
+    # when the gaps between lines stay under that 2s, and max_events caps it in
+    # size, so a startup banner or a library looping on stderr cannot build one
+    # unbounded event on its way to the sink.
+    expire_after_ms: 2000
+    end_every_period_ms: 10000
+    max_events: 200
 TRANSFORMS_HEADER
 
 # Write the VRL program - quoted heredoc so its $, \d and \s survive verbatim,
@@ -411,7 +452,8 @@ sinks:
   victorialogs:
     type: elasticsearch
     inputs:
-      - enrich_logs
+      - split_multiline._unmatched
+      - join_multiline
     endpoints:
       - "${victorialogs_endpoint}"
     api_version: v8

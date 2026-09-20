@@ -48,6 +48,9 @@ run_case minimal
 check     "exits 0"                          test "${rc}" -eq 0
 check     "config is mode 600"               test "$(stat -c %a "${VECTOR_CONFIG}")" = 600
 check_not "no auth block without a username" grep -q "strategy: basic" "${VECTOR_CONFIG}"
+check     "the multiline reduce is wired in"  grep -q "type: reduce" "${VECTOR_CONFIG}"
+check     "the sink reads both branches" \
+    grep -q -- "- split_multiline._unmatched" "${VECTOR_CONFIG}"
 
 run_case auth-quotes
 check     "exits 0"                     test "${rc}" -eq 0
@@ -306,6 +309,68 @@ check     "message-less event gets a placeholder" \
 # not happen is it being folded into .message, past the redaction written for it
 check_not "journal metadata not folded into message" \
     grep -Fq restic-sentinel /tmp/messages.txt
+
+# A Python traceback reaches journald as one stderr line per frame, all stamped
+# PRIORITY=3. `vector vrl` runs one event at a time and cannot see a reduce, so
+# this drives the real transform. The block is lifted out of the config the
+# generator just wrote, the same way the auth block is above, so a change in how
+# it is emitted is exercised instead of restated here.
+current="multiline"
+ml=/tmp/multiline
+rm -rf "${ml}"; mkdir -p "${ml}"
+
+# Regenerate first: the cases above leave VECTOR_CONFIG on the custom-config
+# branch, which never writes a transforms section.
+run_case minimal
+awk '/^  join_multiline:/{f=1;print;next} f&&!/^    /{f=0} f' "${VECTOR_CONFIG}" \
+    | sed 's/- split_multiline.homeassistant/- tag/' > "${ml}/reduce.yaml"
+current="multiline"
+check "the reduce block was found in the config" test -s "${ml}/reduce.yaml"
+
+cat > "${ml}/in.log" <<'INLOG'
+2026-01-11 09:04:15 ERROR (MainThread) [homeassistant.core] boom
+Traceback (most recent call last):
+  File "/x.py", line 1, in <module>
+    raise ValueError("bad")
+2026-01-11 09:04:16 INFO (MainThread) [homeassistant.core] next
+INLOG
+
+{
+    cat <<EOF
+data_dir: ${ml}
+sources:
+  infile:
+    type: file
+    include:
+      - ${ml}/in.log
+    read_from: beginning
+transforms:
+  tag:
+    type: remap
+    inputs:
+      - infile
+    source: '.container_name = "homeassistant"'
+EOF
+    cat "${ml}/reduce.yaml"
+    cat <<EOF
+sinks:
+  out:
+    type: file
+    inputs:
+      - join_multiline
+    path: ${ml}/out.log
+    encoding:
+      codec: json
+EOF
+} > "${ml}/cfg.yaml"
+
+timeout 10 vector --config-yaml "${ml}/cfg.yaml" > "${ml}/run.log" 2>&1
+
+check "two log lines started two events, the frames between them did not" \
+    test "$(wc -l < "${ml}/out.log" 2> /dev/null || echo 0)" -eq 2
+check "the traceback rejoined the line that opened it" \
+    grep -q 'boom.*Traceback.*raise ValueError' "${ml}/out.log"
+
 
 printf '\n%s failing assertion(s)\n' "${failures}"
 [[ ${failures} -eq 0 ]]
