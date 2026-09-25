@@ -16,6 +16,9 @@ on:
         default: false
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   ADDON_SLUG: ha_gitops_agent
   GITLEAKS_VERSION: "8.30.1"
@@ -40,6 +43,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Get add-on information
         id: info
@@ -72,6 +77,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Run addon lint
         uses: frenck/action-addon-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7 # v2.21.1
@@ -84,6 +91,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Run Hadolint
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
@@ -98,6 +107,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # line-length is off rather than raised: translations/en.yaml holds the
       # option descriptions Home Assistant renders in the config form, and
@@ -121,6 +132,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # The add-on encrypts secrets, so its tests are full of secret-shaped
       # fixtures. .gitleaks.toml allowlists those by value, not by excluding
@@ -146,6 +159,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -184,6 +199,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -220,6 +237,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # Both declared architectures run on native runners; QEMU would only be
       # needed if an emulated arch were ever added to the platform case below.
@@ -240,8 +259,10 @@ jobs:
 
       - name: Set platform
         id: platform
+        env:
+          ARCH: ${{ matrix.architecture }}
         run: |
-          case "${{ matrix.architecture }}" in
+          case "${ARCH}" in
             amd64) platform="linux/amd64" ;;
             aarch64) platform="linux/arm64" ;;
           esac

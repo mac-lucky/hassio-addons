@@ -33,6 +33,7 @@ jobs:
           # A push is diffed against its "before" commit, which can be several
           # commits back.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Diff against the base
         id: diff

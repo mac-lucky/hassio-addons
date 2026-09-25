@@ -21,6 +21,9 @@ on:
       - "vector/v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Verify Tag
@@ -28,6 +31,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # config.yaml is where the published image tag comes from, and the store
       # entry Home Assistant reads. A tag naming a different version would
@@ -65,6 +70,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate release notes
         uses: mac-lucky/actions-shared-workflows/.github/actions/generate-release-notes@master
