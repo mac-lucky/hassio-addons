@@ -22,16 +22,18 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^ha_gitops_agent/Dockerfile$/",
-        "/^ha_gitops_agent/build\\.yaml$/"
-      ],
-      "matchStrings": [
-        "ARG GO_VERSION=(?<currentValue>[0-9.]+)",
-        "GO_VERSION: \"(?<currentValue>[0-9.]+)\""
-      ],
+      "description": "The build.yaml copy of GO_VERSION. The Dockerfile ARG is tracked by the shared preset with the same depName, so both land in one PR",
+      "managerFilePatterns": ["/^ha_gitops_agent/build\\.yaml$/"],
+      "matchStrings": ["GO_VERSION: \"(?<currentValue>[0-9.]+)\""],
       "datasourceTemplate": "golang-version",
       "depNameTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "build_from base images. The builder passes them in as BUILD_FROM, so the Dockerfile's ARG default is never what ships",
+      "managerFilePatterns": ["/^[^/]+/build\\.yaml$/"],
+      "matchStrings": ["(?:amd64|aarch64): (?<depName>[a-z0-9.-]+/[^:\\s]+):(?<currentValue>[^\\s@]+)"],
+      "datasourceTemplate": "docker"
     },
     {
       "customType": "regex",
