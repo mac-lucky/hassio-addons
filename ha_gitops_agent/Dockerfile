@@ -1,8 +1,10 @@
 # Both ARGs must stay declared here, before the first FROM: buildkit only
 # resolves an ARG used in a FROM instruction's image name from this global
-# scope, not from an ARG declared between stages further down the file.
-ARG GO_VERSION=1.27.1
-ARG BUILD_FROM=alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+# scope, not from an ARG declared between stages further down the file. No
+# defaults: CI passes both from build.yaml, the only pin (args.GO_VERSION and
+# build_from), so a local docker build passes them the same way.
+ARG GO_VERSION
+ARG BUILD_FROM
 
 # Keep in sync with config.yaml's version (which has a comment pointing back
 # here) - stamped into the binary as main.version below.
@@ -19,6 +21,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${BUILD_VERSION}" -o /ha-gitops-agent ./cmd/ha-gitops-agent
 
+# hadolint ignore=DL3006
 FROM ${BUILD_FROM}
 ARG BUILD_VERSION
 

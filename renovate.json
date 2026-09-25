@@ -22,7 +22,7 @@
     },
     {
       "customType": "regex",
-      "description": "The build.yaml copy of GO_VERSION. The Dockerfile ARG is tracked by the shared preset with the same depName, so both land in one PR",
+      "description": "GO_VERSION lives only in build.yaml (the Dockerfile ARG has no default), which no preset manager reads",
       "managerFilePatterns": ["/^ha_gitops_agent/build\\.yaml$/"],
       "matchStrings": ["GO_VERSION: \"(?<currentValue>[0-9.]+)\""],
       "datasourceTemplate": "golang-version",
