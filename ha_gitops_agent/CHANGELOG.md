@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.6.11] - 2026-09-25
+
+Rebuild only, no functional change.
+
+### Changed
+
+- Base image updated to hassio-addons/base 21.0.5 (from 17.2.5).
+
 ## [0.6.10] - 2026-09-19
 
 Rebuild only, no functional change.
