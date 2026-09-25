@@ -1,6 +1,6 @@
 build_from:
-  amd64: ghcr.io/hassio-addons/base:17.2.5
-  aarch64: ghcr.io/hassio-addons/base:17.2.5
+  amd64: ghcr.io/hassio-addons/base:21.0.5
+  aarch64: ghcr.io/hassio-addons/base:21.0.5
 
 args:
   GO_VERSION: "1.27.1"
