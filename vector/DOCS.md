@@ -209,7 +209,7 @@ If you see "connection refused" errors:
 
 1. Verify VictoriaLogs is running and accessible
 2. Check firewall rules allow connections from Home Assistant
-3. Ensure the endpoint URL is correct (include `http://` or `https://`)
+3. Check the endpoint URL (include `http://` or `https://`)
 
 ## Vector API
 

@@ -1366,7 +1366,7 @@ conflict without resolving it would just move the problem.
 
 A captured file is removed from the apply plan before that plan is
 published, so there is no moment where an edit has been decided as yours
-and an apply is about to overwrite it. The unattended cycle additionally
+and an apply is about to overwrite it. The unattended cycle also
 holds one lock across both halves, but it is the plan filtering, not the
 lock, that makes this true for the web and webhook paths as well. A
 capture that fails to push holds those files back too, so a bad token
@@ -1734,7 +1734,7 @@ A failed check or a failed install is reported and then left alone. It
 never sets the sync state to "error".
 
 Every outcome lands on the add-on's row in the card, which always shows
-the last verdict for every watched slug. What additionally reaches the
+the last verdict for every watched slug. What also reaches the
 activity feed is the news:
 
 - **A failed install** is logged every time it happens.
