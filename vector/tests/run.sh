@@ -287,6 +287,7 @@ check "an unknown name is an error, not an empty value" \
 #   _t_container  expected .container_name
 #   _t_host       expected .host
 #   _t_absent     text that must not survive anywhere in .message
+#   _t_fields     {"field": value} pairs the output must carry
 #   _t_drop       true when the program must drop the event (abort with the
 #                 "vector-addon-drop:" sentinel) instead of passing it on
 #
@@ -296,16 +297,16 @@ check "an unknown name is an error, not an empty value" \
 run_vrl_events() {
     local program="$1" events="$2" event name out
     # --print-object writes VRL values, not JSON (a timestamp comes out as
-    # t'...'), so a copy of the program ends by round-tripping the event
-    # through JSON for jq to read
-    { cat "${program}"; printf '\n. = object(parse_json(encode_json(.)) ?? {}) ?? {}\n'; } \
+    # t'...', a tab as a raw tab), so a copy of the program ends in
+    # encode_json(.) and what comes out is a JSON string holding the event
+    { cat "${program}"; printf '\nencode_json(.)\n'; } \
         > /tmp/program-json.vrl
     while IFS= read -r event; do
         [[ -n "${event}" ]] || continue
         name=$(jq -r '._t_name // "unnamed"' <<< "${event}")
         current="vrl: ${name}"
         printf '%s\n' "${event}" > /tmp/one.json
-        VECTOR_LOG=error vector vrl --print-object --program /tmp/program-json.vrl \
+        VECTOR_LOG=error vector vrl --program /tmp/program-json.vrl \
             --input /tmp/one.json > /tmp/one.out 2> /tmp/one.err
         if [[ "$(jq -r "._t_drop // false" <<< "${event}")" == "true" ]]; then
             if [[ ! -s /tmp/one.out ]] && grep -q "^vector-addon-drop:" /tmp/one.err; then
@@ -319,7 +320,7 @@ run_vrl_events() {
             fail "the program errored: $(head -c 300 /tmp/one.err)"
             continue
         fi
-        out=$(cat /tmp/one.out)
+        out=$(jq -c 'fromjson' /tmp/one.out 2> /dev/null)
         if ! jq -e 'type == "object"' <<< "${out}" > /dev/null 2>&1; then
             fail "no event came out"
             continue
@@ -335,6 +336,10 @@ run_vrl_events() {
             expect("_t_unit"; "unit"),
             expect("_t_container"; "container_name"),
             expect("_t_host"; "host"),
+            ((._t_fields // {}) | to_entries[]) as $f
+            | (if .[$f.key] != $f.value
+               then "\($f.key): got \(.[$f.key] | tojson), want \($f.value | tojson)"
+               else empty end),
             (if has("_t_absent")
                  and (._t_absent as $a | (.message // "") | tostring | contains($a))
              then "message still carries \(._t_absent | tojson)" else empty end)
@@ -350,6 +355,27 @@ run_vrl_events() {
 current="vrl"
 check "the VRL program is non-empty" test -s /tmp/enrich.vrl
 run_vrl_events /tmp/enrich.vrl "${TESTS_DIR}/events.ndjson"
+
+# Without the hostname option the host journald reports is kept, rather than
+# this container's own name
+run_case no-hostname
+check "exits 0" test "${rc}" -eq 0
+check "says where the host comes from" grep -q "taken from the journal" "${LOG}"
+printf '%s\n' '{"_t_name":"the journald host is kept","_t_host":"journal-host","host":"journal-host","message":"x","PRIORITY":"6"}' \
+    > /tmp/host-events.ndjson
+run_vrl_events "${VECTOR_VRL}" /tmp/host-events.ndjson
+
+# An extra label named like a field the add-on sets would overwrite it on every
+# event; "message" would replace every log line
+run_case extra-label-reserved
+check "exits non-zero" test "${rc}" -ne 0
+check "names the key"  grep -q "Extra label 'message'" "${LOG}"
+
+run_case extra-labels
+check "exits 0" test "${rc}" -eq 0
+printf '%s\n' '{"_t_name":"extra labels land, quotes intact","_t_fields":{"env":"prod \"q\" \\ x","site":"home"},"message":"x","PRIORITY":"6"}' \
+    > /tmp/label-events.ndjson
+run_vrl_events "${VECTOR_VRL}" /tmp/label-events.ndjson
 
 # A Python traceback reaches journald as one stderr line per frame, all stamped
 # PRIORITY=3. `vector vrl` runs one event at a time and cannot see a reduce, so

@@ -231,14 +231,25 @@ fi
 
 validate_list '.stream_fields // [] | .[]' "${IDENTIFIER_RE}" 'stream field (must be a valid identifier)'
 
-# Use hostname from system if not specified
-if [[ -z "${hostname}" ]]; then
-    hostname=$(hostname)
+# Validate hostname and instance to prevent injection. An empty hostname is
+# fine: the VRL then keeps the host journald reports for each entry. Falling
+# back to $(hostname) here would stamp every event with this container's own
+# name, a Supervisor-assigned slug like b55247da-vector.
+if [[ -n "${hostname}" ]]; then
+    validate_safe_string "${hostname}" "hostname"
 fi
-
-# Validate hostname and instance to prevent injection
-validate_safe_string "${hostname}" "hostname"
 validate_safe_string "${instance}" "instance"
+
+# Keys a label must not take: they would overwrite a field the add-on sets on
+# every event (an extra "message" label would replace every log line), or one
+# VictoriaLogs reserves for itself.
+readonly RESERVED_LABEL_RE='^(message|timestamp|level|host|instance|unit|container_name|source_type|_msg|_time|_stream|_stream_id)$'
+while IFS= read -r label_key; do
+    if [[ "${label_key}" =~ ${RESERVED_LABEL_RE} ]]; then
+        bashio::log.fatal "Extra label '${label_key}' would overwrite a field the add-on sets itself"
+        bashio::exit.nok
+    fi
+done < <(jq -r '.extra_labels // {} | keys | .[]' "${VECTOR_OPTIONS_FILE}")
 
 # journald is the only source, so disabling it leaves nothing to collect
 if [[ "${collect_journal}" != "true" ]]; then
@@ -250,7 +261,7 @@ masked_endpoint=$(printf '%s\n' "${victorialogs_endpoint}" | mask_credentials_st
 
 bashio::log.info "Generating Vector configuration..."
 bashio::log.info "VictoriaLogs endpoint: ${masked_endpoint}"
-bashio::log.info "Hostname: ${hostname}"
+bashio::log.info "Hostname: ${hostname:-(taken from the journal)}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Redact sensitive: ${redact_sensitive}"
 
@@ -351,29 +362,55 @@ transforms:
     max_events: 200
 TRANSFORMS_HEADER
 
-# Write the VRL program - quoted heredoc so its $, \d and \s survive verbatim,
-# with the two runtime values substituted by sed afterwards
+# Write the VRL program. Quoted heredocs so its $, \d and \s survive verbatim;
+# the two runtime values are substituted by sed afterwards, and the parts built
+# from options are appended with jq/printf from validated values only.
 cat > "${VECTOR_VRL}" << 'TRANSFORMS_VRL'
-# Add standard labels (HOSTNAME and INSTANCE replaced by sed below)
-.host = "__HOSTNAME__"
+# No `!` anywhere in this program. A runtime error makes remap forward the
+# ORIGINAL event - unlabelled, unredacted, colour codes and all - so every
+# fallible call is guarded or coalesced instead. `abort` is the only exit and
+# it drops the event (remap's drop_on_abort defaults to true); every abort
+# message starts "vector-addon-drop:", which is what the tests look for.
+
+# Standard labels. __HOSTNAME__ is empty unless the hostname option is set:
+# journald already fills .host from _HOSTNAME, the real host name.
+host_override = "__HOSTNAME__"
+if host_override != "" {
+  .host = host_override
+} else if !exists(.host) {
+  .host = get_hostname() ?? "unknown"
+}
 .instance = "__INSTANCE__"
 if !exists(.source_type) { .source_type = "unknown" }
 
-# For journald logs - extract unit name (strip .service suffix)
-if exists(._SYSTEMD_UNIT) {
-  .unit = replace(string!(._SYSTEMD_UNIT), r'\.service', "")
+# The systemd unit, without its .service suffix
+if is_string(._SYSTEMD_UNIT) {
+  .unit = replace(string(._SYSTEMD_UNIT) ?? "", r'\.service$', "")
   .container_name = .unit
 }
+# Core, Supervisor, the plugins and every add-on log through docker.service;
+# the container name is what tells them apart
+is_container = exists(.CONTAINER_NAME)
+if is_container { .container_name = del(.CONTAINER_NAME) }
+# Kernel and audit records carry no unit. Named after their syslog identifier
+# or their transport they get a stream of their own, not the bare host one.
+if !exists(.unit) {
+  ident = string(.SYSLOG_IDENTIFIER) ?? string(._TRANSPORT) ?? ""
+  if ident != "" {
+    .unit = ident
+    if !exists(.container_name) { .container_name = ident }
+  }
+}
+container = string(.container_name) ?? ""
+TRANSFORMS_VRL
 
-# Extract container name from journald if available
-if exists(.CONTAINER_NAME) { .container_name = del(.CONTAINER_NAME) }
+cat >> "${VECTOR_VRL}" << 'MESSAGE_VRL'
 
-# A missing or non-string message aborts the whole program, which would
-# skip both the enrichment above and the redaction below.
-# The last resort is a placeholder rather than encode_json(.): the journal
-# fields are shipped separately anyway, and folding them into .message
-# would push things like _CMDLINE (which carries credentials) through a
-# redaction pass that is only written for message-shaped text.
+# A missing or non-string message is replaced rather than left to break the
+# program. The placeholder is not encode_json(.): the journal fields ship
+# separately anyway, and folding them into .message would push things like
+# _CMDLINE (which carries credentials) through a redaction pass that is only
+# written for message-shaped text.
 if !exists(.message) {
   if exists(.MESSAGE) { .message = del(.MESSAGE) } else { .message = "(no message)" }
 }
@@ -382,33 +419,77 @@ if !exists(.message) {
 if !is_string(.message) { .message = encode_json(.message) }
 msg = to_string(.message) ?? ""
 
-# Extract level from message content first (more accurate for HA logs).
-# Home Assistant logs format: "2026-01-11 09:04:15 WARNING (MainThread)..."
-# with an optional ANSI colour prefix.
-level_match = parse_regex(msg, r'^(?:\x1b\[[\d;]*m)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.,]?\d*\s+(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|FATAL)') ?? {}
-if is_string(level_match.level) {
-  lvl = downcase(string!(level_match.level))
-  if lvl == "warning" { lvl = "warn" }
-  if lvl == "critical" { lvl = "error" }
-  if lvl == "fatal" { lvl = "error" }
-  .level = lvl
-} else if exists(.PRIORITY) {
-  # Fall back to syslog priority if no level found in message
-  p = to_int(.PRIORITY) ?? 6
-  .level = if p == 0 { "emergency" } else if p == 1 { "alert" } else if p == 2 { "critical" } else if p == 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
-}
+# What join_partial leaves on a rejoined long line
+del(.CONTAINER_PARTIAL_MESSAGE)
+del(.CONTAINER_PARTIAL_ID)
+del(.CONTAINER_PARTIAL_ORDINAL)
+del(.CONTAINER_PARTIAL_LAST)
+del(.timestamp_end)
 
-# Docker's journald driver stamps every stderr line PRIORITY=3, so a daemon
-# that writes routine traffic to stderr (sshd in the SSH add-on) arrives as an
-# error. Downgrade the connection chatter; a real sshd failure does not start
-# like this.
-if .level == "error" && match(msg, r'^(Connection from|Connection closed by|Connection reset by|Close session|Starting session|Received disconnect|Disconnected from|Accepted publickey|Server listening on)') {
+# Colour codes. CSI sequences only: strip_ansi_escape_codes deletes tabs as
+# well, and zigbee2mqtt and Java stack frames rely on them. esphome prints some
+# of its colour codes as the literal text \033[...m, so those go too.
+msg = replace(msg, r'\x1b\[[0-9;?]*[ -/]*[@-~]', "")
+msg = replace(msg, r'\\033\[[0-9;]*m', "")
+
+# A blank line carries nothing, and VictoriaLogs stores it as "missing _msg field"
+if strip_whitespace(msg) == "" { abort "vector-addon-drop: blank message" }
+
+# The level. Docker's journald driver stamps every stderr line PRIORITY=3,
+# whatever the line says, so the level word in the line itself is trusted
+# first and PRIORITY is only the fallback. The forms are tried in order, and a
+# word that is not a known level falls through to the next one. Critical and
+# above fold into error.
+level_words = {
+  "trace": "debug", "trc": "debug", "debug": "debug", "dbg": "debug",
+  "info": "info", "inf": "info", "notice": "notice",
+  "warn": "warn", "warning": "warn", "wrn": "warn",
+  "error": "error", "err": "error", "critical": "error", "crit": "error",
+  "fatal": "error", "ftl": "error", "panic": "error", "emerg": "error",
+  "emergency": "error", "alert": "error"
+}
+# A timestamp, then the level:
+#   2026-01-11 09:04:15.123 WARNING (MainThread) ...  Core, Supervisor, Python add-ons
+#   2026-09-27T05:30:50.123Z  INFO vector::...        Vector, Go and Rust programs
+#   2026-09-26T19:26:31Z WRN Serve tunnel error       cloudflared
+#   [2026-09-27 18:37:26] error:  z2m: ...            zigbee2mqtt
+m = parse_regex(msg, r'^\[?\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?:?\s+(?P<level>[A-Za-z]+)\b') ?? {}
+lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
+# bashio: [05:30:50] INFO: ...
+if lvl == "" {
+  m = parse_regex(msg, r'^\[\d{2}:\d{2}:\d{2}\]\s+(?P<level>[A-Za-z]+):') ?? {}
+  lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
+}
+# s6-overlay: s6-rc: info: service ...
+if lvl == "" {
+  m = parse_regex(msg, r'^s6-rc:\s+(?P<level>[A-Za-z]+):') ?? {}
+  lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
+}
+# logfmt, Go's slog among others: time=... level=INFO msg=...
+if lvl == "" {
+  m = parse_regex(msg, r'(?:^|\s)level=(?P<level>[A-Za-z]+)') ?? {}
+  lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
+}
+if lvl == "" && exists(.PRIORITY) {
+  p = to_int(.PRIORITY) ?? 6
+  lvl = if p <= 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
+}
+# Audit records carry no PRIORITY at all; an AppArmor denial deserves a look
+if lvl == "" {
+  lvl = if contains(msg, "apparmor=\"DENIED\"") { "warn" } else { "info" }
+}
+.level = lvl
+
+# sshd in the SSH add-on writes its routine connection traffic to stderr.
+# Downgraded for ssh containers only: a "Connection reset by" line from
+# anything else is a real failure.
+if .level == "error" && contains(container, "ssh") && match(msg, r'^(Connection from|Connection closed by|Connection reset by|Close session|Starting session|Received disconnect|Disconnected from|Accepted publickey|Server listening on)') {
   .level = "info"
 }
 
 # Add timestamp if missing
 if !exists(.timestamp) { .timestamp = now() }
-TRANSFORMS_VRL
+MESSAGE_VRL
 
 # Replace placeholders with actual values (using sanitized strings)
 sed -i -e "s/__HOSTNAME__/$(sanitize_for_sed "${hostname}")/g" \
@@ -417,22 +498,33 @@ sed -i -e "s/__HOSTNAME__/$(sanitize_for_sed "${hostname}")/g" \
 # Add sensitive data redaction if enabled
 if [[ "${redact_sensitive}" == "true" ]]; then
     bashio::log.info "Adding sensitive data redaction..."
-    # Redact sensitive data - simplified approach without backreferences to avoid $1 env var issues
+    # No backreferences, so there is no $1 for anything to expand
     cat >> "${VECTOR_VRL}" << 'REDACT_VRL'
 
-# Redact sensitive data (API keys, tokens, authorization headers).
-# Works on msg, so anything added below sees the redacted text too.
+# Redact sensitive data. Works on msg, which becomes .message below. The
+# key-based rules need a real separator (: or =), so a sentence that merely
+# mentions a password or a secret is left alone. \x27 is a single quote, which
+# a raw string cannot hold.
 msg = replace(msg, r'(?i)Authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
 msg = replace(msg, r'(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
 msg = replace(msg, r'(?i)X-API-Key:\s*[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
 msg = replace(msg, r'(?i)X-Auth-Token:\s*[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
-msg = replace(msg, r'(?i)api[_-]?key["\s:=]+[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
-msg = replace(msg, r'(?i)token["\s:=]+[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
-msg = replace(msg, r'(?i)password["\s:=]+[^\s"]+', "password: [REDACTED]")
-msg = replace(msg, r'(?i)secret["\s:=]+[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
-.message = msg
+msg = replace(msg, r'(?i)api[_-]?key["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
+msg = replace(msg, r'(?i)token["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
+msg = replace(msg, r'(?i)password["\x27]?\s*[:=]\s*["\x27]?[^\s"\x27]+', "password: [REDACTED]")
+msg = replace(msg, r'(?i)secret["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
+# user:password@ in a URL
+msg = replace(msg, r'://[^/\s:@]+:[^/\s@]+@', "://[REDACTED]@")
+# A bare JWT, which is what a Home Assistant long-lived access token is
+msg = replace(msg, r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}', "[REDACTED_JWT]")
 REDACT_VRL
 fi
+
+# Unconditional: everything above worked on msg, redaction or not
+cat >> "${VECTOR_VRL}" << 'FINISH_VRL'
+
+.message = msg
+FINISH_VRL
 
 # Add extra labels if specified (with validation to prevent VRL injection)
 extra_labels_count=$(jq -r '.extra_labels // {} | keys | length' "${VECTOR_OPTIONS_FILE}")
