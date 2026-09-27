@@ -319,6 +319,12 @@ journal_dir="/var/log/journal"
 if [[ ! -d "${journal_dir}" ]] || [[ -z "$(ls -A "${journal_dir}" 2>/dev/null)" ]]; then
     journal_dir="/run/log/journal"
 fi
+# Vector would fail on a missing directory too, but with an error that names
+# neither the cause nor the fix
+if [[ ! -d "${journal_dir}" ]]; then
+    bashio::log.fatal "No journal found in /var/log/journal or /run/log/journal; the host journal is not mapped into the add-on"
+    bashio::exit.nok
+fi
 bashio::log.info "Using journal directory: ${journal_dir}"
 
 cat >> "${VECTOR_CONFIG}" << JOURNALDSOURCE
@@ -646,6 +652,13 @@ sinks:
     compression: gzip
     healthcheck:
       enabled: false
+    # The journald cursor only moves past an entry once VictoriaLogs has
+    # accepted it, so a crash, an update or an OOM kill during an outage
+    # replays what was in flight instead of losing it. The price is a
+    # possible duplicate after such a restart. A batch the server rejects is
+    # still not retried: journald moves on at the next delivered one.
+    acknowledgements:
+      enabled: true
 SINKS
 
 # Add basic auth if username is provided.

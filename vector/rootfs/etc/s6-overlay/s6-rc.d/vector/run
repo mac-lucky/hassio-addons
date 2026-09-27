@@ -14,11 +14,13 @@ source /usr/lib/vector-common.sh
 # Nothing to set up for the credentials here: Vector resolves them at config
 # load by running vector-secrets.sh, which reads the options file itself
 
-# Generate configuration from template
-bashio::log.info "Generating Vector configuration..."
+# Generate configuration from template. The generator also runs `vector
+# validate`, on the generated config and on a custom one alike, so this one
+# check covers every way the configuration can be wrong. None of them fixes
+# itself on a restart; the finish script stops the add-on on this exit code.
 if ! /usr/bin/generate-config.sh; then
     bashio::log.fatal "Configuration generation failed!"
-    bashio::exit.nok
+    exit "${VECTOR_ADDON_EXIT_FATAL}"
 fi
 
 # Get log level from config
@@ -35,8 +37,12 @@ case "${log_level}" in
     info)
         # Default, no extra args
         ;;
-    warning|error)
+    # One --quiet drops Vector to warnings, a second one to errors only
+    warning)
         vector_args+=("--quiet")
+        ;;
+    error)
+        vector_args+=("--quiet" "--quiet")
         ;;
 esac
 

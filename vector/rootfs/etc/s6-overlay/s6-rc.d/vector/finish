@@ -8,7 +8,19 @@
 declare exit_code=${1}
 declare signal=${2:-0}
 
-if [[ "${exit_code}" -eq 256 ]]; then
+# shellcheck source=/dev/null
+source /usr/lib/vector-common.sh
+
+if [[ "${exit_code}" -eq "${VECTOR_ADDON_EXIT_FATAL}" ]]; then
+    # The run script could not build a configuration that validates. A restart
+    # would fail the same way every few seconds while the add-on still showed
+    # as started, so stop the container instead: the Supervisor then shows it
+    # stopped, with the reason at the end of its log. The exit code file is
+    # what s6-overlay hands back as the container's own exit code.
+    bashio::log.fatal "Stopping the add-on. Fix the configuration and start it again."
+    echo "${exit_code}" > /run/s6-linux-init-container-results/exitcode
+    exec /run/s6/basedir/bin/halt
+elif [[ "${exit_code}" -eq 256 ]]; then
     # Killed by a signal; $2 says which. SIGTERM (15) is a normal stop, but
     # anything else - SIGKILL from the OOM killer, SIGSEGV from a crash -
     # deserves a trace and a pause, or a crash loop restarts instantly and

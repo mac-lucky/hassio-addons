@@ -119,6 +119,11 @@ jobs:
         with:
           # The whole add-on, so tests/run.sh is linted along with the rootfs
           scandir: "./vector"
+          # The s6 scripts have no extension and their shebang is
+          # #!/command/with-contenv bashio, which the action's shebang check
+          # does not recognise, so they have to be named. Each name becomes a
+          # find -name '*<name>' pattern.
+          additional_files: "run finish"
           severity: warning
 
   test-generator:

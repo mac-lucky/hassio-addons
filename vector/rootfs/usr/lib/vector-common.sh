@@ -36,6 +36,12 @@ if [[ -z "${VECTOR_CONFIG:-}" ]]; then
     # generated `secret:` block and the generated references cannot drift.
     # shellcheck disable=SC2034  # read by generate-config.sh and the tests
     readonly VECTOR_SECRETS_BACKEND="victorialogs"
+    # The s6 run script exits with this when the configuration cannot be
+    # generated or does not validate, and the finish script then stops the
+    # container instead of restarting it: nothing changes between restarts, so
+    # a retry would only loop. Vector itself never exits with 3.
+    # shellcheck disable=SC2034  # read by the s6 run and finish scripts
+    readonly VECTOR_ADDON_EXIT_FATAL=3
 fi
 
 # The configured custom config path, or empty. Shared so that the credential
