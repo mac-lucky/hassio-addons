@@ -38,6 +38,7 @@ custom_config_path=$(vector_addon::custom_config_path)
 
 readonly IDENTIFIER_RE='^[a-zA-Z_][a-zA-Z0-9_]*$'
 readonly UNIT_NAME_RE='^[a-zA-Z0-9._@-]+$'
+readonly CONTAINER_NAME_RE='^[a-zA-Z0-9_-]+$'
 
 # Function to sanitize strings for safe use in sed and YAML
 sanitize_for_sed() {
@@ -231,6 +232,27 @@ fi
 
 validate_list '.stream_fields // [] | .[]' "${IDENTIFIER_RE}" 'stream field (must be a valid identifier)'
 
+# The three container lists. An entry matches a container named exactly that or
+# ending in _<entry>, so "music_assistant" finds app_d5369777_music_assistant
+# and keeps finding it across the Supervisor's addon_ -> app_ rename, which an
+# exact journald match would not. Each list becomes one regex literal spliced
+# into the VRL, which is safe only because every entry is validated first: the
+# character class keeps out quotes, backslashes and every regex metacharacter
+# except the literal - and _.
+validate_list '.include_containers // [] | .[]' "${CONTAINER_NAME_RE}" 'container name in include_containers'
+validate_list '.exclude_containers // [] | .[]' "${CONTAINER_NAME_RE}" 'container name in exclude_containers'
+# null means "not set", so the default applies; an explicit [] turns joining off
+readonly MULTILINE_FILTER='if .multiline_containers == null then ["homeassistant", "hassio_supervisor"] else .multiline_containers end'
+validate_list "${MULTILINE_FILTER} | .[]" "${CONTAINER_NAME_RE}" 'container name in multiline_containers'
+
+container_regex() {
+    jq -r "($1) // [] | if length == 0 then \"\" else \"(?:^|_)(?:\" + join(\"|\") + \")\$\" end" \
+        "${VECTOR_OPTIONS_FILE}"
+}
+include_containers_re=$(container_regex '.include_containers')
+exclude_containers_re=$(container_regex '.exclude_containers')
+multiline_containers_re=$(container_regex "${MULTILINE_FILTER}")
+
 # Validate hostname and instance to prevent injection. An empty hostname is
 # fine: the VRL then keeps the host journald reports for each entry. Falling
 # back to $(hostname) here would stamp every event with this container's own
@@ -310,14 +332,43 @@ JOURNALDSOURCE
 emit_journal_units journal_include_units include_units
 emit_journal_units journal_exclude_units exclude_units
 
-# Add transforms section - the program itself lives in its own file
+# Add transforms section - the enrichment program lives in its own file. This
+# heredoc is unquoted so the VRL path lands; nothing below may contain a $.
 cat >> "${VECTOR_CONFIG}" << TRANSFORMS_HEADER
 
 transforms:
+  # Docker's journald driver cuts a line longer than 16 KiB into pieces, marks
+  # every piece with the same CONTAINER_PARTIAL_ID and the last one with
+  # CONTAINER_PARTIAL_LAST=true. They are glued back together here, before the
+  # enrichment, so redaction sees the whole line: a secret can straddle a cut.
+  # Only pieces take this path. 13 pieces keep a line under about 208 KiB, below
+  # the 256 KiB at which VictoriaLogs silently drops an entry; a longer line
+  # goes out as more than one event rather than not at all.
+  split_partial:
+    type: route
+    inputs:
+      - journald
+    route:
+      partial: 'exists(.CONTAINER_PARTIAL_ID)'
+
+  join_partial:
+    type: reduce
+    inputs:
+      - split_partial.partial
+    group_by:
+      - CONTAINER_PARTIAL_ID
+    ends_when: '.CONTAINER_PARTIAL_LAST == "true"'
+    merge_strategies:
+      message: concat_raw
+      timestamp: discard
+    expire_after_ms: 2000
+    max_events: 13
+
   enrich_logs:
     type: remap
     inputs:
-      - journald
+      - split_partial._unmatched
+      - join_partial
     file: ${VECTOR_VRL}
 
   # Docker's journald driver stamps every stderr line PRIORITY=3, and a Python
@@ -327,28 +378,30 @@ transforms:
   # what it was. Rejoin them onto the line that opened the traceback, which is
   # the one carrying the real level.
   #
-  # Only the homeassistant container is routed through the reduce. Everything
-  # else goes straight to the sink, so nothing is buffered that does not need to
-  # be, and a stall here cannot hold up another add-on's logs.
+  # Only the containers in multiline_containers are routed through the reduce;
+  # enrich_logs marks them with %multiline. Everything else goes straight to
+  # the sink, so nothing is buffered that does not need to be, and a stall here
+  # cannot hold up another add-on's logs.
   split_multiline:
     type: route
     inputs:
       - enrich_logs
     route:
-      homeassistant: '.container_name == "homeassistant"'
+      multiline: '%multiline == true'
 
   join_multiline:
     type: reduce
     inputs:
-      - split_multiline.homeassistant
+      - split_multiline.multiline
     group_by:
       - container_name
-    # A new group starts at the next line that looks like a fresh Home Assistant
-    # log line; anything else is a continuation and merges into the open one.
-    # A block scalar, not a quoted one: the VRL regex literal is r'...' and a
-    # single-quoted YAML scalar would end at its first quote.
+    # A new group starts at a line that opens a log record: a timestamp, a
+    # bracketed time (bashio) or a bare level word (esphome). Anything else is a
+    # continuation and merges into the open group. The colour codes are already
+    # gone by now. A block scalar, not a quoted one: the VRL regex literal is
+    # r'...' and a single-quoted YAML scalar would end at its first quote.
     starts_when: >-
-      match(to_string(.message) ?? "", r'^(?:\x1b\[[\d;]*m)?\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}')
+      match(to_string(.message) ?? "", r'^(?:\[?\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}|(?:TRACE|DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL|FATAL)\b)')
     merge_strategies:
       message: concat_newline
       timestamp: discard
@@ -360,6 +413,20 @@ transforms:
     expire_after_ms: 2000
     end_every_period_ms: 10000
     max_events: 200
+
+  # VictoriaLogs skips an entry over 256 KiB (-insert.maxLineSizeBytes) and
+  # still answers 200, so the sink would count it delivered and it would be
+  # gone for good. Cut the message well short of that instead.
+  cap_size:
+    type: remap
+    inputs:
+      - split_multiline._unmatched
+      - join_multiline
+    source: |-
+      msg = to_string(.message) ?? ""
+      if strlen(msg) > 100000 {
+        .message = truncate(msg, 100000) + " [truncated by the add-on]"
+      }
 TRANSFORMS_HEADER
 
 # Write the VRL program. Quoted heredocs so its $, \d and \s survive verbatim;
@@ -372,8 +439,9 @@ cat > "${VECTOR_VRL}" << 'TRANSFORMS_VRL'
 # it drops the event (remap's drop_on_abort defaults to true); every abort
 # message starts "vector-addon-drop:", which is what the tests look for.
 
-# Standard labels. __HOSTNAME__ is empty unless the hostname option is set:
-# journald already fills .host from _HOSTNAME, the real host name.
+# Standard labels. host_override is empty unless the hostname option is set
+# (sed fills it in below): journald already fills .host from _HOSTNAME, the
+# real host name.
 host_override = "__HOSTNAME__"
 if host_override != "" {
   .host = host_override
@@ -403,6 +471,32 @@ if !exists(.unit) {
 }
 container = string(.container_name) ?? ""
 TRANSFORMS_VRL
+
+# Replace placeholders with actual values (using sanitized strings). Done before
+# anything built from options is appended, so no option value can carry a
+# placeholder into this pass.
+sed -i -e "s/__HOSTNAME__/$(sanitize_for_sed "${hostname}")/g" \
+       -e "s/__INSTANCE__/$(sanitize_for_sed "${instance}")/g" "${VECTOR_VRL}"
+
+# Container filters and the multiline marker, from the validated regexes built
+# above. Container records only: host units, the kernel and audit are left to
+# the journal unit filters.
+{
+    echo ""
+    echo "# include_containers, exclude_containers and multiline_containers"
+    if [[ -n "${exclude_containers_re}" ]]; then
+        printf 'if is_container && match(container, r\x27%s\x27) { abort "vector-addon-drop: excluded container" }\n' \
+            "${exclude_containers_re}"
+    fi
+    if [[ -n "${include_containers_re}" ]]; then
+        printf 'if is_container && !match(container, r\x27%s\x27) { abort "vector-addon-drop: container not included" }\n' \
+            "${include_containers_re}"
+    fi
+    if [[ -n "${multiline_containers_re}" ]]; then
+        printf 'if is_container && match(container, r\x27%s\x27) { %%multiline = true }\n' \
+            "${multiline_containers_re}"
+    fi
+} >> "${VECTOR_VRL}"
 
 cat >> "${VECTOR_VRL}" << 'MESSAGE_VRL'
 
@@ -491,10 +585,6 @@ if .level == "error" && contains(container, "ssh") && match(msg, r'^(Connection 
 if !exists(.timestamp) { .timestamp = now() }
 MESSAGE_VRL
 
-# Replace placeholders with actual values (using sanitized strings)
-sed -i -e "s/__HOSTNAME__/$(sanitize_for_sed "${hostname}")/g" \
-       -e "s/__INSTANCE__/$(sanitize_for_sed "${instance}")/g" "${VECTOR_VRL}"
-
 # Add sensitive data redaction if enabled
 if [[ "${redact_sensitive}" == "true" ]]; then
     bashio::log.info "Adding sensitive data redaction..."
@@ -517,6 +607,11 @@ msg = replace(msg, r'(?i)secret["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{8,}', "
 msg = replace(msg, r'://[^/\s:@]+:[^/\s@]+@', "://[REDACTED]@")
 # A bare JWT, which is what a Home Assistant long-lived access token is
 msg = replace(msg, r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}', "[REDACTED_JWT]")
+
+# A process command line ships as its own field and can carry a credential
+# (restic --password-command, a URL with user:pass@), and none of the rules
+# above are written for it. It says little a log reader needs, so it goes.
+del(._CMDLINE)
 REDACT_VRL
 fi
 
@@ -544,8 +639,7 @@ sinks:
   victorialogs:
     type: elasticsearch
     inputs:
-      - split_multiline._unmatched
-      - join_multiline
+      - cap_size
     endpoints:
       - "${victorialogs_endpoint}"
     api_version: v8

@@ -48,8 +48,12 @@ check     "exits 0"                          test "${rc}" -eq 0
 check     "config is mode 600"               test "$(stat -c %a "${VECTOR_CONFIG}")" = 600
 check_not "no auth block without a username" grep -q "strategy: basic" "${VECTOR_CONFIG}"
 check     "the multiline reduce is wired in"  grep -q "type: reduce" "${VECTOR_CONFIG}"
-check     "the sink reads both branches" \
+check     "the size cap reads both branches" \
     grep -q -- "- split_multiline._unmatched" "${VECTOR_CONFIG}"
+check     "the sink reads the size cap"     grep -q -- "- cap_size" "${VECTOR_CONFIG}"
+check     "Core and Supervisor are joined by default" \
+    grep -Fq "(?:homeassistant|hassio_supervisor)" "${VECTOR_VRL}"
+check_not "no container filter unless asked" grep -q "excluded container" "${VECTOR_VRL}"
 
 run_case auth-quotes
 check     "exits 0"                     test "${rc}" -eq 0
@@ -288,6 +292,7 @@ check "an unknown name is an error, not an empty value" \
 #   _t_host       expected .host
 #   _t_absent     text that must not survive anywhere in .message
 #   _t_fields     {"field": value} pairs the output must carry
+#   _t_gone       fields the output must not carry
 #   _t_drop       true when the program must drop the event (abort with the
 #                 "vector-addon-drop:" sentinel) instead of passing it on
 #
@@ -336,8 +341,9 @@ run_vrl_events() {
             expect("_t_unit"; "unit"),
             expect("_t_container"; "container_name"),
             expect("_t_host"; "host"),
-            ((._t_fields // {}) | to_entries[]) as $f
-            | (if .[$f.key] != $f.value
+            ((._t_gone // [])[] as $g | if has($g) then "\($g) should be gone" else empty end),
+            (((._t_fields // {}) | to_entries[]) as $f
+             | if .[$f.key] != $f.value
                then "\($f.key): got \(.[$f.key] | tojson), want \($f.value | tojson)"
                else empty end),
             (if has("_t_absent")
@@ -377,67 +383,101 @@ printf '%s\n' '{"_t_name":"extra labels land, quotes intact","_t_fields":{"env":
     > /tmp/label-events.ndjson
 run_vrl_events "${VECTOR_VRL}" /tmp/label-events.ndjson
 
-# A Python traceback reaches journald as one stderr line per frame, all stamped
-# PRIORITY=3. `vector vrl` runs one event at a time and cannot see a reduce, so
-# this drives the real transform. The block is lifted out of the config the
-# generator just wrote, the same way the auth block is above, so a change in how
-# it is emitted is exercised instead of restated here.
-current="multiline"
-ml=/tmp/multiline
-rm -rf "${ml}"; mkdir -p "${ml}"
+# The container options
+run_case container-invalid
+check "an invalid container name is refused" test "${rc}" -ne 0
+check "and named" grep -q "Invalid container name in exclude_containers" "${LOG}"
 
-# Regenerate first: the cases above leave VECTOR_CONFIG on the custom-config
-# branch, which never writes a transforms section.
-run_case minimal
-awk '/^  join_multiline:/{f=1;print;next} f&&!/^    /{f=0} f' "${VECTOR_CONFIG}" \
-    | sed 's/- split_multiline.homeassistant/- tag/' > "${ml}/reduce.yaml"
-current="multiline"
-check "the reduce block was found in the config" test -s "${ml}/reduce.yaml"
+run_case multiline-off
+check     "exits 0" test "${rc}" -eq 0
+check_not "an empty multiline_containers marks nothing" grep -q "%multiline" "${VECTOR_VRL}"
 
-cat > "${ml}/in.log" <<'INLOG'
-2026-01-11 09:04:15 ERROR (MainThread) [homeassistant.core] boom
-Traceback (most recent call last):
-  File "/x.py", line 1, in <module>
-    raise ValueError("bad")
-2026-01-11 09:04:16 INFO (MainThread) [homeassistant.core] next
-INLOG
+# include_containers narrows the container records only; host units, the
+# kernel and audit still come through
+run_case include
+check "exits 0" test "${rc}" -eq 0
+cat > /tmp/include-events.ndjson <<'EVENTS'
+{"_t_name":"an included container passes","_t_container":"homeassistant","message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"an included add-on passes by its slug","_t_container":"app_d5369777_music_assistant","message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"_t_name":"another container is dropped","_t_drop":true,"message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_45df7312_zigbee2mqtt"}
+{"_t_name":"a slug is not a prefix match","_t_drop":true,"message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_4ab554b2_homeassistant-time-machine"}
+{"_t_name":"a host unit is not a container and passes","_t_unit":"NetworkManager","message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"NetworkManager.service"}
+{"_t_name":"the kernel passes","_t_unit":"kernel","message":"x","PRIORITY":"6","_TRANSPORT":"kernel","SYSLOG_IDENTIFIER":"kernel"}
+EVENTS
+run_vrl_events "${VECTOR_VRL}" /tmp/include-events.ndjson
+
+# The whole generated pipeline, end to end. `vector vrl` runs one event at a
+# time and cannot see a route or a reduce, so the real config is run instead,
+# with only its journald source swapped for stdin and its sink for stdout: the
+# partial-line join, the enrichment, the multiline route and reduce and the size
+# cap are all the generator's own. A stdin source ends at EOF and Vector then
+# flushes every open reduce group, so the run finishes on its own; the timeout
+# only guards against a hang.
+current="pipeline"
+pl=/tmp/pipeline
+rm -rf "${pl}"; mkdir -p "${pl}"
+run_case pipeline
+check "exits 0" test "${rc}" -eq 0
+current="pipeline"
+
+sink_inputs=$(awk '/^sinks:/{s=1} s&&/^    inputs:/{f=1;next} f&&/^      - /{print;next} f{exit}' "${VECTOR_CONFIG}")
+check "the sink inputs were found" test -n "${sink_inputs}"
+awk -v sink_inputs="${sink_inputs}" '
+    /^sources:/ { print "sources:\n  journald:\n    type: stdin\n    decoding:\n      codec: json"; skip = 1; next }
+    /^transforms:/ { skip = 0 }
+    /^sinks:/ { print "sinks:\n  out:\n    type: console\n    inputs:\n" sink_inputs "\n    encoding:\n      codec: json"; skip = 1; next }
+    /^secret:/ { skip = 0 }
+    !skip
+' "${VECTOR_CONFIG}" > "${pl}/cfg.yaml"
 
 {
-    cat <<EOF
-data_dir: ${ml}
-sources:
-  infile:
-    type: file
-    include:
-      - ${ml}/in.log
-    read_from: beginning
-transforms:
-  tag:
-    type: remap
-    inputs:
-      - infile
-    source: '.container_name = "homeassistant"'
-EOF
-    cat "${ml}/reduce.yaml"
-    cat <<EOF
-sinks:
-  out:
-    type: file
-    inputs:
-      - join_multiline
-    path: ${ml}/out.log
-    encoding:
-      codec: json
-EOF
-} > "${ml}/cfg.yaml"
+    cat <<'EVENTS'
+{"message":"\u001b[31m2026-01-11 09:04:15.123 ERROR (MainThread) [homeassistant.core] ha-boom\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"  File \"/x.py\", line 1, in <module>","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"ValueError: bad","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"\u001b[32m2026-01-11 09:04:16.000 INFO (MainThread) [homeassistant.core] ha-next\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"2026-01-11 09:04:15.123 ERROR (MainThread) [music_assistant] ma-boom","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"message":"  File \"/ma.py\", line 2, in f","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"message":"2026-01-11 09:04:16.000 INFO (MainThread) [music_assistant] ma-next","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"message":"2026-01-11 09:04:15.123456 ERROR AppDaemon: ad-boom","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
+{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
+{"message":"","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
+{"message":"[ALARM SpecifiedDeviceNotFound] the device is not working","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_c8a990ad_wmbusmeters-ha-addon"}
+{"message":"[2026-09-27 18:37:26] info: \tz2m: payload ","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_45df7312_zigbee2mqtt","CONTAINER_PARTIAL_ID":"p1","CONTAINER_PARTIAL_ORDINAL":"1","CONTAINER_PARTIAL_MESSAGE":"true","CONTAINER_PARTIAL_LAST":"false"}
+{"message":"{\"a\":1} passw","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_45df7312_zigbee2mqtt","CONTAINER_PARTIAL_ID":"p1","CONTAINER_PARTIAL_ORDINAL":"2","CONTAINER_PARTIAL_MESSAGE":"true","CONTAINER_PARTIAL_LAST":"false"}
+{"message":"ord=hunter5sentinel end","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_45df7312_zigbee2mqtt","CONTAINER_PARTIAL_ID":"p1","CONTAINER_PARTIAL_ORDINAL":"3","CONTAINER_PARTIAL_LAST":"true"}
+EVENTS
+    # One line far past the size cap
+    jq -nc '{message: ("y" * 150000), PRIORITY: "6", _SYSTEMD_UNIT: "docker.service", CONTAINER_NAME: "app_00000000_big"}'
+} > "${pl}/in.ndjson"
 
-timeout 10 vector --config-yaml "${ml}/cfg.yaml" > "${ml}/run.log" 2>&1
+timeout 60 vector --config-yaml "${pl}/cfg.yaml" < "${pl}/in.ndjson" > "${pl}/out.ndjson" 2> "${pl}/run.log"
+check "the pipeline ran to the end of its input" grep -q "All sources have finished" "${pl}/run.log"
 
-check "two log lines started two events, the frames between them did not" \
-    test "$(wc -l < "${ml}/out.log" 2> /dev/null || echo 0)" -eq 2
-check "the traceback rejoined the line that opened it" \
-    grep -q 'boom.*Traceback.*raise ValueError' "${ml}/out.log"
-
+# Asserted by content, never by order: the sink fans in from two branches
+out_count() { jq -s "[.[] | select($1)] | length" "${pl}/out.ndjson"; }
+check "every expected event came out, and nothing else" test "$(out_count 'true')" -eq 8
+check "Core's traceback rejoined its opening line" \
+    test "$(out_count '.container_name == "homeassistant" and (.message | test("ha-boom\nTraceback \\(most recent call last\\):\n  File .*\nValueError: bad"))')" -eq 1
+check "and kept that line's level" \
+    test "$(out_count '(.message | startswith("2026-01-11 09:04:15.123 ERROR")) and .level == "error"')" -eq 2
+check "Core's next line stands alone" test "$(out_count '.message | endswith("ha-next")')" -eq 1
+check "a listed add-on's traceback is joined too" \
+    test "$(out_count '.message | test("ma-boom\nTraceback \\(most recent call last\\):\n  File")')" -eq 1
+check "an unlisted add-on's lines are not joined" \
+    test "$(out_count '.container_name == "app_a0d7b954_appdaemon"')" -eq 2
+check "an excluded container sends nothing" \
+    test "$(out_count '.container_name | test("wmbusmeters")')" -eq 0
+check "a long line's pieces are one event again" \
+    test "$(out_count '.message == "[2026-09-27 18:37:26] info: \tz2m: payload {\"a\":1} password: [REDACTED] end"')" -eq 1
+check "with the partial-line fields gone" \
+    test "$(out_count 'has("CONTAINER_PARTIAL_ID") or has("CONTAINER_PARTIAL_LAST") or has("timestamp_end")')" -eq 0
+check_not "a secret split across pieces is still redacted" grep -Fq hunter5sentinel "${pl}/out.ndjson"
+check_not "no colour codes reach the sink" grep -Fq '\u001b' "${pl}/out.ndjson"
+check "an oversized line is cut to the cap" \
+    test "$(out_count '.container_name == "app_00000000_big" and (.message | length) < 100100 and (.message | endswith("[truncated by the add-on]"))')" -eq 1
 
 printf '\n%s failing assertion(s)\n' "${failures}"
 [[ ${failures} -eq 0 ]]

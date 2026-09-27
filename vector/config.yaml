@@ -40,6 +40,11 @@ options:
   redact_sensitive: true
   journal_include_units: []
   journal_exclude_units: []
+  include_containers: []
+  exclude_containers: []
+  multiline_containers:
+    - homeassistant
+    - hassio_supervisor
   stream_fields:
     - host
     - container_name
@@ -64,6 +69,12 @@ schema:
     - str
   journal_exclude_units:
     - str
+  include_containers:
+    - match(^[a-zA-Z0-9_-]+$)
+  exclude_containers:
+    - match(^[a-zA-Z0-9_-]+$)
+  multiline_containers:
+    - match(^[a-zA-Z0-9_-]+$)
   stream_fields:
     - str
   extra_labels:
