@@ -18,7 +18,6 @@ source /usr/lib/vector-common.sh   # VECTOR_CONFIG, VECTOR_OPTIONS_FILE
 export PATH="/usr/local/bin:${PATH}"
 
 LOG=/tmp/case.log
-VRL_OUT=/tmp/vrl.out
 failures=0
 current=""
 rc=0
@@ -215,7 +214,7 @@ check "explains the only source"  grep -q "only log source" "${LOG}"
 
 run_case no-redaction
 check     "exits 0"                test "${rc}" -eq 0
-check_not "no redaction block"     grep -q "REDACTED" "${VECTOR_CONFIG}"
+check_not "no redaction block"     grep -q "REDACTED" "${VECTOR_VRL}"
 
 run_case password-trailing-newline
 check "exits non-zero"          test "${rc}" -ne 0
@@ -279,36 +278,78 @@ check "an unknown name is an error, not an empty value" \
     test "$(printf '{"version":"1.0","secrets":["nope"]}' \
         | "${VECTOR_SECRETS_HELPER}" | jq -r '.nope.value')" = "null"
 
-# The generated VRL, over the events that used to abort it
+# The generated VRL, one event at a time. Every line of events.ndjson is a
+# journald-shaped event plus the _t_* keys that say what must come out of it:
+#   _t_name       what the case is, for the report
+#   _t_level      expected .level
+#   _t_msg        expected .message, exactly
+#   _t_unit       expected .unit
+#   _t_container  expected .container_name
+#   _t_host       expected .host
+#   _t_absent     text that must not survive anywhere in .message
+#   _t_drop       true when the program must drop the event (abort with the
+#                 "vector-addon-drop:" sentinel) instead of passing it on
+#
+# `vector vrl` exits 0 even when the program fails at runtime and only says so
+# on stderr, so stdout and stderr are kept apart and ANY stderr is a failure. It
+# matters: remap forwards the original, unredacted event when the program errors.
+run_vrl_events() {
+    local program="$1" events="$2" event name out
+    # --print-object writes VRL values, not JSON (a timestamp comes out as
+    # t'...'), so a copy of the program ends by round-tripping the event
+    # through JSON for jq to read
+    { cat "${program}"; printf '\n. = object(parse_json(encode_json(.)) ?? {}) ?? {}\n'; } \
+        > /tmp/program-json.vrl
+    while IFS= read -r event; do
+        [[ -n "${event}" ]] || continue
+        name=$(jq -r '._t_name // "unnamed"' <<< "${event}")
+        current="vrl: ${name}"
+        printf '%s\n' "${event}" > /tmp/one.json
+        VECTOR_LOG=error vector vrl --print-object --program /tmp/program-json.vrl \
+            --input /tmp/one.json > /tmp/one.out 2> /tmp/one.err
+        if [[ "$(jq -r "._t_drop // false" <<< "${event}")" == "true" ]]; then
+            if [[ ! -s /tmp/one.out ]] && grep -q "^vector-addon-drop:" /tmp/one.err; then
+                ok "dropped"
+            else
+                fail "expected a drop, got: $(head -c 300 /tmp/one.out /tmp/one.err)"
+            fi
+            continue
+        fi
+        if [[ -s /tmp/one.err ]]; then
+            fail "the program errored: $(head -c 300 /tmp/one.err)"
+            continue
+        fi
+        out=$(cat /tmp/one.out)
+        if ! jq -e 'type == "object"' <<< "${out}" > /dev/null 2>&1; then
+            fail "no event came out"
+            continue
+        fi
+        # One line per mismatch; an empty result is a pass
+        jq -r '
+            def expect($key; $field):
+                if has($key) and (.[$field] != .[$key])
+                then "\($field): got \(.[$field] | tojson), want \(.[$key] | tojson)"
+                else empty end;
+            expect("_t_level"; "level"),
+            expect("_t_msg"; "message"),
+            expect("_t_unit"; "unit"),
+            expect("_t_container"; "container_name"),
+            expect("_t_host"; "host"),
+            (if has("_t_absent")
+                 and (._t_absent as $a | (.message // "") | tostring | contains($a))
+             then "message still carries \(._t_absent | tojson)" else empty end)
+        ' <<< "${out}" > /tmp/one.mismatch
+        if [[ -s /tmp/one.mismatch ]]; then
+            while IFS= read -r line; do fail "${line}"; done < /tmp/one.mismatch
+        else
+            ok "as expected"
+        fi
+    done < "${events}"
+}
+
 current="vrl"
 check "the VRL program is non-empty" test -s /tmp/enrich.vrl
-
-: > "${VRL_OUT}"
-vrl_fail=0
-while IFS= read -r event; do
-    [[ -n "${event}" ]] || continue
-    printf '%s\n' "${event}" > /tmp/one.json
-    if ! vector vrl --print-object --program /tmp/enrich.vrl \
-        --input /tmp/one.json >> "${VRL_OUT}" 2>&1; then
-        printf '      event failed: %s\n' "${event}"
-        vrl_fail=1
-    fi
-done < "${TESTS_DIR}/events.ndjson"
-grep -o '"message": "[^"]*"' "${VRL_OUT}" > /tmp/messages.txt
-
-check     "every event runs clean" test "${vrl_fail}" -eq 0
-check     "host set on every event" \
-    test "$(grep -c '"host"' "${VRL_OUT}")" -eq "$(grep -c . "${TESTS_DIR}/events.ndjson")"
-check_not "message secret redacted"  grep -Fq hunter2sentinel /tmp/messages.txt
-check     "level comes from the message" grep -q '"level": "warn"' "${VRL_OUT}"
-check     "sshd connection line is not an error" \
-    test "$(grep -c '"level": "error"' "${VRL_OUT}")" -eq 1
-check     "message-less event gets a placeholder" \
-    grep -Fq '"message": "(no message)"' "${VRL_OUT}"
-# _CMDLINE still ships as its own field, as every journald field does; what must
-# not happen is it being folded into .message, past the redaction written for it
-check_not "journal metadata not folded into message" \
-    grep -Fq restic-sentinel /tmp/messages.txt
+run_vrl_events /tmp/enrich.vrl "${TESTS_DIR}/events.ndjson"
 
 # A Python traceback reaches journald as one stderr line per frame, all stamped
 # PRIORITY=3. `vector vrl` runs one event at a time and cannot see a reduce, so
