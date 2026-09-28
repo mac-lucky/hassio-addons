@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.0] - 2026-09-28
+
+Three new things to manage from `gitops/` - device settings, zones and
+persons, and Lovelace resources - and a sync engine that copes better
+with a forge that goes away for a few minutes. No new options. Two
+behaviour changes to know about: a failed registry layer no longer stops
+unrelated ones (see Changed), and with `reconcile.dashboards` on, anyone
+who can push to the repository can now also add Lovelace resources,
+which run in every user's browser (see Added).
+
 ### Added
 
 - Zones and persons in `gitops/helpers.yaml`, under `zone:` and `person:`,
