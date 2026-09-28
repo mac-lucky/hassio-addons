@@ -5,6 +5,75 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-09-28
+
+### Added
+
+- `include_containers` and `exclude_containers` pick add-ons by container name.
+  On Home Assistant OS every container logs through `docker.service`, so the
+  unit options could never single one out. An entry matches the full name or
+  its `_<slug>` ending, so `music_assistant` finds
+  `app_d5369777_music_assistant` and keeps finding it if the Supervisor
+  renames the prefix again.
+- `multiline_containers` joins tracebacks and other multi-line output for any
+  container, where 1.9.0 only did it for Core. The Supervisor is joined by
+  default as well.
+- Lines longer than 16 KB, which Docker splits into pieces, arrive as one entry
+  again, up to 96 KB. zigbee2mqtt produced about 500 of these a week, each
+  split into five or six events.
+
+### Changed
+
+- The level comes from the line itself in many more formats: ISO timestamps
+  (Vector's own log, Go and Rust programs), cloudflared's `INF`/`WRN`/`ERR`,
+  zigbee2mqtt, bashio, `s6-rc`, a bare leading level word (esphome) and logfmt
+  `level=`. Vector's own log, the s6
+  service lines and cloudflared's routine output were all stored as `error`,
+  and zigbee2mqtt errors as `info`.
+- Critical and fatal, and syslog priorities 0 to 2, now count as `error`
+  rather than `emergency`, `alert` or `critical`, the same as a Home Assistant
+  `CRITICAL` line already did.
+- Colour codes are stripped from messages. They were in almost every Core and
+  Supervisor line.
+- Blank lines are dropped instead of being stored as VictoriaLogs'
+  "missing _msg field" placeholder.
+- Kernel and audit entries get a `unit` and `container_name` (`kernel`,
+  `audit`), so they land in a stream of their own, and audit entries get a
+  level (`warn` for an AppArmor denial).
+- With `hostname` empty the `host` label is the host name journald reports.
+  It was this add-on's own container name before, so the value changes, and
+  with it the stream, for anyone who had not set `hostname`.
+- Delivery is acknowledged: the journal position only moves past an entry once
+  VictoriaLogs has accepted it, so a restart during an outage resends what was
+  in flight instead of losing it. Such a restart can store an entry twice.
+- A configuration error stops the add-on with the reason in its log, instead
+  of restarting it every five seconds while it showed as running. Validation
+  no longer runs sink healthchecks, so a custom config whose sink is down at
+  that moment is not mistaken for a broken one.
+- `log_level: error` really shows only errors; it showed warnings too.
+- A message over 200 KB is cut to 50,000 characters. VictoriaLogs drops
+  entries over 256 KB without saying so.
+
+### Fixed
+
+- Redaction no longer eats ordinary words: "secret encryption enabled" was
+  logged as "secret: [REDACTED] enabled". A key now needs a `:` or `=` after
+  it (`:=` and `=>` count too). Keys and values may be quoted, including JSON
+  logged inside JSON and headers dumped as a Python dict. Credentials in URLs
+  (including `:password@` and a bare token), `--password x` style flags and
+  bare JWTs (Home Assistant access tokens) are redacted now, and the process
+  command line and journald's raw copy of a rewritten message, which can both
+  carry credentials, are dropped.
+- An entry whose systemd unit was not a plain string skipped enrichment and
+  redaction entirely.
+- An extra label named like a field the add-on sets (`message`, `level`,
+  `host` and so on) is refused. It used to overwrite that field on every
+  entry.
+- The DOCS query examples used `{instance="homeassistant"}`, which matches
+  nothing because `instance` is not a stream field.
+- s6-overlay no longer warns about the service bundle location on every
+  start.
+
 ## [1.9.1] - 2026-09-25
 
 ### Changed
