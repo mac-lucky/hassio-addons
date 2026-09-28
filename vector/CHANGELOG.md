@@ -5,6 +5,21 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] - 2026-09-28
+
+### Fixed
+
+- The SSH add-on's `Accepted key`, `Postponed publickey` and `User child is on
+  pid` lines were stored as `error`. They join the rest of sshd's connection
+  traffic as `info`.
+- AirConnect (the AirCast and AirSonos add-ons) prints no level and writes to
+  stderr, so its routine device messages were all `error`. Lines in its
+  `[hh:mm:ss.mmm] Function:line` format are now `info`, unless they say
+  something like `cannot`, `unable`, `failed` or `error`: its real errors look
+  the same as the rest.
+- Trailing whitespace is removed from messages, including the carriage return
+  at the end of every sshd line.
+
 ## [1.10.0] - 2026-09-28
 
 ### Added
