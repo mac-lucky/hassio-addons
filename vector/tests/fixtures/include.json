@@ -1,1 +1,1 @@
-{"include_containers": ["homeassistant", "music_assistant"]}
+{"include_containers": ["homeassistant", "music_assistant", "appdaemon"], "exclude_containers": ["appdaemon"]}

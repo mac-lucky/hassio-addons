@@ -49,7 +49,7 @@ appends `/_bulk`, so the insert path has to be part of the URL. A bare
 | `redact_sensitive` | `true` | Replace API keys, tokens and passwords found in log messages with `[REDACTED]` |
 | `journal_include_units` | `[]` | Only collect from these systemd units |
 | `journal_exclude_units` | `[]` | Exclude these systemd units |
-| `include_containers` | `[]` | Only collect these add-on containers (see [Containers](#containers)) |
+| `include_containers` | `[]` | Only collect these containers; Core and the Supervisor count (see [Containers](#containers)) |
 | `exclude_containers` | `[]` | Never collect these add-on containers |
 | `multiline_containers` | `["homeassistant", "hassio_supervisor"]` | Join multi-line output from these containers into one entry |
 | `stream_fields` | `["host", "container_name", "unit"]` | Fields for VictoriaLogs stream identifiers |
@@ -130,7 +130,7 @@ For the containers in `multiline_containers`, a line that does not open a new
 log record is merged into the one before it, giving one entry per error with
 the stack attached and the level taken from the opening line. A line opens a
 new record when it starts with a date and time, a bracketed time such as
-`[12:00:00]`, or a level word such as `INFO` or `ERROR`.
+`[12:00:00]`, a level word such as `INFO` or `ERROR`, or `s6-rc:`.
 
 Add a container here only if its log lines start that way. Otherwise every
 line looks like a continuation, and lines are merged until one of the caps
@@ -146,7 +146,7 @@ first.
 
 Docker also splits any single line longer than 16 KB into pieces. The add-on
 always puts those back together before anything else happens to them, so a
-long line arrives as one entry.
+line of up to 96 KB arrives as one entry; a longer one arrives as several.
 
 ### What happens to each entry
 
@@ -159,6 +159,7 @@ long line arrives as one entry.
   - zigbee2mqtt's `[2026-01-11 09:04:15] error:`
   - bashio's `[09:04:15] INFO:`
   - `s6-rc: info:`
+  - a bare level word opening the line, as esphome writes `INFO Reading ...`
   - logfmt `level=error`
 
   The level is one of `debug`, `info`, `notice`, `warn` and `error`; critical
@@ -166,16 +167,18 @@ long line arrives as one entry.
   is `info`, or `warn` for an AppArmor denial.
 - **Colour codes** are removed from the message.
 - **Blank lines** are dropped.
-- **Very long messages** are cut at 100,000 characters. VictoriaLogs silently
-  drops entries over 256 KB.
+- **Very long messages** over 200 KB are cut to 50,000 characters. VictoriaLogs
+  silently drops entries over 256 KB.
 - **Redaction.** With `redact_sensitive` on, the message is scrubbed of:
   - authorization headers and API keys;
   - tokens, passwords and secrets written as `key: value` or `key=value`;
+  - command-line flags such as `--password x`;
   - credentials inside URLs;
   - bare JWTs, which is what Home Assistant access tokens are.
 
-  The process command line (`_CMDLINE`) is dropped as well, since it can carry
-  credentials.
+  Keys and values may be quoted, including JSON logged inside JSON. The process
+  command line (`_CMDLINE`) and journald's raw copy of a rewritten message
+  (`SYSLOG_RAW`) are dropped as well, since they can carry credentials too.
 
 ## VictoriaLogs Integration
 

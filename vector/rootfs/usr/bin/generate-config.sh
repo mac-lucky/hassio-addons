@@ -104,7 +104,10 @@ dump_config_redacted() {
 # Function to run vector validate with its output masked - Vector quotes the
 # endpoint back in its error messages, credentials included
 run_vector_validate() {
-    vector validate --config-yaml "${VECTOR_CONFIG}" 2>&1 | mask_credentials_stream
+    # --skip-healthchecks: a sink that is down at this moment is an outage, not
+    # a broken config. Vector only logs a failed healthcheck when it runs, and
+    # a validate that failed on one would stop the add-on for good.
+    vector validate --skip-healthchecks --config-yaml "${VECTOR_CONFIG}" 2>&1 | mask_credentials_stream
     return "${PIPESTATUS[0]}"
 }
 
@@ -286,6 +289,14 @@ bashio::log.info "VictoriaLogs endpoint: ${masked_endpoint}"
 bashio::log.info "Hostname: ${hostname:-(taken from the journal)}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Redact sensitive: ${redact_sensitive}"
+# The container lists, since a typo in include_containers silently drops
+# every container but the ones it does match. Validated, so safe to print.
+for list in include_containers exclude_containers; do
+    if [[ "$(jq -r --arg l "${list}" '.[$l] // [] | length' "${VECTOR_OPTIONS_FILE}")" -gt 0 ]]; then
+        bashio::log.info "${list}: $(jq -r --arg l "${list}" '.[$l] | join(", ")' "${VECTOR_OPTIONS_FILE}")"
+    fi
+done
+bashio::log.info "multiline_containers: $(jq -r "${MULTILINE_FILTER} | join(\", \") | if . == \"\" then \"(none)\" else . end" "${VECTOR_OPTIONS_FILE}")"
 
 # Create required directories and clear any existing config. The file is created
 # empty and locked down first, because the endpoint written into it further down
@@ -347,33 +358,31 @@ transforms:
   # every piece with the same CONTAINER_PARTIAL_ID and the last one with
   # CONTAINER_PARTIAL_LAST=true. They are glued back together here, before the
   # enrichment, so redaction sees the whole line: a secret can straddle a cut.
-  # Only pieces take this path. 13 pieces keep a line under about 208 KiB, below
-  # the 256 KiB at which VictoriaLogs silently drops an entry; a longer line
-  # goes out as more than one event rather than not at all.
-  split_partial:
-    type: route
-    inputs:
-      - journald
-    route:
-      partial: 'exists(.CONTAINER_PARTIAL_ID)'
-
+  #
+  # Every event goes through this one reduce, not just the pieces: a line that
+  # is not a piece ends its group at once and passes straight on. Routing only
+  # the pieces through here put them a step behind the lines around them, so a
+  # long line that opens a traceback arrived after its own frames and
+  # join_multiline glued the frames onto the record before it.
+  #
+  # Six pieces (96 KiB) stay under cap_size below, so a longer line goes out as
+  # more than one event instead of being cut.
   join_partial:
     type: reduce
     inputs:
-      - split_partial.partial
+      - journald
     group_by:
       - CONTAINER_PARTIAL_ID
-    ends_when: '.CONTAINER_PARTIAL_LAST == "true"'
+    ends_when: '!exists(.CONTAINER_PARTIAL_ID) || .CONTAINER_PARTIAL_LAST == "true"'
     merge_strategies:
       message: concat_raw
       timestamp: discard
     expire_after_ms: 2000
-    max_events: 13
+    max_events: 6
 
   enrich_logs:
     type: remap
     inputs:
-      - split_partial._unmatched
       - join_partial
     file: ${VECTOR_VRL}
 
@@ -402,12 +411,13 @@ transforms:
     group_by:
       - container_name
     # A new group starts at a line that opens a log record: a timestamp, a
-    # bracketed time (bashio) or a bare level word (esphome). Anything else is a
-    # continuation and merges into the open group. The colour codes are already
-    # gone by now. A block scalar, not a quoted one: the VRL regex literal is
-    # r'...' and a single-quoted YAML scalar would end at its first quote.
+    # bracketed time (bashio), a bare level word (esphome) or an s6-rc line.
+    # Anything else is a continuation and merges into the open group. The colour
+    # codes are already gone by now. A block scalar, not a quoted one: the VRL
+    # regex literal is r'...' and a single-quoted YAML scalar would end at its
+    # first quote.
     starts_when: >-
-      match(to_string(.message) ?? "", r'^(?:\[?\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}|(?:TRACE|DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL|FATAL)\b)')
+      match(to_string(.message) ?? "", r'^(?:\[?\d{4}-\d{2}-\d{2}(?:T|\s+)\d{2}:\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}|s6-rc:|(?:TRACE|DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL|FATAL)\b)')
     merge_strategies:
       message: concat_newline
       timestamp: discard
@@ -422,7 +432,9 @@ transforms:
 
   # VictoriaLogs skips an entry over 256 KiB (-insert.maxLineSizeBytes) and
   # still answers 200, so the sink would count it delivered and it would be
-  # gone for good. Cut the message well short of that instead.
+  # gone for good. Cut the message well short of that instead. length counts
+  # bytes and truncate counts characters, so the cut is to 50000 characters:
+  # at most 200 KB even if every one of them takes four bytes.
   cap_size:
     type: remap
     inputs:
@@ -430,8 +442,8 @@ transforms:
       - join_multiline
     source: |-
       msg = to_string(.message) ?? ""
-      if strlen(msg) > 100000 {
-        .message = truncate(msg, 100000) + " [truncated by the add-on]"
+      if length(msg) > 200000 {
+        .message = truncate(msg, 50000) + " [truncated by the add-on]"
       }
 TRANSFORMS_HEADER
 
@@ -565,6 +577,11 @@ if lvl == "" {
   m = parse_regex(msg, r'^s6-rc:\s+(?P<level>[A-Za-z]+):') ?? {}
   lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
 }
+# esphome and others: the line opens with a bare level word, INFO Reading ...
+if lvl == "" {
+  m = parse_regex(msg, r'^(?P<level>TRACE|DEBUG|INFO|NOTICE|WARNING|WARN|ERROR|CRITICAL|FATAL)\b') ?? {}
+  lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
+}
 # logfmt, Go's slog among others: time=... level=INFO msg=...
 if lvl == "" {
   m = parse_regex(msg, r'(?:^|\s)level=(?P<level>[A-Za-z]+)') ?? {}
@@ -597,27 +614,38 @@ if [[ "${redact_sensitive}" == "true" ]]; then
     # No backreferences, so there is no $1 for anything to expand
     cat >> "${VECTOR_VRL}" << 'REDACT_VRL'
 
-# Redact sensitive data. Works on msg, which becomes .message below. The
-# key-based rules need a real separator (: or =), so a sentence that merely
-# mentions a password or a secret is left alone. \x27 is a single quote, which
-# a raw string cannot hold.
-msg = replace(msg, r'(?i)Authorization:\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
-msg = replace(msg, r'(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
-msg = replace(msg, r'(?i)X-API-Key:\s*[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
-msg = replace(msg, r'(?i)X-Auth-Token:\s*[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
-msg = replace(msg, r'(?i)api[_-]?key["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
-msg = replace(msg, r'(?i)token["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
-msg = replace(msg, r'(?i)password["\x27]?\s*[:=]\s*["\x27]?[^\s"\x27]+', "password: [REDACTED]")
-msg = replace(msg, r'(?i)secret["\x27]?\s*[:=]\s*["\x27]?[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
-# user:password@ in a URL
-msg = replace(msg, r'://[^/\s:@]+:[^/\s@]+@', "://[REDACTED]@")
+# Redact sensitive data. Works on msg, which becomes .message below.
+#
+# A key only counts when a separator follows it (:, =, := or =>), so a
+# sentence that merely mentions a password or a secret is left alone. The key
+# and the value may sit in quotes, including the escaped quotes of JSON logged
+# inside JSON. \x27 is a single quote, which a raw string cannot hold.
+msg = replace(msg, r'(?i)Authorization\\?["\x27]?\s*[:=]\s*\\?["\x27]?\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
+msg = replace(msg, r'(?i)Authorization\\?["\x27]?\s*[:=]\s*\\?["\x27]?\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
+msg = replace(msg, r'(?i)X-API-Key\\?["\x27]?\s*[:=]\s*\\?["\x27]?[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
+msg = replace(msg, r'(?i)X-Auth-Token\\?["\x27]?\s*[:=]\s*\\?["\x27]?[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
+msg = replace(msg, r'(?i)api[_-]?key\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
+msg = replace(msg, r'(?i)token\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
+msg = replace(msg, r'(?i)password\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[^\s"\x27]+', "password: [REDACTED]")
+msg = replace(msg, r'(?i)secret\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
+# Command-line flags, which take the value after a space: mysql --password x
+msg = replace(msg, r'(?i)--password\s+[^\s-]\S*', "--password [REDACTED]")
+msg = replace(msg, r'(?i)--token\s+[^\s-]\S*', "--token [REDACTED]")
+msg = replace(msg, r'(?i)--secret\s+[^\s-]\S*', "--secret [REDACTED]")
+msg = replace(msg, r'(?i)--api-?key\s+[^\s-]\S*', "--api-key [REDACTED]")
+# Credentials in a URL: user:password@, :password@ (Redis) or token@ alike.
+# Up to the LAST @ before the path, because a password may contain one.
+msg = replace(msg, r'://[^/?#\s]*@', "://[REDACTED]@")
 # A bare JWT, which is what a Home Assistant long-lived access token is
 msg = replace(msg, r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}', "[REDACTED_JWT]")
 
 # A process command line ships as its own field and can carry a credential
 # (restic --password-command, a URL with user:pass@), and none of the rules
-# above are written for it. It says little a log reader needs, so it goes.
+# above are written for it. SYSLOG_RAW is a second, unredacted copy of the
+# message that journald keeps when it rewrites one. Neither says anything a
+# log reader needs, so both go.
 del(._CMDLINE)
+del(.SYSLOG_RAW)
 REDACT_VRL
 fi
 

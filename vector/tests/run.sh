@@ -54,6 +54,8 @@ check     "the sink reads the size cap"     grep -q -- "- cap_size" "${VECTOR_CO
 check     "Core and Supervisor are joined by default" \
     grep -Fq "(?:homeassistant|hassio_supervisor)" "${VECTOR_VRL}"
 check_not "no container filter unless asked" grep -q "excluded container" "${VECTOR_VRL}"
+check     "the sink acknowledges deliveries" \
+    grep -Pzq '\n    acknowledgements:\n      enabled: true\n' "${VECTOR_CONFIG}"
 
 run_case auth-quotes
 check     "exits 0"                     test "${rc}" -eq 0
@@ -238,6 +240,13 @@ run_case custom-present
 check "a valid custom config is accepted" test "${rc}" -eq 0
 check "and announced" grep -q "Custom configuration validation passed" "${LOG}"
 
+# A sink that is down while the add-on starts is an outage, not a broken
+# config: validation must not run healthchecks, or the add-on would stop for good
+printf 'sources:\n  s:\n    type: demo_logs\n    format: syslog\nsinks:\n  o:\n    type: elasticsearch\n    inputs: [s]\n    endpoints: ["http://127.0.0.1:9"]\n' \
+    > /share/vector/custom.yaml
+run_case custom-present
+check "a custom config whose sink is down is still accepted" test "${rc}" -eq 0
+
 # A failing custom config must be reported without printing anything from it:
 # the validator quotes literal values back (an invalid enum echoes the value,
 # an unquoted numeric password comes back as invalid type: integer), and the
@@ -403,6 +412,7 @@ cat > /tmp/include-events.ndjson <<'EVENTS'
 {"_t_name":"a slug is not a prefix match","_t_drop":true,"message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_4ab554b2_homeassistant-time-machine"}
 {"_t_name":"a host unit is not a container and passes","_t_unit":"NetworkManager","message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"NetworkManager.service"}
 {"_t_name":"the kernel passes","_t_unit":"kernel","message":"x","PRIORITY":"6","_TRANSPORT":"kernel","SYSLOG_IDENTIFIER":"kernel"}
+{"_t_name":"exclude wins over include","_t_drop":true,"message":"x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
 EVENTS
 run_vrl_events "${VECTOR_VRL}" /tmp/include-events.ndjson
 
@@ -430,17 +440,27 @@ awk -v sink_inputs="${sink_inputs}" '
     !skip
 ' "${VECTOR_CONFIG}" > "${pl}/cfg.yaml"
 
+# Core and Music Assistant log at the same time, so their lines interleave;
+# group_by keeps each traceback with its own container. Core's opener is a
+# WARNING whose frames are PRIORITY=3, so the joined entry must keep warn. The
+# second Core opener is longer than 16 KiB and arrives in two pieces, and its
+# frames must still join it rather than the record before.
 {
     cat <<'EVENTS'
-{"message":"\u001b[31m2026-01-11 09:04:15.123 ERROR (MainThread) [homeassistant.core] ha-boom\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"\u001b[33m2026-01-11 09:04:15.123 WARNING (MainThread) [homeassistant.core] ha-boom\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"2026-01-11 09:04:15.123 ERROR (MainThread) [music_assistant] ma-boom","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
 {"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
 {"message":"  File \"/x.py\", line 1, in <module>","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"  File \"/ma.py\", line 2, in f","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
 {"message":"ValueError: bad","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
 {"message":"\u001b[32m2026-01-11 09:04:16.000 INFO (MainThread) [homeassistant.core] ha-next\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
-{"message":"2026-01-11 09:04:15.123 ERROR (MainThread) [music_assistant] ma-boom","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
-{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
-{"message":"  File \"/ma.py\", line 2, in f","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
 {"message":"2026-01-11 09:04:16.000 INFO (MainThread) [music_assistant] ma-next","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_d5369777_music_assistant"}
+{"message":"2026-01-11 09:04:17.000 ERROR (MainThread) [homeassistant.core] long-","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant","CONTAINER_PARTIAL_ID":"p2","CONTAINER_PARTIAL_ORDINAL":"1","CONTAINER_PARTIAL_MESSAGE":"true","CONTAINER_PARTIAL_LAST":"false"}
+{"message":"opener","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant","CONTAINER_PARTIAL_ID":"p2","CONTAINER_PARTIAL_ORDINAL":"2","CONTAINER_PARTIAL_LAST":"true"}
+{"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"KeyError: long","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"message":"2026-01-11 09:04:18.000 INFO (MainThread) [homeassistant.core] ha-last","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
 {"message":"2026-01-11 09:04:15.123456 ERROR AppDaemon: ad-boom","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
 {"message":"Traceback (most recent call last):","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
 {"message":"","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_a0d7b954_appdaemon"}
@@ -450,7 +470,7 @@ awk -v sink_inputs="${sink_inputs}" '
 {"message":"ord=hunter5sentinel end","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_45df7312_zigbee2mqtt","CONTAINER_PARTIAL_ID":"p1","CONTAINER_PARTIAL_ORDINAL":"3","CONTAINER_PARTIAL_LAST":"true"}
 EVENTS
     # One line far past the size cap
-    jq -nc '{message: ("y" * 150000), PRIORITY: "6", _SYSTEMD_UNIT: "docker.service", CONTAINER_NAME: "app_00000000_big"}'
+    jq -nc '{message: ("y" * 250000), PRIORITY: "6", _SYSTEMD_UNIT: "docker.service", CONTAINER_NAME: "app_00000000_big"}'
 } > "${pl}/in.ndjson"
 
 timeout 60 vector --config-yaml "${pl}/cfg.yaml" < "${pl}/in.ndjson" > "${pl}/out.ndjson" 2> "${pl}/run.log"
@@ -458,14 +478,21 @@ check "the pipeline ran to the end of its input" grep -q "All sources have finis
 
 # Asserted by content, never by order: the sink fans in from two branches
 out_count() { jq -s "[.[] | select($1)] | length" "${pl}/out.ndjson"; }
-check "every expected event came out, and nothing else" test "$(out_count 'true')" -eq 8
+check "every expected event came out, and nothing else" test "$(out_count 'true')" -eq 10
 check "Core's traceback rejoined its opening line" \
-    test "$(out_count '.container_name == "homeassistant" and (.message | test("ha-boom\nTraceback \\(most recent call last\\):\n  File .*\nValueError: bad"))')" -eq 1
-check "and kept that line's level" \
-    test "$(out_count '(.message | startswith("2026-01-11 09:04:15.123 ERROR")) and .level == "error"')" -eq 2
-check "Core's next line stands alone" test "$(out_count '.message | endswith("ha-next")')" -eq 1
-check "a listed add-on's traceback is joined too" \
-    test "$(out_count '.message | test("ma-boom\nTraceback \\(most recent call last\\):\n  File")')" -eq 1
+    test "$(out_count '.container_name == "homeassistant" and .message == "2026-01-11 09:04:15.123 WARNING (MainThread) [homeassistant.core] ha-boom\nTraceback (most recent call last):\n  File \"/x.py\", line 1, in <module>\nValueError: bad"')" -eq 1
+check "and kept that line's level, not the frames' PRIORITY" \
+    test "$(out_count '(.message | contains("ha-boom")) and .level == "warn"')" -eq 1
+check "Music Assistant's frames stayed with Music Assistant" \
+    test "$(out_count '.container_name == "app_d5369777_music_assistant" and .message == "2026-01-11 09:04:15.123 ERROR (MainThread) [music_assistant] ma-boom\nTraceback (most recent call last):\n  File \"/ma.py\", line 2, in f"')" -eq 1
+check "no traceback crossed between containers" \
+    test "$(out_count '(.container_name == "homeassistant" and (.message | contains("ma.py"))) or (.container_name != "homeassistant" and (.message | contains("x.py")))')" -eq 0
+check "Core's next line stands alone" \
+    test "$(out_count '.message == "2026-01-11 09:04:16.000 INFO (MainThread) [homeassistant.core] ha-next"')" -eq 1
+check "a long opener in pieces still collects its own traceback" \
+    test "$(out_count '.message == "2026-01-11 09:04:17.000 ERROR (MainThread) [homeassistant.core] long-opener\nTraceback (most recent call last):\nKeyError: long" and .level == "error"')" -eq 1
+check "and the line after it stands alone" \
+    test "$(out_count '.message == "2026-01-11 09:04:18.000 INFO (MainThread) [homeassistant.core] ha-last"')" -eq 1
 check "an unlisted add-on's lines are not joined" \
     test "$(out_count '.container_name == "app_a0d7b954_appdaemon"')" -eq 2
 check "an excluded container sends nothing" \
@@ -473,11 +500,32 @@ check "an excluded container sends nothing" \
 check "a long line's pieces are one event again" \
     test "$(out_count '.message == "[2026-09-27 18:37:26] info: \tz2m: payload {\"a\":1} password: [REDACTED] end"')" -eq 1
 check "with the partial-line fields gone" \
-    test "$(out_count 'has("CONTAINER_PARTIAL_ID") or has("CONTAINER_PARTIAL_LAST") or has("timestamp_end")')" -eq 0
+    test "$(out_count '[has("CONTAINER_PARTIAL_ID", "CONTAINER_PARTIAL_LAST", "CONTAINER_PARTIAL_MESSAGE", "CONTAINER_PARTIAL_ORDINAL", "timestamp_end")] | any')" -eq 0
 check_not "a secret split across pieces is still redacted" grep -Fq hunter5sentinel "${pl}/out.ndjson"
 check_not "no colour codes reach the sink" grep -Fq '\u001b' "${pl}/out.ndjson"
 check "an oversized line is cut to the cap" \
-    test "$(out_count '.container_name == "app_00000000_big" and (.message | length) < 100100 and (.message | endswith("[truncated by the add-on]"))')" -eq 1
+    test "$(out_count '.container_name == "app_00000000_big" and (.message | length) < 50100 and (.message | endswith("[truncated by the add-on]"))')" -eq 1
+
+# A configuration error stops the add-on rather than restarting it forever: run
+# exits with the fatal code, and finish records it as the container's exit code
+# and halts. /run belongs to the container, so halt can be stubbed.
+current="halt"
+mkdir -p /run/s6/basedir/bin /run/s6-linux-init-container-results
+printf '#!/bin/sh\ntouch /tmp/halted\n' > /run/s6/basedir/bin/halt
+chmod +x /run/s6/basedir/bin/halt
+rm -f /tmp/halted /run/s6-linux-init-container-results/exitcode
+jq -s '.[0] * .[1]' "${TESTS_DIR}/fixtures/base.json" \
+    "${TESTS_DIR}/fixtures/no-source.json" > "${VECTOR_OPTIONS_FILE}"
+/etc/s6-overlay/s6-rc.d/vector/run > "${LOG}" 2>&1
+rc=$?
+check "run exits with the fatal code on a bad config" test "${rc}" -eq "${VECTOR_ADDON_EXIT_FATAL}"
+/etc/s6-overlay/s6-rc.d/vector/finish "${rc}" 0 >> "${LOG}" 2>&1
+check "finish records the exit code" \
+    test "$(cat /run/s6-linux-init-container-results/exitcode 2> /dev/null)" = "${VECTOR_ADDON_EXIT_FATAL}"
+check "and halts the container" test -e /tmp/halted
+rm -f /tmp/halted
+/etc/s6-overlay/s6-rc.d/vector/finish 256 15 >> "${LOG}" 2>&1
+check_not "a normal stop does not halt" test -e /tmp/halted
 
 printf '\n%s failing assertion(s)\n' "${failures}"
 [[ ${failures} -eq 0 ]]

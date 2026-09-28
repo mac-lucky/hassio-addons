@@ -30,3 +30,18 @@
 {"_t_name":"blank line dropped","_t_drop":true,"message":"   ","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_b55247da_vector"}
 {"_t_name":"empty line dropped","_t_drop":true,"message":"","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_5c53de3b_esphome"}
 {"_t_name":"a line that is only colour codes dropped","_t_drop":true,"message":"\u001b[0m","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"esphome bare INFO line on stderr is info","_t_level":"info","message":"INFO Reading configuration /config/esphome/plant-care.yaml...","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_5c53de3b_esphome"}
+{"_t_name":"esphome bare WARNING line is warn","_t_level":"warn","message":"WARNING GPIO15 is a strapping PIN","PRIORITY":"3","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"app_5c53de3b_esphome"}
+{"_t_name":"a capitalised word is not a level","_t_level":"info","message":"Error handling is fine here","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"priority 7 is debug","_t_level":"debug","message":"x","PRIORITY":"7","_SYSTEMD_UNIT":"foo.service"}
+{"_t_name":"priority 5 is notice","_t_level":"notice","message":"x","PRIORITY":"5","_SYSTEMD_UNIT":"foo.service"}
+{"_t_name":"Redis URL with an empty user redacted","_t_msg":"connecting to redis://[REDACTED]@redis:6379/0","message":"connecting to redis://:hunter6sentinel@redis:6379/0","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"URL with a bare token as userinfo redacted","_t_absent":"ghp_sentinel7","message":"git clone https://ghp_sentinel7abcdef@github.com/a/b","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"URL password containing @ redacted to the last @","_t_msg":"postgres://[REDACTED]@db/x","message":"postgres://user:hunt@r8sentinel@db/x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"a URL without credentials is untouched","_t_msg":"GET https://example.com/a?x=b@c and http://host:8123/x","message":"GET https://example.com/a?x=b@c and http://host:8123/x","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"Authorization header in a Python dict redacted","_t_absent":"opaqueSentinel9","message":"headers {'Authorization': 'Bearer opaqueSentinel9xyz', 'Accept': '*/*'}","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"Authorization header in JSON redacted","_t_absent":"dXNlcjpzZW50aW5lbDEw","message":"headers {\"Authorization\": \"Basic dXNlcjpzZW50aW5lbDEw\"}","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"password := value redacted whole","_t_absent":"hunter11sentinel","message":"cfg password := hunter11sentinel","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"escaped JSON inside JSON redacted","_t_absent":"hunter12sentinel","message":"payload {\\\"password\\\":\\\"hunter12sentinel\\\"}","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"command-line password flag redacted","_t_msg":"running mysql --password [REDACTED] --user bob","message":"running mysql --password hunter13sentinel --user bob","PRIORITY":"6","_SYSTEMD_UNIT":"docker.service","CONTAINER_NAME":"homeassistant"}
+{"_t_name":"SYSLOG_RAW is dropped","_t_gone":["SYSLOG_RAW"],"message":"x","SYSLOG_RAW":"<30>Sep 27 x password hunter14sentinel","PRIORITY":"6","_SYSTEMD_UNIT":"nfsrahead.service"}
