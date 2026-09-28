@@ -159,11 +159,17 @@ type ManagedInventory struct {
 	// the prefix is all that tells them apart, so stripping it would merge
 	// names that are not the same object.
 	Registry []string `json:"registry"`
-	// The five below are each layer's map with the rtype prefix off, since
+	// The ones below are each layer's map with the rtype prefix off, since
 	// the group name already says which layer it is: EntityOriginals,
-	// DashboardManaged, AddonOriginals, IntegrationManaged, SubentryManaged.
+	// DeviceOriginals, DashboardManaged (split by prefix into dashboards
+	// and Lovelace resources), AddonOriginals, IntegrationManaged,
+	// SubentryManaged. Devices are listed by their live device id: a
+	// device has no name of its own the state could keep, only the
+	// manifest entry that found it.
 	Entities     []string `json:"entities"`
+	Devices      []string `json:"devices"`
 	Dashboards   []string `json:"dashboards"`
+	Resources    []string `json:"resources"`
 	Addons       []string `json:"addons"`
 	Integrations []string `json:"integrations"`
 	Subentries   []string `json:"subentries"`
@@ -180,8 +186,8 @@ type ManagedInventory struct {
 // read like AddonUpdatesAvailable and ApplyableCount, so a hand-built
 // status cannot get it wrong.
 func (m ManagedInventory) Total() int {
-	return len(m.Files) + len(m.Registry) + len(m.Entities) + len(m.Dashboards) +
-		len(m.Addons) + len(m.Integrations) + len(m.Subentries) + len(m.Hacs)
+	return len(m.Files) + len(m.Registry) + len(m.Entities) + len(m.Devices) + len(m.Dashboards) +
+		len(m.Resources) + len(m.Addons) + len(m.Integrations) + len(m.Subentries) + len(m.Hacs)
 }
 
 // clone is a deep copy for Status to hand out: the inventory behind it is
@@ -192,7 +198,9 @@ func (m ManagedInventory) clone() ManagedInventory {
 		Files:        copyNames(m.Files),
 		Registry:     copyNames(m.Registry),
 		Entities:     copyNames(m.Entities),
+		Devices:      copyNames(m.Devices),
 		Dashboards:   copyNames(m.Dashboards),
+		Resources:    copyNames(m.Resources),
 		Addons:       copyNames(m.Addons),
 		Integrations: copyNames(m.Integrations),
 		Subentries:   copyNames(m.Subentries),
@@ -297,6 +305,11 @@ type Status struct {
 	// ApplyHeld is why an apply of this exact plan failed last time, when
 	// it did; the timer will not apply it again on its own. "" otherwise.
 	ApplyHeld string `json:"apply_held"`
+	// FetchFailingSince is when fetching from the repository started
+	// failing, "" while it works. Set during a short forge outage the
+	// agent rides out without an error (see deferFetchFailure) and kept
+	// once the outage outlasts that and becomes one.
+	FetchFailingSince string `json:"fetch_failing_since"`
 	// Warnings holds the last apply's check_config warnings verbatim,
 	// possibly multi-line. Unlike LastError, non-empty never implies
 	// StateError: check_config already treated the config as valid.

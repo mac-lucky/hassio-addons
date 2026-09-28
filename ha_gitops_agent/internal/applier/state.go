@@ -25,6 +25,12 @@ type State struct {
 	// gitops/entities.yaml. A manifest entity_id already IS the live id, so
 	// presence of a key doubles as "currently managed".
 	EntityOriginals map[string]map[string]any
+	// DeviceOriginals is internal/devices' "device:<device_id>" -> {field:
+	// original value} snapshot, shaped and used like EntityOriginals but
+	// keyed by the live device id: a device has no stable name of its own,
+	// so the manifest key only says which device to find, and the id is
+	// what a restore needs once that entry is gone from the manifest.
+	DeviceOriginals map[string]map[string]any
 	// DashboardManaged is internal/dashboards' "<rtype>:<manifest id>" ->
 	// live id map, kept SEPARATE from RegistryManaged because
 	// registries.Plan treats any other prefix there as a helper domain and
@@ -172,7 +178,8 @@ func StateLoad(cfg Config) State {
 	defaults := State{
 		Manifest: []string{}, RegistryManaged: map[string]string{},
 		EntityOriginals: map[string]map[string]any{}, DashboardManaged: map[string]string{},
-		AddonOriginals: map[string]map[string]any{}, AddonRestartOnChange: map[string]bool{},
+		DeviceOriginals: map[string]map[string]any{},
+		AddonOriginals:  map[string]map[string]any{}, AddonRestartOnChange: map[string]bool{},
 		IntegrationManaged: map[string]string{}, IntegrationHashes: map[string]string{},
 		IntegrationData: map[string]map[string]any{}, IntegrationAttempts: map[string]map[string]any{},
 		SubentryManaged: map[string]string{}, SubentryHashes: map[string]string{},
@@ -203,6 +210,7 @@ func StateLoad(cfg Config) State {
 	state.RegistryManaged = sanitizeManagedMap(raw["registry_managed"], "registry_managed")
 	state.EntityOriginals = sanitizeFieldOriginals(raw["entity_originals"], "entity_originals")
 	state.DashboardManaged = sanitizeManagedMap(raw["dashboard_managed"], "dashboard_managed")
+	state.DeviceOriginals = sanitizeFieldOriginals(raw["device_originals"], "device_originals")
 	state.AddonOriginals = sanitizeFieldOriginals(raw["addon_originals"], "addon_originals")
 	state.AddonRestartOnChange = sanitizeBoolMap(raw["addon_restart_on_change"], "addon_restart_on_change")
 	state.IntegrationManaged = sanitizeManagedMap(raw["integration_managed"], "integration_managed")
@@ -418,6 +426,10 @@ func StateSave(cfg Config, state State) error {
 	if dashboardManaged == nil {
 		dashboardManaged = map[string]string{}
 	}
+	deviceOriginals := state.DeviceOriginals
+	if deviceOriginals == nil {
+		deviceOriginals = map[string]map[string]any{}
+	}
 	addonOriginals := state.AddonOriginals
 	if addonOriginals == nil {
 		addonOriginals = map[string]map[string]any{}
@@ -478,6 +490,7 @@ func StateSave(cfg Config, state State) error {
 		"registry_managed":        registryManaged,
 		"entity_originals":        entityOriginals,
 		"dashboard_managed":       dashboardManaged,
+		"device_originals":        deviceOriginals,
 		"addon_originals":         addonOriginals,
 		"addon_restart_on_change": addonRestartOnChange,
 		"integration_managed":     integrationManaged,

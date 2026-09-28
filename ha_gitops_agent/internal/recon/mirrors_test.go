@@ -248,7 +248,9 @@ func TestStatusListsEveryManagedGroupSortedAndUnprefixed(t *testing.T) {
 		Files:        []string{"automations.yaml", "packages/lights.yaml"},
 		Registry:     []string{"floor:ground"},
 		Entities:     []string{"light.kitchen", "sensor.outdoor_dew"},
+		Devices:      []string{"9a1b2c3d4e5f60718293a4b5c6d7e8f9"},
 		Dashboards:   []string{"energy"},
+		Resources:    []string{"card_mod"},
 		Addons:       []string{"core_ssh"},
 		Integrations: []string{"workday_main"},
 		Subentries:   []string{"widget_hall"},
@@ -257,8 +259,8 @@ func TestStatusListsEveryManagedGroupSortedAndUnprefixed(t *testing.T) {
 	if !reflect.DeepEqual(managed, want) {
 		t.Errorf("managed = %+v, want %+v", managed, want)
 	}
-	if got := managed.Total(); got != 10 {
-		t.Errorf("total = %d, want 10 - every group counts", got)
+	if got := managed.Total(); got != 12 {
+		t.Errorf("total = %d, want 12 - every group counts", got)
 	}
 }
 
@@ -310,7 +312,7 @@ func TestManagedInventoryIsEmptyButNeverNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal managed: %v", err)
 	}
-	want := `{"files":[],"registry":[],"entities":[],"dashboards":[],"addons":[],"integrations":[],"subentries":[],"hacs":[]}`
+	want := `{"files":[],"registry":[],"entities":[],"devices":[],"dashboards":[],"resources":[],"addons":[],"integrations":[],"subentries":[],"hacs":[]}`
 	if string(encoded) != want {
 		t.Errorf("managed = %s, want %s", encoded, want)
 	}

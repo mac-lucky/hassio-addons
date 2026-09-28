@@ -559,7 +559,7 @@ func TestRollbackRegistryHappyPath(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil)
 
 	if !result.OK || !result.RolledBack {
 		t.Fatalf("rollback result = %+v", result)
@@ -590,7 +590,7 @@ func TestRollbackRegistryRecreateRemapsRegistryManaged(t *testing.T) {
 
 	rollbackWS := newFakeWS()
 	rollbackWS.results["config/floor_registry/create"] = []any{map[string]any{"floor_id": "F-NEW", "name": "Old floor", "level": 0}}
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -611,7 +611,7 @@ func TestRollbackRegistryRecreateRemapsRegistryManaged(t *testing.T) {
 
 func TestRollbackRegistryMissingStashReturnsErrorResult(t *testing.T) {
 	ws := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(ws), filepath.Join(t.TempDir(), "does-not-exist"), map[string]string{}, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(ws), filepath.Join(t.TempDir(), "does-not-exist"), map[string]string{}, nil, nil, nil)
 
 	if result.OK || result.RolledBack {
 		t.Fatalf("result = %+v", result)
@@ -724,7 +724,7 @@ func TestApplyPlanTransportFailureNeverStashesAnOpThatNeverRan(t *testing.T) {
 	// A later Rollback click must do nothing, above all never recreate
 	// "Old room" a second time.
 	rollbackWS := newFakeWS()
-	rbResult := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil)
+	rbResult := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil)
 	if !rbResult.OK {
 		t.Fatalf("rollback result = %+v", rbResult)
 	}
@@ -795,7 +795,7 @@ func TestRollbackRegistryAfterPartialFailureSecondAttemptMakesNoFurtherCalls(t *
 	ws1 := newFakeWS()
 	ws1.results["config/area_registry/create"] = []any{map[string]any{"area_id": "A-NEW", "name": "Old room"}}
 	ws1.raiseOn["config/floor_registry/delete"] = []error{&wsclient.Error{Code: "unknown_error", Message: "boom"}}
-	result1 := RollbackRegistry(context.Background(), staticDialer(ws1), stashDir, managed, nil, nil)
+	result1 := RollbackRegistry(context.Background(), staticDialer(ws1), stashDir, managed, nil, nil, nil)
 
 	if result1.OK {
 		t.Fatalf("result1 = %+v", result1)
@@ -820,7 +820,7 @@ func TestRollbackRegistryAfterPartialFailureSecondAttemptMakesNoFurtherCalls(t *
 
 	// Second attempt: nothing left in the stash, so nothing is retried.
 	ws2 := newFakeWS()
-	result2 := RollbackRegistry(context.Background(), staticDialer(ws2), stashDir, managed, nil, nil)
+	result2 := RollbackRegistry(context.Background(), staticDialer(ws2), stashDir, managed, nil, nil, nil)
 	if !result2.OK {
 		t.Fatalf("result2 = %+v", result2)
 	}
@@ -846,7 +846,7 @@ func TestRollbackRegistryStashWriteFailureLeavesEntryRetryableAndSkipsItsInvert(
 		return errors.New("[Errno 28] No space left on device")
 	}
 	ws1 := newFakeWS()
-	result1 := RollbackRegistry(context.Background(), staticDialer(ws1), stashDir, managed, nil, nil)
+	result1 := RollbackRegistry(context.Background(), staticDialer(ws1), stashDir, managed, nil, nil, nil)
 	writeRegistryStash = orig
 
 	if result1.OK {
@@ -864,7 +864,7 @@ func TestRollbackRegistryStashWriteFailureLeavesEntryRetryableAndSkipsItsInvert(
 	// created_at/modified_at.
 	ws2 := newFakeWS()
 	ws2.results["config/area_registry/create"] = []any{map[string]any{"area_id": "A-NEW", "name": "Old room"}}
-	result2 := RollbackRegistry(context.Background(), staticDialer(ws2), stashDir, managed, nil, nil)
+	result2 := RollbackRegistry(context.Background(), staticDialer(ws2), stashDir, managed, nil, nil, nil)
 
 	if !result2.OK {
 		t.Fatalf("result2 = %+v", result2)
@@ -889,7 +889,7 @@ func TestRollbackRegistrySkipsCreateEntryWithNoLiveIDNeverFallsBackToManaged(t *
 	managed := map[string]string{"floor:ground": "F-USER-RECREATED"}
 
 	ws := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, managed, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, managed, nil, nil, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -911,7 +911,7 @@ func TestRollbackRegistryNeverPanicsOnUnexpectedInternalFailure(t *testing.T) {
 	// A panicking Cmd stands in for any internal failure: it must be
 	// recovered into a failing result, not crash the caller.
 	ws := panicWS{}
-	result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, map[string]string{}, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, map[string]string{}, nil, nil, nil)
 
 	if result.OK {
 		t.Fatalf("result = %+v", result)
@@ -1022,7 +1022,7 @@ func TestDeleteInverseStripsServerGeneratedFieldsForEveryRegistryRType(t *testin
 			ws := newFakeWS()
 			ws.results["config/"+tc.rtype+"_registry/create"] = []any{map[string]any{tc.idField: "NEW-ID"}}
 
-			result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, map[string]string{}, nil, nil)
+			result := RollbackRegistry(context.Background(), staticDialer(ws), stashDir, map[string]string{}, nil, nil, nil)
 
 			if !result.OK {
 				t.Fatalf("result = %+v", result)
@@ -1222,7 +1222,7 @@ func TestRollbackRegistryReleasesAnAdoptedObject(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil)
 	if !result.OK {
 		t.Fatalf("rollback result = %+v", result)
 	}
@@ -1245,7 +1245,7 @@ func TestRollbackRegistryKeepsAPreManagedKey(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	if result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !result.OK {
+	if result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil); !result.OK {
 		t.Fatalf("rollback result = %+v", result)
 	}
 	if managed["floor:old"] != "F-OLD" {
@@ -1310,7 +1310,7 @@ func TestApplyPlanForgetDropsTheMappingAndRollbackRestoresIt(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil); !rb.OK {
 		t.Fatalf("rollback result = %+v", rb)
 	}
 	if len(rollbackWS.calls) != 0 {
@@ -1350,7 +1350,7 @@ func TestApplyPlanRenamedKeyThenRollbackRestoresManaged(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil); !rb.OK {
 		t.Fatalf("rollback result = %+v", rb)
 	}
 	if !reflect.DeepEqual(managed, map[string]string{"floor:old": "ground"}) {
@@ -1452,7 +1452,7 @@ func TestRollbackRegistryHelperUpdateSendsThePriorItemWithoutNulls(t *testing.T)
 	}
 
 	rollbackWS := newFakeWS()
-	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil, nil); !rb.OK {
 		t.Fatalf("rollback result = %+v", rb)
 	}
 	want := []wsCall{{msgType: "input_number/update", params: map[string]any{

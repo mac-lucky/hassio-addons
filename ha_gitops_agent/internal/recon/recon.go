@@ -61,6 +61,13 @@ const historyKeep = 200
 // GET /history renders the rest without polling.
 const historyStatusMax = 25
 
+// forgeOutageGrace is how long a forge may stay unreachable before a failed
+// fetch counts as an error. A forge restarting, or stopped for its nightly
+// backup, answers 502 for a few minutes, and reporting each of those as an
+// error trains people to ignore the error state. A var so tests can
+// shorten it.
+var forgeOutageGrace = 15 * time.Minute
+
 // Reconciler owns one reconcile cycle end-to-end and exposes it to the web
 // UI and the background loop. A single instance, built by New, is shared
 // by RunLoop and internal/web's handlers.
@@ -75,6 +82,7 @@ type Reconciler struct {
 	registries      Registries
 	registryApplier RegistryApplier
 	entities        Entities
+	devices         Devices
 	dashboards      Dashboards
 	addonOpts       AddonOpts
 	flows           Flows
@@ -124,9 +132,21 @@ type Reconciler struct {
 	heldPlanUntil    time.Time
 	heldPlanFailures int
 	heldPlanLogged   bool
-	lastSHA          string
-	lastApplyUTC     string
-	lastStashDir     string
+	// lastRollbackAt is when the last Roll Back completed, so SyncNow can
+	// drop a webhook cycle whose delivery arrived before it (see there).
+	lastRollbackAt time.Time
+	// fetchFailingSince is when the fetch first failed transiently in the
+	// outage going on now, zero while fetches succeed. Within
+	// forgeOutageGrace of it a failed fetch keeps the last plan and state
+	// instead of reporting an error (see deferFetchFailure).
+	fetchFailingSince time.Time
+	// fetchedOnce is whether any fetch has succeeded in this process: the
+	// only case where a failed one has a plan worth keeping. Not lastSHA,
+	// which an apply can fill in from state.json before any fetch.
+	fetchedOnce  bool
+	lastSHA      string
+	lastApplyUTC string
+	lastStashDir string
 	// lastStashSummary is the one sentence the Roll Back confirmation
 	// quotes about what lastStashDir restores, or "" when none was
 	// composed. Built at apply time; Status time would mean stat-ing it.
@@ -295,6 +315,7 @@ func New(opts options.Options, deps Deps) *Reconciler {
 		registries:      deps.Registries,
 		registryApplier: deps.RegistryApplier,
 		entities:        deps.Entities,
+		devices:         deps.Devices,
 		dashboards:      deps.Dashboards,
 		addonOpts:       deps.AddonOpts,
 		flows:           deps.Flows,
@@ -338,6 +359,9 @@ func New(opts options.Options, deps Deps) *Reconciler {
 	}
 	if r.entities == nil {
 		r.entities = realEntities{}
+	}
+	if r.devices == nil {
+		r.devices = realDevices{}
 	}
 	if r.dashboards == nil {
 		r.dashboards = realDashboards{}
@@ -431,6 +455,14 @@ func utcISO(t time.Time) string {
 
 func utcNowISO() string {
 	return utcISO(time.Now())
+}
+
+// utcISOOrEmpty is utcISO with the zero time as "", for optional times.
+func utcISOOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return utcISO(t)
 }
 
 // joinErrors joins the non-empty parts with "; ".
@@ -622,7 +654,9 @@ func (r *Reconciler) pushStatus() {
 		"last_apply_utc":          nullable(r.lastApplyUTC),
 		"pending_changes":         len(r.pending) + len(r.pendingRegistry),
 		"pending_registry_ops":    len(r.pendingRegistry),
+		"pending_device_ops":      countByRType(r.pendingRegistry, rtypeDevice),
 		"pending_dashboard_ops":   countByRType(r.pendingRegistry, "dashboard"),
+		"pending_resource_ops":    countByRType(r.pendingRegistry, rtypeResource),
 		"pending_addon_ops":       countByRType(r.pendingRegistry, "addon"),
 		"pending_integration_ops": countByRType(r.pendingRegistry, "integration"),
 		"pending_subentry_ops":    countByRType(r.pendingRegistry, "subentry"),
@@ -630,9 +664,12 @@ func (r *Reconciler) pushStatus() {
 		"error":                   nullable(r.lastError),
 		// An automation's cue that the timer has stopped retrying a
 		// failing plan and is waiting for a person.
-		"apply_held":        nullable(r.applyHeldLocked()),
-		"warnings":          nullable(r.lastWarnings),
-		"last_drift_branch": nullable(r.lastDriftBranch),
+		"apply_held": nullable(r.applyHeldLocked()),
+		// When the forge stopped answering, while a short outage is being
+		// ridden out (see deferFetchFailure) and after it became an error.
+		"fetch_failing_since": nullable(utcISOOrEmpty(r.fetchFailingSince)),
+		"warnings":            nullable(r.lastWarnings),
+		"last_drift_branch":   nullable(r.lastDriftBranch),
 		// Conflicts are held out of pending_changes - they are in no plan -
 		// so without their own count the one thing that actually needs a
 		// person would publish drift_pending with pending_changes 0.
@@ -898,6 +935,7 @@ func (r *Reconciler) Status() Status {
 	lastBackupError := r.lastBackupError
 	planID := r.planID
 	applyHeld := r.applyHeldLocked()
+	fetchFailingSince := utcISOOrEmpty(r.fetchFailingSince)
 	lastVersionRecordUTC := r.lastVersionRecordUTC
 	nextTickUTC := r.nextTickUTC
 	// Read beside nextTickUTC, which SetPaused clears under the same lock:
@@ -964,6 +1002,7 @@ func (r *Reconciler) Status() Status {
 		LastBackupError:     lastBackupError,
 		PlanID:              planID,
 		ApplyHeld:           applyHeld,
+		FetchFailingSince:   fetchFailingSince,
 		Warnings:            lastWarnings,
 		CommitBackEnabled:   r.opts.CommitBack,
 		LastDriftBranch:     lastDriftBranch,
@@ -1159,6 +1198,51 @@ func (r *Reconciler) failCycle(run *runRecorder, err error) []differ.Change {
 	return nil
 }
 
+// deferFetchFailure decides whether a failed fetch is ridden out rather
+// than reported: the error must look transient (gitsync's markers - a 5xx,
+// a refused connection, a DNS failure), a fetch must have succeeded
+// before in this process (fetchedOnce), so there is a plan to keep, and
+// the outage must be younger than forgeOutageGrace. Within those bounds
+// the state, the plan and lastError stay as the previous cycle left them,
+// and one warning is logged per outage. runCycle applies nothing while an
+// outage stands.
+func (r *Reconciler) deferFetchFailure(err error) bool {
+	if !gitsync.IsTransientFetchError(err) {
+		return false
+	}
+	now := time.Now()
+	var deferred, first bool
+	r.withMu(func() {
+		if !r.fetchedOnce {
+			return
+		}
+		if r.fetchFailingSince.IsZero() {
+			r.fetchFailingSince = now
+			first = true
+		}
+		deferred = now.Sub(r.fetchFailingSince) < forgeOutageGrace
+	})
+	if first && deferred {
+		r.logWarn("git host unreachable, keeping the last fetched commit and trying again next cycle: " + err.Error())
+	}
+	return deferred
+}
+
+// endFetchOutage clears fetchFailingSince after a fetch succeeds, logging
+// how long the outage lasted if there was one, and records that a fetch
+// has worked.
+func (r *Reconciler) endFetchOutage() {
+	var since time.Time
+	r.withMu(func() {
+		since = r.fetchFailingSince
+		r.fetchFailingSince = time.Time{}
+		r.fetchedOnce = true
+	})
+	if !since.IsZero() {
+		r.logEvent("git host reachable again after " + humanize.Duration(time.Since(since)))
+	}
+}
+
 // unseededCycle ends a cycle that found no such branch on the remote.
 // Clears the stale plan like failCycle but also clears lastError, because
 // nothing is wrong: the state carries the condition instead.
@@ -1215,6 +1299,15 @@ func (r *Reconciler) ReconcileNow(ctx context.Context) []differ.Change {
 // and the refresh after it to be one operation - the public entry point
 // would quietly hand back the pre-import snapshot instead.
 func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
+	return r.reconcileNowWith(ctx, true)
+}
+
+// reconcileNowWith is reconcileNow with the forge-outage grace optional.
+// ImportLive turns it off for the refresh after its push: the plan an
+// outage would keep predates the import and would write the repository's
+// old content over the edits just imported, so a failed fetch there must
+// end the cycle and drop that plan.
+func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []differ.Change {
 	run := r.beginRun(history.KindReconcile)
 	defer run.abandon()
 
@@ -1226,8 +1319,16 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 		if errors.Is(err, gitsync.ErrRemoteBranchMissing) {
 			return r.unseededCycle(run)
 		}
+		if deferFetch && r.deferFetchFailure(err) {
+			// No history row either, like unseededCycle: a row per tick of
+			// an outage would push the useful ones out of the card.
+			run.discard()
+			r.pushStatus()
+			return r.snapshotPending()
+		}
 		return r.failCycle(run, err)
 	}
+	r.endFetchOutage()
 	// From here on every exit knows its commit. The two failures above
 	// have none to name, and naming the previous cycle's would claim this
 	// one got further than it did.
@@ -1452,10 +1553,11 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	return changes
 }
 
-// planRegistryLayer plans the floor/area/label/helper layer and the
-// entity layer, which share one live fetch: entities.NewRefResolver
-// resolves area/label references out of that same live state. Returns
-// their ops, none when neither has work, or the error that ends the cycle.
+// planRegistryLayer plans the floor/area/label/helper layer, the device
+// layer and the entity layer, which share one live fetch:
+// entities.NewRefResolver resolves area/label references out of that same
+// live state for both of the latter. Returns their ops in apply order, none
+// when none has work, or the error that ends the cycle.
 func (r *Reconciler) planRegistryLayer(ctx context.Context, state applier.State) ([]registries.RegOp, error) {
 	desired, err := r.registries.LoadManifests(r.git.Workdir())
 	if err != nil {
@@ -1463,19 +1565,25 @@ func (r *Reconciler) planRegistryLayer(ctx context.Context, state applier.State)
 		// manifest files, and lands in last_error verbatim via failCycle.
 		return nil, err
 	}
+	deviceDesired, err := r.devices.LoadManifest(r.git.Workdir())
+	if err != nil {
+		return nil, err
+	}
 	entityDesired, err := r.entities.LoadManifest(r.git.Workdir())
 	if err != nil {
 		return nil, err
 	}
 
-	// Like registryLayerHasWork: emptying entities.yaml must still plan
-	// restore-on-unmanage for whatever this agent started managing.
+	// Like registryLayerHasWork: emptying devices.yaml or entities.yaml
+	// must still plan restore-on-unmanage for whatever this agent started
+	// managing.
+	deviceLayerHasWork := len(deviceDesired.Devices) > 0 || len(state.DeviceOriginals) > 0
 	entityLayerHasWork := len(entityDesired.Entities) > 0 || len(state.EntityOriginals) > 0
 	var planned []registries.RegOp
-	if registryLayerHasWork(desired, state) || entityLayerHasWork {
-		// The entity list fetch is gated separately (a real registry can be
-		// large); floor/area/label/helper state is needed either way, for
-		// its own plan and for entities.NewRefResolver.
+	if registryLayerHasWork(desired, state) || deviceLayerHasWork || entityLayerHasWork {
+		// The entity and device list fetches are gated separately (a real
+		// registry can be large); floor/area/label/helper state is needed
+		// either way, for its own plan and for entities.NewRefResolver.
 		live, err := r.registryApplier.FetchLive(ctx,
 			registries.HelperDomainsFor(desired, state.RegistryManaged), entityLayerHasWork)
 		if err != nil {
@@ -1484,8 +1592,15 @@ func (r *Reconciler) planRegistryLayer(ctx context.Context, state applier.State)
 		if registryLayerHasWork(desired, state) {
 			planned = append(planned, r.registries.Plan(desired, live, state.RegistryManaged)...)
 		}
+		refs := entities.NewRefResolver(desired, state.RegistryManaged, live["area"], live["label"])
+		if deviceLayerHasWork {
+			liveDevices, err := r.registryApplier.FetchLiveDevices(ctx)
+			if err != nil {
+				return nil, err
+			}
+			planned = append(planned, r.devices.Plan(deviceDesired, liveDevices, state.DeviceOriginals, refs)...)
+		}
 		if entityLayerHasWork {
-			refs := entities.NewRefResolver(desired, state.RegistryManaged, live["area"], live["label"])
 			planned = append(planned, r.entities.Plan(entityDesired, live["entity"], state.EntityOriginals, refs)...)
 		}
 	}
@@ -1502,8 +1617,11 @@ func (r *Reconciler) planDashboardLayer(ctx context.Context, state applier.State
 	}
 
 	// Like registryLayerHasWork: emptying the manifest must still plan
-	// deletes for whatever this agent created or adopted.
-	dashboardLayerHasWork := len(dashboardDesired.Dashboards) > 0 || len(state.DashboardManaged) > 0
+	// deletes for whatever this agent created or adopted. Dashboards and
+	// resources share the managed map, told apart by key prefix, and are
+	// fetched only for the half that has work.
+	dashboardLayerHasWork := len(dashboardDesired.Dashboards) > 0 || hasKeyWithPrefix(state.DashboardManaged, "dashboard:")
+	resourceLayerHasWork := len(dashboardDesired.Resources) > 0 || hasKeyWithPrefix(state.DashboardManaged, rtypeResource+":")
 	var planned []registries.RegOp
 	if dashboardLayerHasWork {
 		ids := dashboardContentIDsToFetch(dashboardDesired)
@@ -1514,7 +1632,25 @@ func (r *Reconciler) planDashboardLayer(ctx context.Context, state applier.State
 		planned = append(planned,
 			r.dashboards.Plan(dashboardDesired, liveDashboards, liveContent, state.DashboardManaged)...)
 	}
+	if resourceLayerHasWork {
+		liveResources, resourceMode, err := r.registryApplier.FetchLiveResources(ctx)
+		if err != nil {
+			return nil, err
+		}
+		planned = append(planned,
+			r.dashboards.PlanResources(dashboardDesired, liveResources, resourceMode, state.DashboardManaged)...)
+	}
 	return planned, nil
+}
+
+// hasKeyWithPrefix reports whether any key of m starts with prefix.
+func hasKeyWithPrefix(m map[string]string, prefix string) bool {
+	for k := range m {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // planAddonLayer plans the add-on options layer: the ops to append plus
@@ -1991,66 +2127,60 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// manifest update so both land together.
 	var acc registryApplyOutcome
 	if len(registryOps) > 0 {
-		// registryOps is unified for display but executed as seven
-		// independent layers, each running only once the one before it
-		// succeeded: registries, entities, dashboards, addon options, HACS,
-		// integrations, subentries. A later failure never undoes an earlier
-		// layer. The order matches ReconcileNow's planning order and is
-		// load bearing for one pair - HACS downloads the code an
-		// integration's config entry needs.
+		// registryOps is unified for display but executed as independent
+		// layers, in ReconcileNow's planning order: registries, devices,
+		// entities, dashboards, add-on options, HACS, integrations,
+		// subentries. A failed layer stops only the layers that depend on
+		// it (layerDeps) - an area that failed to create says nothing about
+		// an add-on option - and never undoes a layer that already ran.
 		layers := splitRegistryOpsByLayer(registryOps)
 
 		if finalStashDir == "" && needsStashDir(registryOps) {
 			newDir, mkErr := r.applier.MakeStashDir()
 			if mkErr != nil {
-				acc.registryError = mkErr.Error()
-				// Its own value because nothing has run: the event-log
-				// switch must blame neither "registries" nor a rollback
-				// that never happened. The gate stops a subentry-only plan
-				// too - an unwritable /data fails the StateSave below, and
-				// an unrecorded subentry CREATE returns as a duplicate this
-				// agent can never delete.
-				acc.failedLayer = "stash allocation"
+				// Stops every layer, unlike a layer failure: a subentry-only
+				// plan too - an unwritable /data fails the StateSave below,
+				// and an unrecorded subentry CREATE returns as a duplicate
+				// this agent can never delete. Its own layer name because
+				// nothing has run: the event must blame neither
+				// "registries" nor a rollback that never happened.
+				acc.fail(layerStash, mkErr.Error(), false)
 			} else {
 				finalStashDir = newDir
 			}
 		}
 
-		if acc.registryError == "" && len(layers.registry) > 0 {
+		acc.run(layerRegistries, layers.registry, func() {
 			r.applyRegistryLayer(ctx, layers.registry, &state, finalStashDir, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.entity) > 0 {
+		})
+		acc.run(layerDevices, layers.device, func() {
+			r.applyDeviceLayer(ctx, layers.device, &state, finalStashDir, &acc)
+		})
+		acc.run(layerEntities, layers.entity, func() {
 			r.applyEntityLayer(ctx, layers.entity, &state, finalStashDir, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.dashboard) > 0 {
+		})
+		acc.run(layerDashboards, layers.dashboard, func() {
 			r.applyDashboardLayer(ctx, layers.dashboard, &state, finalStashDir, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.addon) > 0 {
+		})
+		acc.run(layerAddons, layers.addon, func() {
 			r.applyAddonLayer(ctx, layers.addon, addonRestartOnChange, &state, finalStashDir, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.hacs) > 0 {
+		})
+		acc.run(layerHacs, layers.hacs, func() {
 			r.applyHacsLayer(ctx, layers.hacs, &state, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.integration) > 0 {
+		})
+		acc.run(layerIntegrations, layers.integration, func() {
 			r.applyIntegrationLayer(ctx, layers.integration, &state, finalStashDir, &acc)
-		}
-
-		if acc.registryError == "" && len(layers.subentry) > 0 {
+		})
+		acc.run(layerSubentries, layers.subentry, func() {
 			r.applySubentryLayer(ctx, layers.subentry, &state, &acc)
-		}
+		})
 	}
 
 	// Unpacked into locals so everything below reads the accumulated
 	// outcome the same way, registry plan or not.
-	registryError := acc.registryError
-	failedLayer := acc.failedLayer
+	registryError := acc.errorText()
 	registryAppliedCount := acc.registryAppliedCount
-	registryRolledBack := acc.registryRolledBack
+	registryRolledBack := acc.allRolledBack()
 	registrySkipped := acc.registrySkipped
 	appliedIdentities := acc.appliedIdentities
 
@@ -2171,56 +2301,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 
 	switch {
 	case registryError != "":
-		// Phrased for the layer that failed, keyed by the literal each
-		// apply*Layer writes into failedLayer. The default arm claims
-		// nothing a layer cannot do, so a new layer without an arm lands
-		// there rather than reporting a rollback that never happened.
-		switch failedLayer {
-		case "integrations", "subentries", "hacs":
-			// The three per-op-isolated layers: each item applies
-			// independently, and none has a rollback to report -
-			// integrations and subentries cannot read back what they would
-			// need, HACS has no uninstall. Only what failed and what stayed.
-			applied := ""
-			if registryAppliedCount > 0 {
-				applied = fmt.Sprintf("; %d registry change(s) stayed applied", registryAppliedCount)
-			}
-			r.logError(fmt.Sprintf(
-				"files applied (%d change(s)); %s: %s%s",
-				len(result.Changed), failedLayer, registryError, applied))
-
-		case "stash allocation":
-			// Nothing ran at all, so the default arm's "registries failed
-			// ... rolled back" would blame the wrong layer and report a
-			// rollback of ops that were never attempted.
-			r.logError(fmt.Sprintf(
-				"files applied (%d change(s)); could not allocate a stash directory for %d pending registry op(s): %s",
-				len(result.Changed), len(registryOps), registryError))
-
-		default:
-			// Only claim a rollback that happened: a registry apply can fail
-			// with RolledBack=false and leave real ops in effect (see
-			// regapply.ApplyPlan), and saying "rolled back" would report
-			// live registries as untouched when they are not.
-			outcome := "and were rolled back"
-			if !registryRolledBack {
-				outcome = "and could NOT be fully rolled back"
-			}
-			layer := failedLayer
-			if layer == "" {
-				layer = "registries"
-			}
-			// Earlier layers are NOT undone by the failing layer's
-			// inverse-replay; they stay applied, in their stash files for
-			// the Rollback button.
-			applied := ""
-			if registryAppliedCount > 0 {
-				applied = fmt.Sprintf("; %d earlier registry change(s) stayed applied", registryAppliedCount)
-			}
-			r.logError(fmt.Sprintf(
-				"files applied (%d change(s)); %s failed %s: %s%s",
-				len(result.Changed), layer, outcome, registryError, applied))
-		}
+		r.logError(acc.failureEvent(len(result.Changed), len(registryOps)))
 	case len(registryOps) > 0:
 		msg := fmt.Sprintf("applied %d file change(s) and %d registry change(s)", len(result.Changed), registryAppliedCount)
 		if len(registrySkipped) > 0 {
@@ -2377,31 +2458,200 @@ func joinNaturally(parts []string) string {
 	}
 }
 
+// The registry layers by the name the event log gives them.
+const (
+	layerStash        = "stash allocation"
+	layerRegistries   = "registries"
+	layerDevices      = "devices"
+	layerEntities     = "entities"
+	layerDashboards   = "dashboards"
+	layerAddons       = "add-on options"
+	layerHacs         = "hacs"
+	layerIntegrations = "integrations"
+	layerSubentries   = "subentries"
+)
+
+// layerDeps is what each layer waits on: it runs only when none of these
+// failed or was itself held back this apply. Everything else is
+// independent - a layer's ops were planned against live state as it stood
+// BEFORE the apply, so another layer failing (and rolling back) leaves
+// them as valid as they were.
+//
+// The dependencies that remain are the ones where a failure can leave live
+// state the plan did not expect: devices and entities point at areas and
+// labels a failed, not fully rolled back registries layer may have deleted,
+// and an entity's area can follow its device's. An integration can need
+// the custom component HACS was about to download, and a subentry the
+// config entry an integration op was about to change.
+var layerDeps = map[string][]string{
+	layerDevices:      {layerRegistries},
+	layerEntities:     {layerRegistries, layerDevices},
+	layerIntegrations: {layerHacs},
+	layerSubentries:   {layerIntegrations},
+}
+
+// layerWaitsOnAll are the layers that run only when every layer before
+// them applied. A subentry CREATE is recorded nowhere but the StateSave at
+// the end of the apply, and an unrecorded one comes back as a duplicate
+// this agent can never delete - so a failure that may mean /data is full
+// (every stash-writing layer fails first on a full disk) holds it back,
+// whichever layer it was.
+var layerWaitsOnAll = map[string]bool{layerSubentries: true}
+
+// layerFailure is one layer's failed RegistryApplyResult.
+type layerFailure struct {
+	layer string
+	err   string
+	// rolledBack mirrors the layer's own RegistryApplyResult.RolledBack -
+	// never assumed.
+	rolledBack bool
+}
+
+// heldLayer is a layer with ops that did not run because a layer it
+// depends on failed (or was itself held).
+type heldLayer struct {
+	layer, waitsOn string
+}
+
 // registryApplyOutcome is the running result of the registry layers
-// ApplyNow sequences after the file layer. Each layer folds its own
-// RegistryApplyResult in, and every layer after the first runs only while
-// registryError is still empty.
+// ApplyNow runs after the file layer. Each layer folds its own
+// RegistryApplyResult in; run decides whether a layer gets to run.
 type registryApplyOutcome struct {
-	// registryError is the first layer failure, the one that stopped every
-	// layer after it from running.
-	registryError string
-	// failedLayer names which of the seven layers produced registryError,
-	// so the event log need not blame "registries" for all of them.
-	failedLayer string
+	// failures are the layers that failed, in the order they ran.
+	failures []layerFailure
+	// held are the layers skipped for a failed dependency.
+	held []heldLayer
+	// stopAll is set by a failure that stops every layer (stash
+	// allocation) rather than only its dependents.
+	stopAll bool
 	// registryAppliedCount counts the ops that actually ran, across every
 	// layer that got as far as running any.
 	registryAppliedCount int
-	// registryRolledBack mirrors the failing layer's own
-	// RegistryApplyResult.RolledBack - never assumed.
-	registryRolledBack bool
 	// registrySkipped collects kind == "error" ops from a *successful*
 	// apply: never executed, but must stay visible to the user.
 	registrySkipped []registries.RegOp
 	// appliedIdentities accumulates the "<kind> <rtype>:<key>" labels of
 	// every op reported as executed and still in effect, OK layer or not
 	// (see RegistryApplyResult.Applied). ApplyNow rebuilds pendingRegistry
-	// from the ops missing here.
+	// from the ops missing here, which covers held layers too.
 	appliedIdentities []string
+}
+
+// fail records a layer's failure. A stash allocation failure stops every
+// layer after it.
+func (acc *registryApplyOutcome) fail(layer, err string, rolledBack bool) {
+	acc.failures = append(acc.failures, layerFailure{layer: layer, err: err, rolledBack: rolledBack})
+	if layer == layerStash {
+		acc.stopAll = true
+	}
+}
+
+// notOK reports whether layer failed or was held this apply.
+func (acc *registryApplyOutcome) notOK(layer string) bool {
+	for _, f := range acc.failures {
+		if f.layer == layer {
+			return true
+		}
+	}
+	for _, h := range acc.held {
+		if h.layer == layer {
+			return true
+		}
+	}
+	return false
+}
+
+// run calls apply for a layer with ops, unless a stash failure stopped
+// everything or one of the layer's dependencies failed or was held, in
+// which case the layer is recorded as held and its ops stay pending.
+func (acc *registryApplyOutcome) run(layer string, ops []registries.RegOp, apply func()) {
+	if len(ops) == 0 || acc.stopAll {
+		return
+	}
+	if layerWaitsOnAll[layer] && len(acc.failures) > 0 {
+		acc.held = append(acc.held, heldLayer{layer: layer, waitsOn: acc.failures[0].layer})
+		return
+	}
+	for _, dep := range layerDeps[layer] {
+		if acc.notOK(dep) {
+			acc.held = append(acc.held, heldLayer{layer: layer, waitsOn: dep})
+			return
+		}
+	}
+	apply()
+}
+
+// errorText is the apply's registry error for the Result, lastError and
+// the held-plan reason: the failing layer's own error when one failed,
+// each prefixed by its layer when several did. "" when none failed.
+func (acc *registryApplyOutcome) errorText() string {
+	switch len(acc.failures) {
+	case 0:
+		return ""
+	case 1:
+		return acc.failures[0].err
+	}
+	parts := make([]string, len(acc.failures))
+	for i, f := range acc.failures {
+		parts[i] = f.layer + ": " + f.err
+	}
+	return strings.Join(parts, "; ")
+}
+
+// allRolledBack reports whether every failed layer rolled itself back.
+// False with no failures, like RegistryApplyResult.RolledBack.
+func (acc *registryApplyOutcome) allRolledBack() bool {
+	if len(acc.failures) == 0 {
+		return false
+	}
+	for _, f := range acc.failures {
+		if !f.rolledBack {
+			return false
+		}
+	}
+	return true
+}
+
+// failureEvent is the activity-log line for an apply where a registry
+// layer failed: each failure phrased for its layer, the layers held back
+// for it, and how many registry changes are live regardless.
+func (acc *registryApplyOutcome) failureEvent(files, planned int) string {
+	parts := make([]string, 0, len(acc.failures)+len(acc.held))
+	for _, f := range acc.failures {
+		switch f.layer {
+		case layerIntegrations, layerSubentries, layerHacs:
+			// The per-op-isolated layers: each item applies independently,
+			// and none has a rollback to report - integrations and
+			// subentries cannot read back what they would need, HACS has
+			// no uninstall. Only what failed.
+			parts = append(parts, fmt.Sprintf("%s: %s", f.layer, f.err))
+		case layerStash:
+			// Nothing ran at all, so "registries failed ... rolled back"
+			// would blame the wrong layer and report a rollback of ops
+			// that were never attempted.
+			parts = append(parts, fmt.Sprintf(
+				"could not allocate a stash directory for %d pending registry op(s): %s", planned, f.err))
+		default:
+			// Only claim a rollback that happened: a layer can fail with
+			// RolledBack=false and leave real ops in effect (see
+			// regapply.ApplyPlan).
+			outcome := "and were rolled back"
+			if !f.rolledBack {
+				outcome = "and could NOT be fully rolled back"
+			}
+			parts = append(parts, fmt.Sprintf("%s failed %s: %s", f.layer, outcome, f.err))
+		}
+	}
+	for _, h := range acc.held {
+		parts = append(parts, fmt.Sprintf("%s not applied (waits on %s)", h.layer, h.waitsOn))
+	}
+	msg := fmt.Sprintf("files applied (%d change(s)); %s", files, strings.Join(parts, "; "))
+	// A failing layer's inverse-replay undoes only its own ops; every other
+	// layer's stay applied, in their stash files for the Rollback button.
+	if acc.registryAppliedCount > 0 {
+		msg += fmt.Sprintf("; %d registry change(s) stayed applied", acc.registryAppliedCount)
+	}
+	return msg
 }
 
 // needsStashDir is whether this plan is worth a stash directory, which
@@ -2427,6 +2677,7 @@ func needsStashDir(registryOps []registries.RegOp) bool {
 // signature is where a caller silently swaps two.
 type layerOps struct {
 	registry    []registries.RegOp
+	device      []registries.RegOp
 	entity      []registries.RegOp
 	dashboard   []registries.RegOp
 	addon       []registries.RegOp
@@ -2442,9 +2693,13 @@ func splitRegistryOpsByLayer(registryOps []registries.RegOp) layerOps {
 	var layers layerOps
 	for _, op := range registryOps {
 		switch op.RType {
+		case rtypeDevice:
+			layers.device = append(layers.device, op)
 		case "entity":
 			layers.entity = append(layers.entity, op)
-		case "dashboard":
+		case "dashboard", rtypeResource:
+			// Lovelace resources ride the dashboard layer: the same
+			// manifest, toggle, managed map and applier call.
 			layers.dashboard = append(layers.dashboard, op)
 		case "addon":
 			layers.addon = append(layers.addon, op)
@@ -2474,9 +2729,24 @@ func (r *Reconciler) applyRegistryLayer(
 		acc.registryAppliedCount += len(regResult.Applied)
 		acc.registrySkipped = append(acc.registrySkipped, regResult.SkippedErrors...)
 	} else {
-		acc.registryError = regResult.Error
-		acc.registryRolledBack = regResult.RolledBack
-		acc.failedLayer = "registries"
+		acc.fail(layerRegistries, regResult.Error, regResult.RolledBack)
+	}
+}
+
+// applyDeviceLayer executes the device registry ops of the pending plan
+// and folds what happened into acc. state.DeviceOriginals is mutated in
+// place by ApplyDevicePlan; ApplyNow persists it.
+func (r *Reconciler) applyDeviceLayer(
+	ctx context.Context, deviceOnlyOps []registries.RegOp,
+	state *applier.State, finalStashDir string, acc *registryApplyOutcome,
+) {
+	devResult := r.registryApplier.ApplyDevicePlan(ctx, deviceOnlyOps, state.DeviceOriginals, finalStashDir)
+	acc.appliedIdentities = append(acc.appliedIdentities, devResult.Applied...)
+	if devResult.OK {
+		acc.registryAppliedCount += len(devResult.Applied)
+		acc.registrySkipped = append(acc.registrySkipped, devResult.SkippedErrors...)
+	} else {
+		acc.fail(layerDevices, devResult.Error, devResult.RolledBack)
 	}
 }
 
@@ -2493,9 +2763,7 @@ func (r *Reconciler) applyEntityLayer(
 		acc.registryAppliedCount += len(entResult.Applied)
 		acc.registrySkipped = append(acc.registrySkipped, entResult.SkippedErrors...)
 	} else {
-		acc.registryError = entResult.Error
-		acc.registryRolledBack = entResult.RolledBack
-		acc.failedLayer = "entities"
+		acc.fail(layerEntities, entResult.Error, entResult.RolledBack)
 	}
 }
 
@@ -2512,9 +2780,7 @@ func (r *Reconciler) applyDashboardLayer(
 		acc.registryAppliedCount += len(dashResult.Applied)
 		acc.registrySkipped = append(acc.registrySkipped, dashResult.SkippedErrors...)
 	} else {
-		acc.registryError = dashResult.Error
-		acc.registryRolledBack = dashResult.RolledBack
-		acc.failedLayer = "dashboards"
+		acc.fail(layerDashboards, dashResult.Error, dashResult.RolledBack)
 	}
 }
 
@@ -2533,9 +2799,7 @@ func (r *Reconciler) applyAddonLayer(
 		acc.registryAppliedCount += len(addonResult.Applied)
 		acc.registrySkipped = append(acc.registrySkipped, addonResult.SkippedErrors...)
 	} else {
-		acc.registryError = addonResult.Error
-		acc.registryRolledBack = addonResult.RolledBack
-		acc.failedLayer = "add-on options"
+		acc.fail(layerAddons, addonResult.Error, addonResult.RolledBack)
 	}
 }
 
@@ -2556,9 +2820,7 @@ func (r *Reconciler) applyIntegrationLayer(
 	acc.registrySkipped = append(acc.registrySkipped, flowResult.SkippedErrors...)
 	acc.appliedIdentities = append(acc.appliedIdentities, flowResult.Applied...)
 	if !flowResult.OK {
-		acc.registryError = flowResult.Error
-		acc.registryRolledBack = flowResult.RolledBack
-		acc.failedLayer = "integrations"
+		acc.fail(layerIntegrations, flowResult.Error, flowResult.RolledBack)
 	}
 }
 
@@ -2578,9 +2840,7 @@ func (r *Reconciler) applyHacsLayer(
 	acc.registrySkipped = append(acc.registrySkipped, hacsResult.SkippedErrors...)
 	acc.appliedIdentities = append(acc.appliedIdentities, hacsResult.Applied...)
 	if !hacsResult.OK {
-		acc.registryError = hacsResult.Error
-		acc.registryRolledBack = hacsResult.RolledBack
-		acc.failedLayer = "hacs"
+		acc.fail(layerHacs, hacsResult.Error, hacsResult.RolledBack)
 	}
 }
 
@@ -2600,9 +2860,7 @@ func (r *Reconciler) applySubentryLayer(
 	acc.registrySkipped = append(acc.registrySkipped, subResult.SkippedErrors...)
 	acc.appliedIdentities = append(acc.appliedIdentities, subResult.Applied...)
 	if !subResult.OK {
-		acc.registryError = subResult.Error
-		acc.registryRolledBack = subResult.RolledBack
-		acc.failedLayer = "subentries"
+		acc.fail(layerSubentries, subResult.Error, subResult.RolledBack)
 	}
 }
 
@@ -2682,7 +2940,8 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 			regState := r.applier.StateLoad()
 			if hasRegistryStash {
 				regResult := r.registryApplier.RollbackRegistry(
-					ctx, stashDir, regState.RegistryManaged, regState.EntityOriginals, regState.DashboardManaged)
+					ctx, stashDir, regState.RegistryManaged, regState.EntityOriginals, regState.DashboardManaged,
+					regState.DeviceOriginals)
 				registryRolledBack = regResult.OK
 				registryError = regResult.Error
 			}
@@ -2745,6 +3004,7 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 			r.lastStashSummary = ""
 		})
 		r.logEvent("rollback complete")
+		r.withMu(func() { r.lastRollbackAt = time.Now() })
 		// Nothing about the repository changed, so the next check would
 		// plan the rolled-back commit again and the timer would re-apply it
 		// (or, with capture on, push the restored files over it as live
@@ -2842,7 +3102,11 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 		return
 	}
 	defer r.opLock.Unlock()
+	r.cycleLocked(ctx)
+}
 
+// cycleLocked is runCycle's body, for callers already holding opLock.
+func (r *Reconciler) cycleLocked(ctx context.Context) {
 	changes := r.reconcileNow(ctx)
 
 	r.mu.Lock()
@@ -2860,6 +3124,16 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 	// A shutdown that arrived during the reconcile: the apply below would
 	// run detached and hold the process past its stop timeout.
 	if ctx.Err() != nil {
+		return
+	}
+
+	// The fetch failed and was ridden out (deferFetchFailure): the plan
+	// still held is the last good cycle's, which that cycle already had
+	// its chance to apply. Nothing new is known until the forge answers.
+	r.mu.Lock()
+	outage := !r.fetchFailingSince.IsZero()
+	r.mu.Unlock()
+	if outage {
 		return
 	}
 
@@ -2892,13 +3166,41 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 	}
 }
 
-// SyncNow runs one full cycle immediately - reconcile, then apply when
-// dry_run is off and nothing holds it back (a pause, a held plan) - exactly
-// what the timer runs. The webhook's entry point: a push should land as
-// soon as it is announced, not up to an interval later. Refused silently
-// while another operation runs, like the timer.
-func (r *Reconciler) SyncNow(ctx context.Context) {
-	r.runCycle(ctx)
+// SyncNow runs one full cycle - reconcile, then apply when dry_run is off
+// and nothing holds it back (a pause, a held plan) - exactly what the timer
+// runs. The webhook's entry point: a push should land as soon as it is
+// announced, not up to an interval later.
+//
+// Unlike the timer it WAITS for an operation already running rather than
+// giving up: a push announced while a cycle is past its fetch would
+// otherwise sit unseen until the next interval. The webhook runs it from a
+// single worker, so at most one caller ever waits here. Returns without a
+// cycle once ctx is done, before or after the wait.
+//
+// Also without one when a Roll Back completed after acceptedAt, when the
+// delivery that asked for this cycle arrived - whether the rollback ran
+// during this wait or while the delivery sat in the webhook's queue. A
+// rollback pauses and asks for the repository to be fixed first, and a
+// paused cycle still captures with capture_live_changes on: run straight
+// after it, this one would push the files just restored over the commit
+// that was rolled back, before anybody had the chance to do anything. A
+// zero acceptedAt skips the check.
+func (r *Reconciler) SyncNow(ctx context.Context, acceptedAt time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
+	r.opLock.Lock()
+	defer r.opLock.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	var rolledBack bool
+	r.withMu(func() { rolledBack = !acceptedAt.IsZero() && r.lastRollbackAt.After(acceptedAt) })
+	if rolledBack {
+		r.logEvent("webhook cycle dropped: a Roll Back finished while it waited - push or press Check Now once the repository is fixed")
+		return
+	}
+	r.cycleLocked(ctx)
 }
 
 // RunLoop runs tick every opts.IntervalMinutes until ctx is done. Ticks

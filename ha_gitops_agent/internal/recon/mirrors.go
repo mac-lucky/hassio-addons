@@ -78,8 +78,9 @@ func (r *Reconciler) refreshStateMirrors(state applier.State) {
 // SECRET BOUNDARY, and why this is written group by group rather than
 // ranging over state generically: it takes keys and paths, nothing else.
 // IntegrationData (declared flow data verbatim, credentials included),
-// EntityOriginals/AddonOriginals and the hash fields sit beside those keys
-// and must never cross - everything returned here reaches /status.json.
+// EntityOriginals/DeviceOriginals/AddonOriginals and the hash fields sit
+// beside those keys and must never cross - everything returned here
+// reaches /status.json.
 func managedInventory(state applier.State) ManagedInventory {
 	// A sorted copy: the caller's slice is on its way back into state.json.
 	files := append([]string{}, state.Manifest...)
@@ -88,14 +89,29 @@ func managedInventory(state applier.State) ManagedInventory {
 	return ManagedInventory{
 		Files: files,
 		// Whole keys, prefix and all - see ManagedInventory.Registry.
-		Registry:     managedNames(state.RegistryManaged, ""),
-		Entities:     managedNames(state.EntityOriginals, "entity:"),
-		Dashboards:   managedNames(state.DashboardManaged, "dashboard:"),
+		Registry: managedNames(state.RegistryManaged, ""),
+		Entities: managedNames(state.EntityOriginals, "entity:"),
+		Devices:  managedNames(state.DeviceOriginals, rtypeDevice+":"),
+		// One map, two groups: only the keys carrying each prefix.
+		Dashboards:   managedNames(onlyPrefixed(state.DashboardManaged, "dashboard:"), "dashboard:"),
+		Resources:    managedNames(onlyPrefixed(state.DashboardManaged, rtypeResource+":"), rtypeResource+":"),
 		Addons:       managedNames(state.AddonOriginals, "addon:"),
 		Integrations: managedNames(state.IntegrationManaged, "integration:"),
 		Subentries:   managedNames(state.SubentryManaged, "subentry:"),
 		Hacs:         managedNames(state.HacsManaged, rtypeHacs+":"),
 	}
+}
+
+// onlyPrefixed is the entries of m whose key starts with prefix, for a map
+// two groups share.
+func onlyPrefixed(m map[string]string, prefix string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // managedNames is one ownership map's keys with prefix stripped, sorted.
@@ -119,6 +135,14 @@ const (
 	rtypeIntegration = "integration"
 	rtypeSubentry    = "subentry"
 	rtypeHacs        = "hacs"
+)
+
+// The RTypes of the device and Lovelace resource ops, which
+// splitRegistryOpsByLayer must route by name: any RType it does not know
+// is run as a helper domain.
+const (
+	rtypeDevice   = "device"
+	rtypeResource = "resource"
 )
 
 // appendBlockedItems turns one layer's attempts map into BlockedItems.

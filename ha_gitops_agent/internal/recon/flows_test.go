@@ -328,7 +328,9 @@ func TestApplyNowEventLogUsesIndependentWordingForIntegrationsFailure(t *testing
 	}
 }
 
-func TestApplyNowIntegrationsNeverRunWhenAddonApplyItselfFails(t *testing.T) {
+// Integrations wait on HACS only; a failed add-on option is not their
+// business.
+func TestApplyNowIntegrationsStillRunWhenAddonApplyFails(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.addonOpts.desired = addonopts.Desired{
 		Addons: []map[string]any{{"slug": "x", "options": map[string]any{"a": 1}, "restart_on_change": true}},
@@ -350,8 +352,8 @@ func TestApplyNowIntegrationsNeverRunWhenAddonApplyItselfFails(t *testing.T) {
 
 	r.ApplyNow(context.Background(), true)
 
-	if len(fakes.registryApplier.applyFlowPlanCalls) != 0 {
-		t.Errorf("apply_flow_plan_calls = %+v, want none", fakes.registryApplier.applyFlowPlanCalls)
+	if len(fakes.registryApplier.applyFlowPlanCalls) != 1 {
+		t.Errorf("apply_flow_plan_calls = %+v, want one", fakes.registryApplier.applyFlowPlanCalls)
 	}
 }
 

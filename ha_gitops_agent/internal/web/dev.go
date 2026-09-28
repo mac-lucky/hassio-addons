@@ -92,6 +92,27 @@ var devStatuses = map[string]recon.Status{
 	"health":         devHealthStatus(),
 	"managed":        devManagedStatus(),
 	"paused":         devPausedStatus(),
+	"forge_outage":   devForgeOutageStatus(),
+}
+
+// devForgeOutageStatus is a pending plan held through a short forge
+// outage: the "Git host unreachable" notice over the plan the last good
+// fetch left, which carries a device and a Lovelace resource op too.
+func devForgeOutageStatus() recon.Status {
+	status := devDriftStatus(false)
+	status.FetchFailingSince = "2026-08-02T05:34:31+00:00"
+	status.PendingRegistry = append(append([]recon.PendingRegOp(nil), status.PendingRegistry...),
+		recon.PendingRegOp{
+			RType: "device", Key: "kitchen_strip", Kind: "update",
+			DiffText: "--- live/device/f66eece92f36df1e909d27f0d866b1b7\n+++ manifest/device/kitchen_strip\n-name_by_user: null\n+name_by_user: 'Kitchen LED strip'\n",
+		},
+		recon.PendingRegOp{
+			RType: "resource", Key: "bubble_card", Kind: "create",
+			DiffText: "+type: 'module'\n+url: '/hacsfiles/Bubble-Card/bubble-card.js'\n",
+		},
+	)
+	status.PendingCount += 2
+	return status
 }
 
 // devUnseededStatus is a repository whose tracked branch does not exist
@@ -160,7 +181,9 @@ func devManagedStatus() recon.Status {
 			"sensor.outdoor_temp",
 			"switch.old_garage_heater",
 		},
+		Devices:      []string{"f66eece92f36df1e909d27f0d866b1b7"},
 		Dashboards:   []string{"energy", "gitops_home"},
+		Resources:    []string{"bubble_card", "card_mod"},
 		Addons:       []string{"core_configurator", "core_ssh"},
 		Integrations: []string{"moon_home", "workday_main"},
 		Subentries:   []string{"widget_hall", "widget_kitchen"},

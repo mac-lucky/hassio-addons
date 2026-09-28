@@ -25,12 +25,14 @@ import (
 // assigns this time. Never panics; returns OK=false when the stash is
 // missing, unreadable or corrupt.
 //
-// originals (state.EntityOriginals) and dashboardManaged
-// (state.DashboardManaged) are mutated in place like managed, for the
-// entity and dashboard entries the same stash can hold.
+// originals (state.EntityOriginals), dashboardManaged
+// (state.DashboardManaged) and deviceOriginals (state.DeviceOriginals) are
+// mutated in place like managed, for the entity, dashboard and device
+// entries the same stash can hold.
 func RollbackRegistry(
 	ctx context.Context, dialer Dialer, stashDir string,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
+	deviceOriginals map[string]map[string]any,
 ) (result RegistryApplyResult) {
 	defer recoverToResult(&result, "regapply: rollback_registry")
 
@@ -52,7 +54,7 @@ func RollbackRegistry(
 	}
 	defer ws.Close()
 
-	rolledBack, errMsg := inverseReplayAndPersist(ctx, ws, dialer, executed, managed, originals, dashboardManaged, stashDir, nil)
+	rolledBack, errMsg := inverseReplayAndPersist(ctx, ws, dialer, executed, managed, originals, dashboardManaged, deviceOriginals, stashDir, nil)
 	if errMsg != "" {
 		slog.Warn("regapply: rollback_registry", "error", errMsg)
 	} else {
@@ -125,7 +127,7 @@ func loadRegistryStashOps(raw any) []stashEntry {
 func inverseReplayAndPersist(
 	ctx context.Context, ws WSClient, dialer Dialer, executed []stashEntry,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
-	stashDir string, prefix []stashEntry,
+	deviceOriginals map[string]map[string]any, stashDir string, prefix []stashEntry,
 ) (rolledBack bool, errMsg string) {
 	outstanding := make([]int, len(executed))
 	for i := range executed {
@@ -168,7 +170,7 @@ func inverseReplayAndPersist(
 			ownsConn = true
 		}
 
-		invertErr := invertOne(ctx, conn, entry, managed, originals, dashboardManaged)
+		invertErr := invertOne(ctx, conn, entry, managed, originals, dashboardManaged, deviceOriginals)
 		if invertErr == nil {
 			continue
 		}
@@ -262,12 +264,28 @@ var serverGeneratedFields = map[string]bool{"created_at": true, "modified_at": t
 func invertOne(
 	ctx context.Context, ws WSClient, entry stashEntry,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
+	deviceOriginals map[string]map[string]any,
 ) error {
 	if entry.RType == "entity" {
 		return invertEntityOp(ctx, ws, entry, originals)
 	}
 	if entry.RType == "dashboard" {
 		return invertDashboardOp(ctx, ws, entry, dashboardManaged)
+	}
+	if entry.RType == "device" {
+		return invertDeviceOp(ctx, ws, entry, deviceOriginals)
+	}
+	if entry.RType == "resource" {
+		return invertResourceOp(ctx, ws, entry, dashboardManaged)
+	}
+
+	// Everything below is the floor/area/label/helper path, which builds
+	// "<rtype>/<action>" commands and writes managed. An rtype it does not
+	// know - a stash a newer version wrote, then rolled back by this one -
+	// must fail here rather than send a command that does not exist or,
+	// for a forget, leave a key in managed nothing will ever remove.
+	if !registries.IsRegistryRType(entry.RType) && !registries.IsSupportedHelperDomain(entry.RType) {
+		return fmt.Errorf("unknown stash entry type %q (written by a newer version?); not undone", entry.RType)
 	}
 
 	fullKey := entry.RType + ":" + entry.Key
@@ -374,8 +392,9 @@ type stashOpOnDisk struct {
 	LiveID        string         `json:"live_id"`
 	LiveObject    map[string]any `json:"live_object"`
 	ForwardParams map[string]any `json:"forward_params"`
-	// entity-only; zero-valued for every other rtype, none of which touch
-	// state.EntityOriginals.
+	// Entities and devices only (state.EntityOriginals / DeviceOriginals);
+	// zero-valued for every other rtype. The "entity_" in the JSON names
+	// predates devices and stays, since a newer binary reads older stashes.
 	EntityOriginalsExisted  bool           `json:"entity_originals_existed,omitempty"`
 	EntityOriginalsSnapshot map[string]any `json:"entity_originals_snapshot,omitempty"`
 	// See stashEntry.Adopted; omitted when false so an old stash and a

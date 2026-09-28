@@ -92,7 +92,7 @@ func applyEntityPlanInner(
 				replayConn = nil
 			}
 			rolledBack, undoErr := inverseReplayAndPersist(
-				ctx, replayConn, dialer, executed, map[string]string{}, originals, nil, stashDir, preExisting)
+				ctx, replayConn, dialer, executed, map[string]string{}, originals, nil, nil, stashDir, preExisting)
 			errMsg := fmt.Sprintf("%s entity:%s failed: %v", op.Kind, op.Key, execErr)
 			if undoErr != "" {
 				errMsg = fmt.Sprintf("%s; rollback also incomplete: %s", errMsg, undoErr)

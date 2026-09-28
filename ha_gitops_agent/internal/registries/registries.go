@@ -30,7 +30,12 @@ import (
 var idPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // SupportedHelperDomains are the helper domains gitops/helpers.yaml may
-// declare; anything else at its top level is a validation error.
+// declare; anything else at its top level is a validation error. zone and
+// person are not helpers to Home Assistant, but they are the same kind of
+// storage collection (<domain>/list|create|update|delete) and go through
+// the same path, with two differences: their update merges into the stored
+// item rather than replacing it (see validateZones), and person/list is not
+// a list (see PersonYAMLBucket).
 var SupportedHelperDomains = []string{
 	"input_boolean",
 	"input_number",
@@ -39,7 +44,16 @@ var SupportedHelperDomains = []string{
 	"input_datetime",
 	"counter",
 	"timer",
+	"zone",
+	"person",
 }
+
+// PersonYAMLBucket is the key regapply.FetchLive stores the persons defined in
+// configuration.yaml under, next to live["person"]'s storage ones. Not an
+// rtype: nothing plans against it except the name check in
+// refuseYAMLPersonCreates, since those persons cannot be changed over the
+// WS API.
+const PersonYAMLBucket = "person_yaml"
 
 var supportedHelperDomainSet = func() map[string]bool {
 	m := make(map[string]bool, len(SupportedHelperDomains))
@@ -59,6 +73,7 @@ var helperBoolFields = map[string][]string{
 	"input_datetime": {"has_date", "has_time"},
 	"counter":        {"restore"},
 	"timer":          {"restore"},
+	"zone":           {"passive"},
 }
 
 // RegistryRTypes are the rtypes with their own config/<rtype>_registry/*
@@ -372,6 +387,12 @@ func validateHelpers(raw map[string]any, errs *[]string) map[string][]map[string
 		helpers[domain] = validateItems(raw, domain, domain, "helpers.yaml", errs)
 		validateHelperBools(domain, helpers[domain], errs)
 		validateHelperNulls(domain, helpers[domain], errs)
+		switch domain {
+		case "zone":
+			validateZones(helpers[domain], errs)
+		case "person":
+			validatePersons(helpers[domain], errs)
+		}
 	}
 	return helpers
 }
@@ -380,13 +401,145 @@ func validateHelpers(raw map[string]any, errs *[]string) map[string][]map[string
 // fills with a default when they are absent. A declared null removes a
 // field from the update (see regapply's helper baseline), so for these HA
 // stores the default instead, the next plan compares nil with it, and the
-// item is re-applied - backup and all - on every cycle.
+// item is re-applied - backup and all - on every cycle. person's update
+// schema defaults device_trackers to [] even though its update merges, so
+// a null there would unlink every tracker as well.
 var helperDefaultedFields = map[string][]string{
 	"counter":        {"initial", "restore", "step"},
 	"timer":          {"duration", "restore"},
 	"input_datetime": {"has_date", "has_time"},
 	"input_number":   {"step", "mode"},
 	"input_text":     {"min", "max", "mode"},
+	"zone":           {"radius", "passive"},
+	"person":         {"device_trackers"},
+}
+
+// validateZones checks what the zone schema needs and what would otherwise
+// never converge: a real number for latitude, longitude and radius (a
+// quoted one is coerced to float by HA and then never equals the
+// manifest's text), and no null anywhere.
+//
+// Null is refused on every field, not just helperDefaultedFields, because
+// a zone update is merged into the stored zone ({**item, **update_data})
+// instead of replacing it: the null is left out of the update, the stored
+// value stays, and the zone is re-applied every cycle. name is checked by
+// validateItems and radius/passive by validateHelperNulls, so they are
+// skipped here to report each problem once.
+//
+// Only storage zones can be managed: zone.home and the zones in
+// configuration.yaml are not in zone/list, so they are never adopted and a
+// declared zone with the same name is created next to them.
+func validateZones(items []map[string]any, errs *[]string) {
+	coordinates := []struct {
+		field string
+		limit float64
+	}{{"latitude", 90}, {"longitude", 180}}
+
+	for _, item := range items {
+		itemID, _ := item["id"].(string)
+
+		for _, field := range difftext.SortedKeys(item) {
+			if item[field] != nil || field == "name" || slices.Contains(helperDefaultedFields["zone"], field) {
+				continue
+			}
+			*errs = append(*errs, fmt.Sprintf(
+				"helpers.yaml: zone '%s' field '%s' cannot be null - a zone update is merged into the stored zone, "+
+					"so a null could never clear it and the zone would be re-applied every cycle; "+
+					"omit the field (a set value can only be cleared in the Home Assistant UI)", itemID, field))
+		}
+
+		for _, c := range coordinates {
+			v, present := item[c.field]
+			if !present {
+				*errs = append(*errs, fmt.Sprintf("helpers.yaml: zone '%s' is missing required field '%s'", itemID, c.field))
+				continue
+			}
+			if v == nil {
+				continue
+			}
+			if f, isNum := asFloat(v); !isNum || math.IsNaN(f) || f < -c.limit || f > c.limit {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: zone '%s' field '%s' must be a number between %g and %g (a quoted number reads as text)",
+					itemID, c.field, -c.limit, c.limit))
+			}
+		}
+
+		if v, present := item["radius"]; present && v != nil {
+			if f, isNum := asFloat(v); !isNum || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: zone '%s' field 'radius' must be a positive number of meters (a quoted number reads as text)", itemID))
+			}
+		}
+	}
+}
+
+// personFields are the only fields a person may declare besides id.
+var personFields = map[string]bool{"name": true, "device_trackers": true}
+
+// personUnportableFields are person fields that exist in HA but whose
+// values only mean something on the install they came from. They are
+// refused rather than passed through: set them in the UI, and the update's
+// full baseline (see regapply's helper baseline) resends whatever is set
+// there, so a managed person keeps it.
+var personUnportableFields = map[string]string{
+	"user_id": "a user id is a random id Home Assistant's auth system generates for each install; " +
+		"link the user to the person in the Home Assistant UI",
+	"picture": "a picture is the URL of an image uploaded to this install; set it in the Home Assistant UI",
+}
+
+// deviceTrackerIDPattern is a device_tracker entity id as cv.entity_id
+// accepts it after lowercasing: a mixed-case one would be stored lowercased
+// and never equal the manifest again.
+var deviceTrackerIDPattern = regexp.MustCompile(`^device_tracker\.[a-z0-9_]+$`)
+
+// validatePersons checks a person declares only name and device_trackers
+// (see personFields and personUnportableFields), and that device_trackers
+// is a list of device_tracker entity ids. A bare string is refused: HA's
+// cv.ensure_list would store it as a one-element list that never equals
+// the manifest's string. Nulls need no check here: name is validateItems',
+// device_trackers validateHelperNulls', and anything else is refused by
+// name already.
+func validatePersons(items []map[string]any, errs *[]string) {
+	for _, item := range items {
+		itemID, _ := item["id"].(string)
+
+		var unsupported []string
+		for _, field := range difftext.SortedKeys(item) {
+			if field == "id" || personFields[field] {
+				continue
+			}
+			if why, unportable := personUnportableFields[field]; unportable {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: person '%s' field '%s' cannot be managed here - %s; the agent keeps whatever is set there",
+					itemID, field, why))
+				continue
+			}
+			unsupported = append(unsupported, field)
+		}
+		if len(unsupported) > 0 {
+			*errs = append(*errs, fmt.Sprintf(
+				"helpers.yaml: person '%s' has unsupported field(s) %s (a person takes name and device_trackers)",
+				itemID, strings.Join(unsupported, ", ")))
+		}
+
+		trackersRaw, present := item["device_trackers"]
+		if !present || trackersRaw == nil {
+			continue
+		}
+		trackers, isList := trackersRaw.([]any)
+		if !isList {
+			*errs = append(*errs, fmt.Sprintf(
+				"helpers.yaml: person '%s' field 'device_trackers' must be a list of device_tracker entity ids", itemID))
+			continue
+		}
+		for _, t := range trackers {
+			if s, isString := t.(string); !isString || !deviceTrackerIDPattern.MatchString(s) {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: person '%s' device_trackers entry %s is not a device_tracker entity id "+
+						"(device_tracker.<object_id>, lowercase)", itemID, difftext.ReprValue(t)))
+			}
+		}
+	}
 }
 
 // validateHelperNulls rejects null on a helperDefaultedFields field.
@@ -438,6 +591,9 @@ func validateHelperBools(domain string, items []map[string]any, errs *[]string) 
 //     is gone, or a declared key now holds it (the rename in rule 3), the
 //     mapping is forgotten instead: nothing is sent to Home Assistant.
 //     Objects never in managed are never touched.
+//
+// A person create where configuration.yaml already defines a person of
+// that name is an error op instead (refuseYAMLPersonCreates).
 //
 // Creates and updates come back floors, labels, areas (which reference
 // both), then helper domains alphabetically; deletes and forgets after
@@ -492,6 +648,9 @@ func Plan(desired Desired, live map[string][]map[string]any, managed map[string]
 	helperDomains := helperDomainsFor(desired, managed)
 	for _, domain := range helperDomains {
 		domainOps, domainResolved, domainHolds := planGroup(domain, desired.Helpers[domain], live[domain], managed, nil, nil)
+		if domain == "person" {
+			domainOps = refuseYAMLPersonCreates(domainOps, live[PersonYAMLBucket])
+		}
 		ops = append(ops, domainOps...)
 		mergeInto(resolved, domainResolved)
 		holds[domain] = domainHolds
@@ -732,6 +891,41 @@ func createOp(rtype, key string, params map[string]any) RegOp {
 	return RegOp{
 		Kind: KindCreate, RType: rtype, Key: key, Params: createParams, DiffText: createDiffText(rtype, key, createParams),
 	}
+}
+
+// refuseYAMLPersonCreates turns every person create whose name matches a
+// person defined in configuration.yaml (yamlPersons, live[PersonYAMLBucket])
+// into a KindError. The two share one id space, so HA would not refuse the
+// create: it would make a second person with the same name, and a YAML
+// person can never be adopted instead since the WS API cannot change it.
+// Covers the managed-but-gone recreate as well as a first create; adopting
+// a storage person of that name is left alone.
+func refuseYAMLPersonCreates(ops []RegOp, yamlPersons []map[string]any) []RegOp {
+	if len(yamlPersons) == 0 {
+		return ops
+	}
+	for i, op := range ops {
+		if op.Kind != KindCreate {
+			continue
+		}
+		name, _ := op.Params["name"].(string)
+		for _, yamlPerson := range yamlPersons {
+			yamlName, _ := yamlPerson["name"].(string)
+			if !nameMatches("person", yamlName, name) {
+				continue
+			}
+			yamlID, _ := yamlPerson["id"].(string)
+			ops[i] = RegOp{
+				Kind: KindError, RType: op.RType, Key: op.Key, Params: map[string]any{},
+				Error: fmt.Sprintf(
+					"a person named %s (id %s) is defined in configuration.yaml; creating this one would give Home Assistant "+
+						"two persons with that name - remove it from configuration.yaml or from helpers.yaml",
+					difftext.PyRepr(name), difftext.PyRepr(yamlID)),
+			}
+			break
+		}
+	}
+	return ops
 }
 
 // nameMatches is the adopt-by-name comparison. Floors, areas and labels

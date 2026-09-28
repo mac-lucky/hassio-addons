@@ -559,7 +559,7 @@ func TestRollbackRegistryInvertsDashboardCreate(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK || !result.RolledBack {
 		t.Fatalf("result = %+v", result)
@@ -587,7 +587,7 @@ func TestRollbackRegistryInvertsDashboardUpdateRestoringOnlyTouchedAxes(t *testi
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -617,7 +617,7 @@ func TestRollbackRegistryInvertsDashboardUpdateRestoringPriorContent(t *testing.
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -645,7 +645,7 @@ func TestRollbackRegistryInvertsDashboardUpdateContentNeverExistedLeavesItAlone(
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -673,7 +673,7 @@ func TestRollbackRegistryInvertsDashboardDeleteRecreatingWithContent(t *testing.
 
 	rollbackWS := newFakeWS()
 	rollbackWS.results["lovelace/dashboards/create"] = []any{map[string]any{"id": "new-id"}}
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -709,7 +709,7 @@ func TestRollbackRegistryInvertsDashboardDeleteRecreatingWithRequireAdmin(t *tes
 
 	rollbackWS := newFakeWS()
 	rollbackWS.results["lovelace/dashboards/create"] = []any{map[string]any{"id": "new-id"}}
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
@@ -740,7 +740,7 @@ func TestRollbackRegistryInvertsCombinedStashIncludingDashboardAndEntity(t *test
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, originals, dashboardManaged)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, originals, dashboardManaged, nil)
 
 	if !result.OK || !result.RolledBack {
 		t.Fatalf("result = %+v", result)
@@ -789,7 +789,7 @@ func TestApplyDashboardPlanForgetDropsTheMappingAndRollbackRestoresIt(t *testing
 	}
 
 	rollbackWS := newFakeWS()
-	rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed, nil)
 	if !rb.OK {
 		t.Fatalf("rollback result = %+v", rb)
 	}

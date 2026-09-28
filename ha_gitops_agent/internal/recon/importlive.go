@@ -123,7 +123,7 @@ func (r *Reconciler) ImportLive(ctx context.Context) (ImportSummary, error) {
 	if err != nil {
 		return ImportSummary{}, err
 	}
-	r.reconcileNow(ctx)
+	r.reconcileNowWith(ctx, false)
 	return summary, nil
 }
 

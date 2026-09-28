@@ -592,7 +592,7 @@ func TestDeletedEncryptedFileIsMaskedNotOnlySecretsYaml(t *testing.T) {
 	if strings.Contains(changes[0].DiffText, "LEAKME") {
 		t.Errorf("delete diff published the live secret:\n%s", changes[0].DiffText)
 	}
-	if !strings.Contains(changes[0].DiffText, maskMarker) && changes[0].DiffText != encryptedSummary {
+	if !strings.Contains(changes[0].DiffText, maskMarker) && changes[0].DiffText != secretSummary {
 		t.Errorf("delete diff was neither masked nor summarized:\n%s", changes[0].DiffText)
 	}
 }
@@ -655,7 +655,7 @@ func TestMaskedDiffRefusesNonYAMLBeforeClassifying(t *testing.T) {
 	before := "name=heater: kitchen\nkey=hunter2: LEAKME\n"
 	after := "name=heater: kitchen\nkey=hunter3: LEAKME\n"
 
-	got := maskedDiff([]byte(before), []byte(after), "wmbusmeters/etc/wmbusmeters.d/meter-0001")
+	got := maskedDiff([]byte(before), []byte(after), "wmbusmeters/etc/wmbusmeters.d/meter-0001", encryptedSummary)
 	if got != encryptedSummary {
 		t.Errorf("maskedDiff() = %q, want the %q summary", got, encryptedSummary)
 	}
@@ -689,6 +689,10 @@ func TestDeletedNonYAMLSecretFileIsMasked(t *testing.T) {
 			}
 			if strings.Contains(changes[0].DiffText, "LEAKME") {
 				t.Errorf("delete diff published the live secret:\n%s", changes[0].DiffText)
+			}
+			// Nothing here was ever encrypted, so the summary must not say so.
+			if changes[0].DiffText != secretSummary {
+				t.Errorf("diff_text = %q, want the %q summary", changes[0].DiffText, secretSummary)
 			}
 		})
 	}
@@ -802,5 +806,41 @@ func TestUpdateDiffMasksASecretOnlyTheLiveCopyHolds(t *testing.T) {
 	}
 	if strings.Contains(changes[0].DiffText, "hunter2") {
 		t.Errorf("update diff published the live secret:\n%s", changes[0].DiffText)
+	}
+}
+
+// A plaintext JSON or dotenv file with a secret-shaped key cannot be masked
+// line by line, so its whole diff is replaced - by a summary that does not
+// claim encryption, since there is none, perhaps not even an age key.
+func TestPlaintextSecretFileDiffIsNotCalledEncrypted(t *testing.T) {
+	cases := []struct {
+		name, path, repo, live string
+	}{
+		{
+			"json", "includes/sa.json",
+			"{\n  \"client_email\": \"a@b.example\",\n  \"private_key\": \"REPOSECRET\"\n}\n",
+			"{\n  \"client_email\": \"c@d.example\",\n  \"private_key\": \"LIVESECRET\"\n}\n",
+		},
+		{
+			"dotenv", "wmbusmeters/etc/wmbusmeters.d/meter-0001",
+			"name=heater\nkey=REPOSECRET\n",
+			"name=boiler\nkey=LIVESECRET\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repoRoot, configRoot := dirs(t)
+			write(t, repoRoot, c.path, []byte(c.repo))
+			write(t, configRoot, c.path, []byte(c.live))
+
+			changes, _, _ := Compute(repoRoot, configRoot, []string{c.path}, nil, nil)
+
+			if len(changes) != 1 || changes[0].Kind != "update" {
+				t.Fatalf("changes = %+v, want one update", changes)
+			}
+			if changes[0].DiffText != secretSummary {
+				t.Errorf("diff_text = %q, want the %q summary", changes[0].DiffText, secretSummary)
+			}
+		})
 	}
 }

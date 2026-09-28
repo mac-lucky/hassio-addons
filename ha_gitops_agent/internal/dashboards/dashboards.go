@@ -11,6 +11,14 @@
 //	    icon: mdi:view-dashboard   # optional
 //	    config: gitops/dashboards/home.yaml  # repo-relative view config; required
 //	    show_in_sidebar: true      # optional, default true
+//	resources:
+//	  - id: bubble_card            # required; a manifest key only
+//	    url: /hacsfiles/Bubble-Card/bubble-card.js
+//	    type: module               # js, css, module or html
+//
+// resources is Home Assistant's own lovelace: resources: shape, planned
+// separately by PlanResources (resources.go) and matched by URL path, not
+// by id; both lists share the dashboards toggle and state.DashboardManaged.
 //
 // Both "gitops-home" and "gitops_home" are accepted ids - see idPattern
 // for why the hyphenated spelling is the one adoption depends on.
@@ -121,14 +129,16 @@ type DashboardContent struct {
 // "id"/"title"/"config" plus "icon"/"show_in_sidebar" if declared - only
 // allowedFields' fields, never registries.yaml's pass-through model, since
 // lovelace/dashboards' schemas are fixed. Content maps each id to its
-// config file's result, present even for a failed one.
+// config file's result, present even for a failed one. Resources is the
+// validated resources: list, in manifest order.
 type Desired struct {
 	Dashboards []map[string]any
 	Content    map[string]DashboardContent
+	Resources  []Resource
 }
 
 func emptyDesired() Desired {
-	return Desired{Dashboards: []map[string]any{}, Content: map[string]DashboardContent{}}
+	return Desired{Dashboards: []map[string]any{}, Content: map[string]DashboardContent{}, Resources: []Resource{}}
 }
 
 // LoadManifest loads and validates <workdir>/gitops/dashboards.yaml, then
@@ -159,15 +169,42 @@ func LoadManifest(workdir string) (Desired, error) {
 		return Desired{}, &ManifestError{Problems: []string{"dashboards.yaml: top level must be a mapping"}}
 	}
 
-	itemsRaw, present := obj["dashboards"]
-	if !present || itemsRaw == nil {
-		return emptyDesired(), nil
+	// Either list may be absent: a manifest declaring only resources is as
+	// valid as one declaring only dashboards. Problems in both aggregate.
+	var errs []string
+	result := []map[string]any{}
+	switch itemsRaw := obj["dashboards"].(type) {
+	case nil:
+	case []any:
+		result, errs = parseDashboards(itemsRaw)
+	default:
+		errs = append(errs, "dashboards.yaml: dashboards must be a list")
 	}
-	items, ok := itemsRaw.([]any)
-	if !ok {
-		return Desired{}, &ManifestError{Problems: []string{"dashboards.yaml: dashboards must be a list"}}
+	resources, resourceErrs := parseResources(obj["resources"])
+	errs = append(errs, resourceErrs...)
+
+	if len(errs) > 0 {
+		return Desired{}, &ManifestError{Problems: errs}
 	}
 
+	content := make(map[string]DashboardContent, len(result))
+	for _, item := range result {
+		id, _ := item["id"].(string)
+		configPath, _ := item["config"].(string)
+		data, loadErr := loadContent(workdir, configPath)
+		if loadErr != nil {
+			content[id] = DashboardContent{Err: loadErr.Error()}
+			continue
+		}
+		content[id] = DashboardContent{Data: data}
+	}
+
+	return Desired{Dashboards: result, Content: content, Resources: resources}, nil
+}
+
+// parseDashboards validates the dashboards: list item by item, returning
+// the valid items in manifest order plus every problem found.
+func parseDashboards(items []any) ([]map[string]any, []string) {
 	var errs []string
 	seen := map[string]bool{}
 	result := []map[string]any{}
@@ -209,24 +246,7 @@ func LoadManifest(workdir string) (Desired, error) {
 		seen[id] = true
 		result = append(result, item)
 	}
-
-	if len(errs) > 0 {
-		return Desired{}, &ManifestError{Problems: errs}
-	}
-
-	content := make(map[string]DashboardContent, len(result))
-	for _, item := range result {
-		id, _ := item["id"].(string)
-		configPath, _ := item["config"].(string)
-		data, loadErr := loadContent(workdir, configPath)
-		if loadErr != nil {
-			content[id] = DashboardContent{Err: loadErr.Error()}
-			continue
-		}
-		content[id] = DashboardContent{Data: data}
-	}
-
-	return Desired{Dashboards: result, Content: content}, nil
+	return result, errs
 }
 
 // validateItemFields validates one item's fields besides id: title and
@@ -366,7 +386,9 @@ func normalizeViaJSON(v any) (any, error) {
 // its saved config; nil, whether as an absent key or a present nil value,
 // means nothing has ever been saved at that url_path. managed is
 // state.DashboardManaged: "dashboard:<id>" -> live id (the collection's
-// own "id" field, NOT necessarily url_path verbatim).
+// own "id" field, NOT necessarily url_path verbatim). The same map holds
+// PlanResources' "resource:<id>" entries; every lookup here is by the
+// "dashboard:" prefix, so those are never read, let alone deleted.
 //
 // Ownership mirrors registries.Plan's rules with url_path standing in for
 // "name"; HA enforces a unique url_path per dashboard, so unlike by-name

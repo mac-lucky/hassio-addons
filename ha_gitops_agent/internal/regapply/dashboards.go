@@ -33,7 +33,7 @@ func appendDashboardStashEntry(stashDir string, preExisting []stashEntry, execut
 	candidate := append(append([]stashEntry(nil), *executed...), entry)
 	toWrite := append(append([]stashEntry(nil), preExisting...), candidate...)
 	if err := writeRegistryStash(stashDir, toWrite); err != nil {
-		return &dashboardStashPersistFailure{err: fmt.Errorf("%s dashboard:%s: rollback journal write failed: %w", entry.Kind, entry.Key, err)}
+		return &dashboardStashPersistFailure{err: fmt.Errorf("%s %s:%s: rollback journal write failed: %w", entry.Kind, entry.RType, entry.Key, err)}
 	}
 	*executed = candidate
 	return nil
@@ -51,7 +51,7 @@ func replaceLastDashboardStashEntry(stashDir string, preExisting []stashEntry, e
 	candidate[len(candidate)-1] = entry
 	toWrite := append(append([]stashEntry(nil), preExisting...), candidate...)
 	if err := writeRegistryStash(stashDir, toWrite); err != nil {
-		return &dashboardStashPersistFailure{err: fmt.Errorf("%s dashboard:%s: rollback journal write failed: %w", entry.Kind, entry.Key, err)}
+		return &dashboardStashPersistFailure{err: fmt.Errorf("%s %s:%s: rollback journal write failed: %w", entry.Kind, entry.RType, entry.Key, err)}
 	}
 	*executed = candidate
 	return nil
@@ -125,8 +125,9 @@ func FetchLiveDashboards(ctx context.Context, ws WSClient, ids []string) ([]map[
 	return dashboards, content, nil
 }
 
-// ApplyDashboardPlan executes ops (from dashboards.Plan) against Lovelace
-// dashboards, over one connection dialed from dialer. A third sibling of
+// ApplyDashboardPlan executes ops (from dashboards.Plan and
+// dashboards.PlanResources) against Lovelace dashboards and resources, over
+// one connection dialed from dialer. A third sibling of
 // ApplyPlan/ApplyEntityPlan: same independent dial and fetch, same refusal
 // to undo an earlier layer, same shared registry_stash.json.
 // dashboardManaged is state.DashboardManaged, mutated in place.
@@ -178,9 +179,23 @@ func applyDashboardPlanInner(
 		return RegistryApplyResult{OK: false, Error: msg}
 	}
 
+	liveResources, err := fetchLiveResourcesForOps(ctx, ws, executable)
+	if err != nil {
+		msg := fmt.Sprintf("unexpected failure: %v", err)
+		slog.Warn("regapply: apply_dashboard_plan failed", "error", msg)
+		return RegistryApplyResult{OK: false, Error: msg}
+	}
+
 	var executed []stashEntry
 	for _, op := range executable {
-		execErr := executeDashboardOp(ctx, ws, op, liveByLiveID, liveContent, dashboardManaged, stashDir, preExisting, &executed)
+		// dashboards.PlanResources' "resource" ops ride this plan: same
+		// stash, same dashboardManaged, same inverse on failure.
+		var execErr error
+		if op.RType == "resource" {
+			execErr = executeResourceOp(ctx, ws, op, liveResources, dashboardManaged, stashDir, preExisting, &executed)
+		} else {
+			execErr = executeDashboardOp(ctx, ws, op, liveByLiveID, liveContent, dashboardManaged, stashDir, preExisting, &executed)
+		}
 		if execErr == nil {
 			continue
 		}
@@ -191,8 +206,8 @@ func applyDashboardPlanInner(
 			// un-invertible, and inverseReplayAndPersist cannot see the
 			// entry at all, so RolledBack is forced false here.
 			msg := fmt.Sprintf(
-				"%d dashboard op(s) applied successfully, but %s dashboard:%s could not be recorded for rollback: %v",
-				len(executed), op.Kind, op.Key, execErr)
+				"%d dashboard op(s) applied successfully, but %s %s:%s could not be recorded for rollback: %v",
+				len(executed), op.Kind, op.RType, op.Key, execErr)
 			slog.Warn("regapply: apply_dashboard_plan", "error", msg)
 			return RegistryApplyResult{OK: false, Applied: appliedLabels(executed), Error: msg, RolledBack: false}
 		}
@@ -202,8 +217,8 @@ func applyDashboardPlanInner(
 			replayConn = nil
 		}
 		rolledBack, undoErr := inverseReplayAndPersist(
-			ctx, replayConn, dialer, executed, map[string]string{}, nil, dashboardManaged, stashDir, preExisting)
-		errMsg := fmt.Sprintf("%s dashboard:%s failed: %v", op.Kind, op.Key, execErr)
+			ctx, replayConn, dialer, executed, map[string]string{}, nil, dashboardManaged, nil, stashDir, preExisting)
+		errMsg := fmt.Sprintf("%s %s:%s failed: %v", op.Kind, op.RType, op.Key, execErr)
 		if undoErr != "" {
 			errMsg = fmt.Sprintf("%s; rollback also incomplete: %s", errMsg, undoErr)
 		}
@@ -219,10 +234,14 @@ func applyDashboardPlanInner(
 // dashboardContentIDsNeeded returns the url_paths needing fresh content at
 // apply time, purely to stash an accurate PriorObject - what to change was
 // decided at plan time. A create needs none, an update only when its Params
-// carries "content", a delete always (to restore on invert).
+// carries "content", a delete always (to restore on invert). A "resource"
+// op has no content: its Key is a manifest id, not a url_path.
 func dashboardContentIDsNeeded(ops []registries.RegOp) []string {
 	var ids []string
 	for _, op := range ops {
+		if op.RType != "dashboard" {
+			continue
+		}
 		switch op.Kind {
 		case registries.KindUpdate:
 			if _, ok := op.Params["content"]; ok {

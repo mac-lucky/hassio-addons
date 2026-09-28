@@ -161,7 +161,7 @@ func diffTrackedPath(
 		if transformErr != nil {
 			return Change{}, false, false, fmt.Sprintf("%s: %s", p, transformErr)
 		}
-		return Change{Path: p, Kind: "add", DiffText: diffTextFor(nil, repoPlain, p, encrypted)}, true, false, ""
+		return Change{Path: p, Kind: "add", DiffText: diffTextFor(nil, repoPlain, p, encrypted, encrypted)}, true, false, ""
 	}
 
 	if regular, susp := isRegularFile(configPath, configRootReal); !regular {
@@ -216,16 +216,22 @@ func diffTrackedPath(
 		need, refusal := sopscrypt.NeedsEncryption(p, configBytes)
 		mask = need || refusal != ""
 	}
-	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoPlain, p, mask)}, true, false, ""
+	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoPlain, p, mask, encrypted)}, true, false, ""
 }
 
-// diffTextFor builds a Change's DiffText, routing an encrypted file's
-// through the masking pass so that no decrypted secret is ever published.
-func diffTextFor(beforeBytes, afterBytes []byte, path string, encrypted bool) string {
-	if encrypted {
-		return maskedDiff(beforeBytes, afterBytes, path)
+// diffTextFor builds a Change's DiffText, routing a secret-bearing file's
+// through the masking pass so that no secret is ever published. encrypted
+// only picks the wording of the summary that replaces a diff that cannot
+// be shown: mask is also set for a plaintext file that holds secrets.
+func diffTextFor(beforeBytes, afterBytes []byte, path string, mask, encrypted bool) string {
+	if !mask {
+		return makeDiff(beforeBytes, afterBytes, path)
 	}
-	return makeDiff(beforeBytes, afterBytes, path)
+	summary := secretSummary
+	if encrypted {
+		summary = encryptedSummary
+	}
+	return maskedDiff(beforeBytes, afterBytes, path, summary)
 }
 
 // diffDeletedPath produces a "delete" Change for an untracked prevManifest
@@ -254,7 +260,7 @@ func diffDeletedPath(configRoot, configRootReal, p string) (change Change, ok, s
 	// repo, not only for secrets.yaml.
 	need, refusal := sopscrypt.NeedsEncryption(p, configBytes)
 	mask := sopscrypt.IsSecretsFile(p) || need || refusal != ""
-	return Change{Path: p, Kind: "delete", DiffText: diffTextFor(configBytes, nil, p, mask)}, true, false
+	return Change{Path: p, Kind: "delete", DiffText: diffTextFor(configBytes, nil, p, mask, false)}, true, false
 }
 
 // largeFileEncryptedReason reports why a file too large to diff cannot be

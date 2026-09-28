@@ -465,7 +465,7 @@ func (g *GitSync) fetchWithRetry(ctx context.Context) error {
 	args := []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}
 	for attempt := 0; ; attempt++ {
 		_, err := g.runGitWith(ctx, args, g.Workdir, g.networkEnv(), g.NetworkTimeout)
-		if err == nil || attempt >= len(fetchRetryDelays) || !isTransientFetchError(err) {
+		if err == nil || attempt >= len(fetchRetryDelays) || !IsTransientFetchError(err) {
 			return err
 		}
 		slog.Info("gitsync: fetch failed transiently, retrying", "attempt", attempt+1, "error", err)
@@ -496,7 +496,11 @@ var transientFetchMarkers = []string{
 	"unexpected disconnect",
 }
 
-func isTransientFetchError(err error) bool {
+// IsTransientFetchError reports whether err reads as the forge or the
+// network being briefly unavailable rather than anything being wrong with
+// the repository, the credentials or the request. Exported for recon,
+// which rides out a short outage instead of reporting it as an error.
+func IsTransientFetchError(err error) bool {
 	msg := err.Error()
 	for _, marker := range transientFetchMarkers {
 		if strings.Contains(msg, marker) {

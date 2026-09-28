@@ -19,6 +19,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/addonopts"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/dashboards"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/devices"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/entities"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/flows"
@@ -634,6 +635,17 @@ type fakeRegistryApplier struct {
 	applyEntityResult    regapply.RegistryApplyResult
 	applyEntityPlanCalls []applyEntityPlanCall
 
+	fetchDevicesResult   []map[string]any
+	fetchDevicesErr      error
+	fetchDevicesCalls    int
+	applyDeviceResult    regapply.RegistryApplyResult
+	applyDevicePlanCalls []applyEntityPlanCall
+
+	fetchResourcesResult []map[string]any
+	fetchResourcesMode   string
+	fetchResourcesErr    error
+	fetchResourcesCalls  int
+
 	fetchDashboardsResult  []map[string]any
 	fetchDashboardsContent map[string]map[string]any
 	fetchDashboardsErr     error
@@ -646,6 +658,7 @@ type fakeRegistryApplier struct {
 	rollbackCalls           []string
 	rollbackOriginals       []map[string]map[string]any
 	rollbackDashboardManage []map[string]string
+	rollbackDeviceOriginals []map[string]map[string]any
 
 	fetchAddonInfoResult map[string]map[string]any
 	fetchAddonInfoErr    error
@@ -761,6 +774,8 @@ func newFakeRegistryApplier() *fakeRegistryApplier {
 	return &fakeRegistryApplier{
 		applyResult:          regapply.RegistryApplyResult{OK: true},
 		applyEntityResult:    regapply.RegistryApplyResult{OK: true},
+		applyDeviceResult:    regapply.RegistryApplyResult{OK: true},
+		fetchResourcesMode:   "storage",
 		applyDashboardResult: regapply.RegistryApplyResult{OK: true},
 		rollbackResult:       regapply.RegistryApplyResult{OK: true, RolledBack: true},
 		applyAddonResult:     regapply.RegistryApplyResult{OK: true},
@@ -799,6 +814,29 @@ func (f *fakeRegistryApplier) ApplyEntityPlan(
 	return f.applyEntityResult
 }
 
+func (f *fakeRegistryApplier) FetchLiveDevices(ctx context.Context) ([]map[string]any, error) {
+	f.fetchDevicesCalls++
+	if f.fetchDevicesErr != nil {
+		return nil, f.fetchDevicesErr
+	}
+	return f.fetchDevicesResult, nil
+}
+
+func (f *fakeRegistryApplier) ApplyDevicePlan(
+	ctx context.Context, ops []registries.RegOp, deviceOriginals map[string]map[string]any, stashDir string,
+) regapply.RegistryApplyResult {
+	f.applyDevicePlanCalls = append(f.applyDevicePlanCalls, applyEntityPlanCall{ops: ops, stashDir: stashDir})
+	return f.applyDeviceResult
+}
+
+func (f *fakeRegistryApplier) FetchLiveResources(ctx context.Context) ([]map[string]any, string, error) {
+	f.fetchResourcesCalls++
+	if f.fetchResourcesErr != nil {
+		return nil, "", f.fetchResourcesErr
+	}
+	return f.fetchResourcesResult, f.fetchResourcesMode, nil
+}
+
 func (f *fakeRegistryApplier) FetchLiveDashboards(
 	ctx context.Context, ids []string,
 ) ([]map[string]any, map[string]map[string]any, error) {
@@ -819,10 +857,12 @@ func (f *fakeRegistryApplier) ApplyDashboardPlan(
 func (f *fakeRegistryApplier) RollbackRegistry(
 	ctx context.Context, stashDir string,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
+	deviceOriginals map[string]map[string]any,
 ) regapply.RegistryApplyResult {
 	f.rollbackCalls = append(f.rollbackCalls, stashDir)
 	f.rollbackOriginals = append(f.rollbackOriginals, originals)
 	f.rollbackDashboardManage = append(f.rollbackDashboardManage, dashboardManaged)
+	f.rollbackDeviceOriginals = append(f.rollbackDeviceOriginals, deviceOriginals)
 	return f.rollbackResult
 }
 
@@ -1031,6 +1071,38 @@ func (f *fakeEntities) Plan(
 
 var _ Entities = (*fakeEntities)(nil)
 
+type devicePlanCall struct {
+	desired   devices.Desired
+	live      []map[string]any
+	originals map[string]map[string]any
+	refs      entities.RefResolver
+}
+
+type fakeDevices struct {
+	desired           devices.Desired
+	planOps           []registries.RegOp
+	manifestErr       error
+	loadManifestCalls []string
+	planCalls         []devicePlanCall
+}
+
+func (f *fakeDevices) LoadManifest(workdir string) (devices.Desired, error) {
+	f.loadManifestCalls = append(f.loadManifestCalls, workdir)
+	if f.manifestErr != nil {
+		return devices.Desired{}, f.manifestErr
+	}
+	return f.desired, nil
+}
+
+func (f *fakeDevices) Plan(
+	desired devices.Desired, liveDevices []map[string]any, originals map[string]map[string]any, refs entities.RefResolver,
+) []registries.RegOp {
+	f.planCalls = append(f.planCalls, devicePlanCall{desired: desired, live: liveDevices, originals: originals, refs: refs})
+	return f.planOps
+}
+
+var _ Devices = (*fakeDevices)(nil)
+
 type dashboardPlanCall struct {
 	desired     dashboards.Desired
 	live        []map[string]any
@@ -1041,9 +1113,26 @@ type dashboardPlanCall struct {
 type fakeDashboards struct {
 	desired           dashboards.Desired
 	planOps           []registries.RegOp
+	resourceOps       []registries.RegOp
 	manifestErr       error
 	loadManifestCalls []string
 	planCalls         []dashboardPlanCall
+	resourcePlanCalls []resourcePlanCall
+}
+
+type resourcePlanCall struct {
+	desired dashboards.Desired
+	live    []map[string]any
+	mode    string
+	managed map[string]string
+}
+
+func (f *fakeDashboards) PlanResources(
+	desired dashboards.Desired, liveResources []map[string]any, resourceMode string, managed map[string]string,
+) []registries.RegOp {
+	f.resourcePlanCalls = append(f.resourcePlanCalls,
+		resourcePlanCall{desired: desired, live: liveResources, mode: resourceMode, managed: managed})
+	return f.resourceOps
 }
 
 func (f *fakeDashboards) LoadManifest(workdir string) (dashboards.Desired, error) {
@@ -1250,6 +1339,7 @@ type reconcilerFakes struct {
 	registries      *fakeRegistries
 	registryApplier *fakeRegistryApplier
 	entities        *fakeEntities
+	devices         *fakeDevices
 	dashboards      *fakeDashboards
 	addonOpts       *fakeAddonOpts
 	flows           *fakeFlows
@@ -1268,6 +1358,7 @@ func newReconcilerFakes() *reconcilerFakes {
 		registries:      &fakeRegistries{},
 		registryApplier: newFakeRegistryApplier(),
 		entities:        &fakeEntities{},
+		devices:         &fakeDevices{},
 		dashboards:      &fakeDashboards{},
 		addonOpts:       &fakeAddonOpts{},
 		flows:           &fakeFlows{},
@@ -1295,6 +1386,7 @@ func (f *reconcilerFakes) reconciler(opts options.Options) *Reconciler {
 		Registries:      f.registries,
 		RegistryApplier: f.registryApplier,
 		Entities:        f.entities,
+		Devices:         f.devices,
 		Dashboards:      f.dashboards,
 		AddonOpts:       f.addonOpts,
 		Flows:           f.flows,
@@ -3120,8 +3212,71 @@ func TestApplyNowEventLogNamesTheFailingLayerAndKeepsEarlierCountsHonest(t *test
 	if strings.Contains(msg, "registries failed") {
 		t.Errorf("event %q blames registries for an add-on options failure", msg)
 	}
-	if !strings.Contains(msg, "1 earlier registry change(s) stayed applied") {
+	if !strings.Contains(msg, "1 registry change(s) stayed applied") {
 		t.Errorf("event %q hides that the registry layer's op stayed applied", msg)
+	}
+}
+
+// Two independent layers failing in one apply are both reported, each in
+// its own words, and a layer waiting on a failed one says so.
+func TestApplyNowEventLogNamesEveryFailedAndHeldLayer(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.registries.desired = registries.Desired{Floors: []map[string]any{{"id": "ground", "name": "Ground"}}}
+	fakes.registries.planOps = []registries.RegOp{
+		{Kind: registries.KindCreate, RType: "floor", Key: "ground", Params: map[string]any{"name": "Ground"}},
+	}
+	fakes.registryApplier.applyResult = regapply.RegistryApplyResult{OK: false, Error: "floor refused", RolledBack: true}
+	fakes.entities.desired = entities.Desired{Entities: []map[string]any{{"entity_id": "light.x", "name": "X"}}}
+	fakes.entities.planOps = []registries.RegOp{{Kind: "update", RType: "entity", Key: "light.x", DiffText: "+y"}}
+	fakes.addonOpts.desired = addonopts.Desired{Addons: []map[string]any{{"slug": "core_configurator"}}}
+	fakes.addonOpts.planOps = []registries.RegOp{
+		{Kind: registries.KindUpdate, RType: "addon", Key: "core_configurator", Params: map[string]any{"x": 1}},
+	}
+	fakes.registryApplier.applyAddonResult = regapply.RegistryApplyResult{OK: false, Error: "supervisor said no", RolledBack: false}
+	fakes.applier.applyResult = applier.Result{OK: true}
+
+	opts := baseOpts()
+	opts.DryRun = false
+	opts.ReconcileRegistries = true
+	opts.ReconcileAddonOptions = true
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+
+	result := r.ApplyNow(context.Background(), true)
+
+	if len(fakes.registryApplier.applyEntityPlanCalls) != 0 {
+		t.Errorf("entities ran although registries failed: %+v", fakes.registryApplier.applyEntityPlanCalls)
+	}
+	var msg string
+	for _, e := range r.Status().Events {
+		if strings.Contains(e.Message, "failed") {
+			msg = e.Message
+		}
+	}
+	for _, want := range []string{
+		"registries failed and were rolled back: floor refused",
+		"add-on options failed and could NOT be fully rolled back: supervisor said no",
+		"entities not applied (waits on registries)",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("event %q lacks %q", msg, want)
+		}
+	}
+	if result.Error != "registries: floor refused; add-on options: supervisor said no" {
+		t.Errorf("result error = %q, want both failures named by layer", result.Error)
+	}
+	if result.RolledBack {
+		t.Error("result claims a rollback although add-on options were not rolled back")
+	}
+	// The held layer's op stays pending for the next attempt.
+	pendingEntity := false
+	for _, op := range r.Status().PendingRegistry {
+		if op.RType == "entity" {
+			pendingEntity = true
+		}
+	}
+	if !pendingEntity {
+		t.Error("the held entity op dropped out of the pending plan")
 	}
 }
 

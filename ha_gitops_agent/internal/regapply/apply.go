@@ -64,7 +64,7 @@ func applyPlanInner(
 				// let inverseReplayAndPersist redial instead of reusing it.
 				replayConn = nil
 			}
-			rolledBack, undoErr := inverseReplayAndPersist(ctx, replayConn, dialer, executed, managed, nil, nil, stashDir, nil)
+			rolledBack, undoErr := inverseReplayAndPersist(ctx, replayConn, dialer, executed, managed, nil, nil, nil, stashDir, nil)
 			errMsg := fmt.Sprintf("%s %s:%s failed: %v", op.Kind, op.RType, op.Key, execErr)
 			if undoErr != "" {
 				errMsg = fmt.Sprintf("%s; rollback also incomplete: %s", errMsg, undoErr)
@@ -159,6 +159,15 @@ func executeOne(
 			// input_number without min/max is refused outright. The rest
 			// comes from the live object, with a declared null removing its
 			// field rather than being sent, which the schemas reject.
+			//
+			// zone and person merge the update into the stored item
+			// ({**item, **update_data}) instead. The baseline is harmless
+			// there and person needs it: its update schema defaults a missing
+			// device_trackers to [], which would unlink every tracker. Under
+			// a merge a dropped null keeps the stored value (registries
+			// refuses nulls for both), and the inverse (invertOne resending
+			// helperBaseline(prior)) cannot take back a field this update
+			// added: a zone icon set here stays after a rollback.
 			reqParams = helperBaseline(op.RType, prior)
 			for k, v := range params {
 				if v == nil {

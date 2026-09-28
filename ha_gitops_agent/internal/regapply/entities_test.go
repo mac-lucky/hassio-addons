@@ -284,7 +284,7 @@ func TestRollbackRegistryInvertsCombinedStashInReverseOrder(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, originals, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, originals, nil, nil)
 
 	if !result.OK || !result.RolledBack {
 		t.Fatalf("result = %+v", result)
@@ -331,7 +331,7 @@ func TestRollbackRegistryRestoreInverseReAddsOriginals(t *testing.T) {
 	}
 
 	rollbackWS := newFakeWS()
-	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, originals, nil)
+	result := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, originals, nil, nil)
 
 	if !result.OK {
 		t.Fatalf("result = %+v", result)

@@ -72,6 +72,20 @@ restart. `age_key` and `webhook_secret` accept the same form.
 How often (1-1440 minutes) the agent fetches the remote branch and
 reconciles. Default 5.
 
+A fetch that fails the way a restarting git host fails - an HTTP 5xx, a
+refused or reset connection, a DNS failure - is retried twice, after 2
+and 8 seconds. If the host is still down after that, the agent rides the
+outage out for up to 15 minutes: the state, the pending plan and the
+last error stay as the previous check left them, nothing is applied
+automatically, one warning is logged, and the dashboard shows a "Git
+host unreachable" notice (`fetch_failing_since` on
+`sensor.gitops_agent_status`; the notice gives way to the error card
+once there is one). A self-hosted forge stopped for its nightly backup
+no longer puts the add-on in the error state every morning. Past 15
+minutes, or before any check has succeeded since the add-on started, a
+failed fetch is an error as before.
+A rejected token or a missing repository is an error at once.
+
 ### `dry_run`
 
 When `true` (default), the agent computes and surfaces diffs but never
@@ -276,12 +290,13 @@ Which categories of config the agent manages.
   committed back; the `gitops/` manifests the other categories read still
   come from the repository.
 - `registries` (default `false`): sync floors, areas, labels, helper
-  entities, and entity customizations declared under `gitops/` in the
-  repository. See "Registry manifests" below.
+  entities, zones, persons, device settings and entity customizations
+  declared under `gitops/` in the repository. See "Registry manifests"
+  below.
 - `dashboards` (default `false`): sync Lovelace dashboards (metadata
-  and view config) declared under `gitops/` in the repository. See
-  "Dashboard manifest" below. Independent of `registries` - it can be
-  turned on without it, and vice versa.
+  and view config) and Lovelace resources declared under `gitops/` in
+  the repository. See "Dashboard manifest" below. Independent of
+  `registries` - it can be turned on without it, and vice versa.
 - `addon_options` (default `false`): sync other installed add-ons'
   options declared under `gitops/` in the repository. See "Add-on
   options manifest" below. Independent of `registries` and
@@ -306,9 +321,10 @@ Which categories of config the agent manages.
 ## Registry manifests (`gitops/`)
 
 When `reconcile.registries` is enabled, the agent also reads up to
-three files from a `gitops/` directory at the root of your config
+four files from a `gitops/` directory at the root of your config
 repository: `gitops/registries.yaml` (floors, areas, labels),
-`gitops/helpers.yaml` (input_boolean and friends), and
+`gitops/helpers.yaml` (input_boolean and friends, zones and persons),
+`gitops/devices.yaml` (settings of devices that already exist) and
 `gitops/entities.yaml` (customizations of entities that already
 exist). None of these files, nor the `gitops/` directory itself, is
 required - if they are missing, the corresponding layer is simply
@@ -349,7 +365,9 @@ labels:
 ### `gitops/helpers.yaml`
 
 Top-level keys are helper domains: `input_boolean`, `input_number`,
-`input_select`, `input_text`, `input_datetime`, `counter`, `timer`.
+`input_select`, `input_text`, `input_datetime`, `counter`, `timer` -
+plus `zone` and `person`, which Home Assistant stores the same way (see
+"Zones" and "Persons" below).
 
 ```yaml
 input_boolean:
@@ -367,7 +385,8 @@ input_number:
 
 Any other field you add to an item is passed straight through to Home
 Assistant, so every option a domain's storage API accepts is
-available, not just what's shown above.
+available, not just what's shown above. Zones and persons differ on this
+and on the two paragraphs below: see "Zones" and "Persons".
 
 A field you leave out keeps whatever value it has live. Home Assistant
 replaces a helper's whole configuration on every update, so the agent
@@ -387,8 +406,8 @@ outside new `min`/`max`, is refused by Home Assistant and the registry
 change is rolled back. Declare `initial: null` alongside such a change.
 
 The on/off fields - `initial` on `input_boolean`, `has_date` and
-`has_time` on `input_datetime`, `restore` on `counter` and `timer` -
-must be written `true` or `false`. An unquoted `on`, `yes`, `off` or
+`has_time` on `input_datetime`, `restore` on `counter` and `timer`,
+`passive` on `zone` - must be written `true` or `false`. An unquoted `on`, `yes`, `off` or
 `no` is read as text, which Home Assistant would store as a boolean
 and which would then never match the manifest, so the file is refused
 with an error naming the item and field.
@@ -409,6 +428,63 @@ or a boolean is compared by the string Home Assistant would store it
 as, so `options: [1, 2]` matches a live `["1", "2"]` rather than
 drifting forever. A float option is not supported and will be applied
 on every run - write it as a string (`options: ["1.5"]`) instead.
+
+#### Zones
+
+```yaml
+zone:
+  - id: office           # manifest key
+    name: Office         # required
+    latitude: 51.1175    # required, a number
+    longitude: 16.9964   # required, a number
+    radius: 150          # optional, meters; default 100
+    passive: false       # optional, true or false
+    icon: mdi:briefcase  # optional
+```
+
+`latitude` and `longitude` are required and must be plain numbers in
+range - a quoted `"51.1"` is refused, since Home Assistant would store
+it as a number and it would never match again. `radius` must be a
+positive number.
+
+Unlike the helpers above, Home Assistant merges a zone update into the
+stored zone instead of replacing it, so a field can be changed but
+never removed from here: `null` is refused on every zone field. Remove
+an icon in the zone editor if you need to. For the same reason a Roll
+Back cannot take away a field an apply added (an icon on a zone that had
+none): it puts back every value the zone had, and leaves the new field.
+
+Only zones created in the UI (or by this agent) can be managed. The
+home zone and zones defined in `configuration.yaml` are not in the list
+Home Assistant hands out, so they are never adopted - a declared zone
+with the same name as one of them is created next to it.
+
+#### Persons
+
+```yaml
+person:
+  - id: anna                  # manifest key
+    name: Anna                # required
+    device_trackers:          # optional, a list of device_tracker entity ids
+      - device_tracker.anna_phone
+```
+
+A person takes `name` and `device_trackers` and nothing else. The user
+account a person is linked to and their picture are refused: a user id
+is a random id that differs on every install, and a picture is the URL
+of an image uploaded to this one, so neither means anything in a
+repository. Link the user and set the picture in the UI; the agent keeps
+whatever is set there on every update.
+
+`device_trackers` must be a list of lowercase `device_tracker.` entity
+ids; `null` is refused, because Home Assistant reads a missing list as
+"no trackers" and would unlink every one. As with zones, a person update
+is merged, so `null` is refused on every field.
+
+A person defined in `configuration.yaml` (under `person:`) cannot be
+managed, and a declared person with the same name as one is reported as
+an error rather than created: Home Assistant would end up with two
+persons of that name.
 
 ### `gitops/entities.yaml`
 
@@ -464,6 +540,86 @@ agent, and it never will create or delete one on your behalf.
   restore) and reports why, rather than fighting whatever put it in
   that state.
 
+### `gitops/devices.yaml`
+
+Devices come from integrations, like entities, so this file only ever
+changes the settings of devices that already exist - the same four you
+can change in a device's settings dialog.
+
+```yaml
+devices:
+  - id: kitchen_strip             # manifest key, required, [a-z0-9_]+
+    match:                        # required: which device this entry is
+      name: LED Kitchen           # the name the integration gave it
+      # identifier: "esphome:ledkitchen"   # "<domain>:<value>"
+      # device_id: f66eece92f36df1e909d27f0d866b1b7
+    name: Kitchen LED strip       # your name for it; null clears it
+    area: kitchen                 # a gitops/registries.yaml area id, or a
+                                  # live area_id; null clears it
+    labels: [lighting]            # same resolution rule as area
+    disabled: false               # true -> disabled by you
+```
+
+A device has no stable name of its own the way an entity has its
+`entity_id`, so each entry says how to find it:
+
+- `name` is the name the integration gave the device, compared without
+  regard to case. It is not the name you gave it - so the entry's own
+  `name` never breaks its own match.
+- `identifier` is one of the device's identifiers, its two parts joined
+  by a colon exactly as Home Assistant lists them - an ESPHome device's
+  `esphome:<mac>`, or a HomeKit accessory's
+  `homekit_controller:accessory-id:<id>`. Stable across reinstalls for
+  most integrations. The UI does not show identifiers;
+  `.storage/core.device_registry` does, under the device's `identifiers`.
+- `device_id` is Home Assistant's id for the device, from the URL of its
+  page. Exact, but it changes if the device is removed and added again.
+
+Give one or more; every one given must hold, and together they must pick
+exactly one device. The pending plan names the device id each entry
+picked, so check it before the first apply. No match, or several, is
+reported against the entry (`3 devices match name "Hue bulb": ...; add
+an identifier or device_id to the match to pick one`) and nothing is
+changed for it. Two entries picking the same device are both reported.
+
+`area` and `labels` resolve exactly as in `gitops/entities.yaml`. Only
+these four fields are accepted; anything else is a validation error.
+
+### Ownership (devices)
+
+The same update-only model as entities (see "Ownership" above): the
+first change to a field records the value it had, removing the entry (or
+leaving it with only its `match`) puts every recorded value back, and a
+device is never created or deleted. A few things are particular to
+devices:
+
+- **An entry that matches nothing holds every restore back.** When an
+  integration renames a device, a match by name stops finding it. Undoing
+  its name, area and labels then - and re-enabling it if the entry had
+  disabled it - only to redo it all once the match is fixed would be
+  worse than waiting, so while an entry that sets anything matches no
+  device at all, nothing is restored (an entry matching several devices
+  holds back only those); the plan says which device is waiting on which
+  entry. Fix the match or remove the entry.
+- **`disabled` is refused on a device an integration disabled.** Home
+  Assistant disables some devices itself (`disabled_by` an integration or
+  a config entry). An entry declaring `disabled` for one of those is
+  reported and not applied; without `disabled`, such a device can still
+  be renamed, moved and labelled.
+- **Disabling a device disables its entities**, which Home Assistant
+  marks as disabled by the device. `gitops/entities.yaml` refuses any
+  entry for an entity disabled by something other than you, whatever it
+  sets, so leave a disabled device's entities out of it and manage
+  `disabled` through the device.
+- **A device that leaves Home Assistant is forgotten.** When a managed
+  device is removed, or comes back under a new id, and no entry finds it
+  any more, the plan shows a `forget` line and the agent drops its
+  recorded values without calling Home Assistant; there is nothing left
+  to restore them to. An entry that finds the device's new id manages it
+  from scratch.
+- The dashboard's "Managed by this agent" card lists devices by their
+  device id.
+
 ### Ownership (floors, areas, labels, helpers)
 
 The agent only ever touches objects you have declared in `gitops/`:
@@ -516,9 +672,10 @@ When `reconcile.dashboards` is enabled, the agent reads
 `reconcile.registries` - you can turn on either without the other.
 Missing entirely, this file means the layer is inactive that cycle -
 but only for as long as the agent manages nothing. Once it manages a
-dashboard, a missing or emptied `gitops/dashboards.yaml` reads as
-"delete every dashboard I manage", and the next apply deletes them,
-view configs and all. Deleting the file is not how you switch this
+dashboard or a Lovelace resource, a missing or emptied
+`gitops/dashboards.yaml` reads as "delete every dashboard and resource I
+manage", and the next apply deletes them, view configs and adopted HACS
+cards included. Deleting the file is not how you switch this
 layer off: set `reconcile.dashboards: false` instead, which leaves
 everything it manages exactly where it is.
 
@@ -581,6 +738,65 @@ manifest never touches the saved view config, and editing only the
 view config file never touches the title. A dashboard's content is
 destroyed along with it when the agent deletes a dashboard it no
 longer manages - there is no separate content-only delete.
+
+### Lovelace resources
+
+The same file can list Lovelace resources - the JavaScript and CSS files
+the frontend loads for custom cards (Settings > Dashboards > Resources),
+in the shape Home Assistant's own `lovelace: resources:` YAML uses:
+
+```yaml
+resources:
+  - id: bubble_card                               # manifest key, [a-z0-9_-]+
+    url: /hacsfiles/Bubble-Card/bubble-card.js    # "/..." or http(s)://
+    type: module                                  # module, js, css or html
+dashboards: []                                    # optional alongside
+```
+
+`dashboards:` and `resources:` can each appear without the other.
+
+**A resource is code every browser session runs.** Whatever a resource
+URL serves executes in Home Assistant's own origin for every user who
+opens a dashboard, administrators included - so with
+`reconcile.dashboards` on, anyone who can push to the tracked branch can
+run script as whoever next opens Home Assistant. That is no more than
+`yaml_files` already allows (a pushed `custom_components/` directory is
+Python Home Assistant loads), but treat push access to the repository as
+equivalent to an admin session all the same. A URL must be local
+(`/...`) or name its scheme: `//host/x.js` and URLs containing `\` are
+refused, since a browser reads both as another host while they look
+local in review.
+
+Resources are only managed while Home Assistant keeps them in storage
+mode, its default; with `lovelace: mode: yaml` or `lovelace:
+resource_mode: yaml` in `configuration.yaml` every entry is reported as
+an error and nothing is changed.
+
+**A resource is identified by its URL path**, the URL up to any `?` or
+`#`.
+HACS adds its own `?hacstag=<number>` to every card it installs and
+rewrites it on each update, so:
+
+- An entry adopts the resource already loading the same path, whatever
+  its query - declaring a HACS card adopts HACS's entry instead of
+  loading the card a second time. Two live resources on the same path
+  are reported as an ambiguous adopt.
+- Declared without a query, only the path and `type` are compared, and
+  the live query is never touched: HACS's bumps are not drift. Declared
+  with a query (`/local/card.js?v=2`), the full URL is compared, and
+  changing the query is how you make browsers fetch a new version.
+
+Ownership follows dashboards: a managed resource removed from the
+manifest is deleted, one deleted by hand is forgotten (or recreated, if
+still declared), and renaming an `id` while keeping its `url` moves
+ownership without deleting anything. **Resources you did not declare are
+never touched** - including every one HACS added. So declaring a HACS
+card and later removing the entry deletes that resource, which HACS put
+there and will not add back until the card is reinstalled or updated;
+leave HACS cards undeclared unless you mean to own them. A managed
+resource deleted by hand while still declared is first re-adopted from
+any resource on the same path (HACS may have added it back) and only
+created when there is none, so a card is never loaded twice.
 
 ## Add-on options manifest (`gitops/`)
 
@@ -800,7 +1016,8 @@ something else.
 **The same syntax works in `gitops/subentries.yaml` (any declared `data`
 value) and in `gitops/addons.yaml` (any declared option value).** Those
 three manifests are the whole list. `registries.yaml`, `helpers.yaml`,
-`entities.yaml` and `dashboards.yaml` do **not** resolve references -
+`devices.yaml`, `entities.yaml` and `dashboards.yaml` do **not** resolve
+references -
 none of them declares a credential, and a `secret://` written in one is
 passed through to Home Assistant as the literal string it looks like.
 
@@ -958,8 +1175,8 @@ why. It never leaves a half-finished setup behind.
   references a floor, or an entity references an area or label, so one
   integration's failure never undoes another integration that already
   applied successfully in the same reconcile - unlike registries,
-  entities, dashboards, and add-on options, none of which this applies
-  to. If your manifest declares five integrations and the fourth one's
+  devices, entities, dashboards, Lovelace resources and add-on options,
+  none of which this applies to. If your manifest declares five integrations and the fourth one's
   flow fails, the first three stay created/adopted and only the fourth
   is reported as failed; the fifth still gets its own attempt too.
 - **A create that fails is remembered, and is not retried on its own.**
@@ -1319,11 +1536,45 @@ saved copies and needs no plan at all.
 Fix the manifest the error names, push, and the next cycle plans
 everything normally again - including the file edit that has been waiting.
 
+## When one layer fails to apply
+
+A manifest that loads but whose apply fails - Home Assistant refuses an
+area, an add-on option, a dashboard save - is different: the other
+layers still apply. Each layer's changes were planned against live state
+as it stood before the apply, so one layer failing (and rolling its own
+changes back) leaves the others' plans exactly as valid as they were. An
+add-on option has nothing to do with a label that failed to create.
+
+A few layers do wait on another one, because a failure there can leave
+live state their plan did not expect:
+
+- **Devices and entities wait on floors, areas, labels and helpers**
+  (`registries.yaml`, `helpers.yaml`): a failed registries layer that
+  could not be fully rolled back may have removed an area a device or
+  entity is about to be put in.
+- **Entities also wait on devices**: an entity's area can follow its
+  device's.
+- **Integrations wait on HACS**: an integration may need the custom
+  component HACS was about to download.
+- **Subentries wait on every other layer.** A subentry the agent creates
+  is recorded only when the apply saves its state at the end, and one
+  that is not recorded comes back as a duplicate it can never delete. A
+  failure anywhere else may be a full `/data` - the layers that keep a
+  rollback copy fail first on one - so subentries run only when
+  everything before them applied.
+
+A layer held back this way applies nothing; its changes stay pending, and
+the activity log says so ("entities not applied (waits on registries)")
+next to the failure itself. Every failure in one apply is reported, each
+in its own words. The files, and every layer that did apply, stay
+applied; Roll Back undoes all of it together, as after any apply.
+
 ## Drift commit-back
 
 Enabled by the `commit_back` option (default `false`). Captures live
-drift in the FILE layer only - it never touches registry, entity,
-dashboard, add-on option, integration, subentry or HACS drift.
+drift in the FILE layer only - it never touches registry, device,
+entity, dashboard, Lovelace resource, add-on option, integration,
+subentry or HACS drift.
 
 There are two ways to trigger it:
 
@@ -1629,11 +1880,11 @@ Empty `webhook_secret` (the default) means this listener never starts
 at all - no socket is bound on port 8098. Set it to enable `POST
 /webhook`, which lets a request in when the git host signed its body
 with that secret, or when it carries the secret itself as a token. A
-match triggers an immediate cycle asynchronously and responds `202
-Accepted`; a mismatch responds `403`. The cycle is the one the timer
-runs: a reconcile, then, with `dry_run` off, the apply that follows it -
-so a push lands as soon as the git host announces it. While paused, or
-with `dry_run` on, it stops at the reconcile. The secret must be at least 16
+match queues an immediate cycle and responds `202 Accepted`; a mismatch
+responds `403`. The cycle is the one the timer runs: a reconcile, then,
+with `dry_run` off, the apply that follows it - so a push lands as soon
+as the git host announces it. While paused, or with `dry_run` on, it
+stops at the reconcile. The secret must be at least 16
 characters - a shorter one is refused at startup and the listener stays
 off. After 30 failed attempts within a minute, wrong tokens and bad
 signatures alike, the endpoint answers `429` for everything until the
@@ -1659,20 +1910,42 @@ the network readable by anything on the path, and `?token=` also puts
 the secret in the URL, which reverse proxies and clients routinely
 write to their access logs verbatim. A signature keeps the secret on
 the git host: what travels only proves the sender knows it. A captured
-signed request can still be replayed: each replay runs another cycle,
-which applies nothing the repository does not already ask for, but a
-stream of them keeps the agent busy and every apply takes a backup. Keep
-port 8098 off networks you do not trust. The token forms keep working for callers
-that cannot sign, such as a script or an automation; if you use one,
-send the `X-Gitops-Token` header rather than `?token=`.
+signed request could still be replayed, so the agent remembers the
+signed bodies it accepted in the last hour (up to 4096 of them): the
+identical body again is
+answered `200 duplicate delivery ignored` and runs nothing. That also
+covers the git host's own "Redeliver" button within the hour; the timer
+picks the change up regardless. Keep port 8098 off networks you do not
+trust. The token forms keep working for callers that cannot sign, such
+as a script or an automation, and are never treated as duplicates; if
+you use one, send the `X-Gitops-Token` header rather than `?token=`.
 
-The trigger is fire-and-forget: `202` means the request was accepted,
-not that a fresh cycle is guaranteed to have already run to completion,
-or even started, by the time the response is written. If the agent is
-already busy with another operation, the webhook's request is simply
-absorbed - nothing is queued, but the
-in-progress operation (or the next regular poll tick) picks up any real
-change regardless.
+Not every delivery starts a cycle. When the request names its event
+(`X-GitHub-Event`, `X-Forgejo-Event` or `X-Gitea-Event`):
+
+- `ping`, which a git host sends when the webhook is created or tested,
+  is answered `200 pong`.
+- A `push` whose `ref` is not `refs/heads/<branch>` - another branch, a
+  tag - is answered `200` and ignored.
+- Any other event (issues, releases, ...) is answered `200` and ignored.
+
+A request that names no event, such as a script's, queues a cycle like
+a push does, and so does a push whose body the agent cannot read as
+JSON.
+
+The trigger is asynchronous: `202` means the cycle is queued, not that
+it has run. Cycles started this way run one at a time, at least 10
+seconds apart. A delivery that arrives while one is running - or while
+Apply, Roll Back or the timer's own check is - queues another cycle,
+which starts when the current operation ends and fetches whatever is
+newest by then; any number of deliveries arriving meanwhile share at
+most two such cycles. So a
+push announced mid-cycle is never left for the next interval. The one
+exception is a Roll Back: a cycle for a delivery that arrived before a
+Roll Back finished is dropped (the event log says so), because a Roll
+Back pauses and asks for the repository to be fixed first, and with
+`capture_live_changes` on a cycle straight after it would push the
+restored files over the commit just rolled back.
 
 This listener is entirely separate from the ingress dashboard on port
 8099: Supervisor's ingress proxy is the dashboard's only route in, and
@@ -1700,9 +1973,21 @@ webhook and pick the Forgejo or Gitea type:
 3. Secret: the value of `webhook_secret`.
 4. Trigger on: push events.
 
-The host's test delivery or redeliver button should get a `202` back; a
-`403` there means the two secrets differ, or the host sent no signature
-because its secret field is empty.
+The host's test delivery should get a `202` back. GitHub's first
+delivery is a `ping`, answered `200 pong`. Forgejo's and Gitea's test
+delivery is a push to the repository's default branch, so with `branch`
+set to another one it is answered `200 ignored: push to another branch
+than <branch>` - not a fault. A second test, or a redelivery, within the
+hour is answered `200 duplicate delivery ignored`. A `403` means the two
+secrets differ, or the host sent no signature because its secret field
+is empty.
+
+A self-hosted Forgejo or Gitea refuses to deliver to a private address
+such as `192.168.x.x` unless its `[webhook] ALLOWED_HOST_LIST` names it:
+the delivery never reaches the agent, and only the webhook's Recent
+Deliveries says why (`webhook can only call allowed HTTP servers`). Add
+the Home Assistant host (or `private`) to that list, keeping `external`
+if other hooks need it.
 
 ## Add-on auto-update
 
@@ -2238,6 +2523,13 @@ deciding which lines are safe to publish using rules for a language the
 file is not written in. Hiding the diff is the safe answer; the change
 is still reported, just without its contents.
 
+The same masking applies to a file that is not encrypted but holds
+secret values - a plaintext-tracked file with a password typed into it
+in the File editor - and to any file being deleted, whose diff quotes
+the plaintext live copy. When such a diff cannot be masked line by line,
+it collapses to `diff hidden: the file holds secret values` rather than
+to the encrypted wording.
+
 ### The managed `.sops.yaml`
 
 The agent writes a `.sops.yaml` at the repository root carrying its own
@@ -2350,7 +2642,8 @@ The pending diff for an encrypted file is masked before it is
 published. Both sides are masked, not just the repository's, because
 the live side holds the same secrets: every secret value is replaced
 with `*****`, and if masking cannot be done confidently the file's
-diff collapses to `encrypted values changed (hidden)`. The same masked
+diff collapses to `encrypted values changed (hidden)` (`diff hidden:
+the file holds secret values` for a plaintext file). The same masked
 text is what reaches `GET /status.json` and the
 `sensor.gitops_agent_status` attributes.
 
@@ -2363,8 +2656,8 @@ text is what reaches `GET /status.json` and the
   plaintext `secrets.yaml`. `/data` is this add-on's own Supervisor
   volume, not shared with anything else, and it is the same place the
   private key itself lives.
-- **`gitops/` manifests.** The registry, dashboard, add-on option,
-  integration, subentry and HACS manifests are agent input rather than
+- **`gitops/` manifests.** The registry, device, dashboard, add-on
+  option, integration, subentry and HACS manifests are agent input rather than
   Home Assistant config, and this version does not encrypt them. Do not
   put a secret in one - use a `secret://<name>` reference instead, which
   the three manifests carrying data payloads support (see "Referencing
@@ -2411,13 +2704,14 @@ text is what reaches `GET /status.json` and the
 - **Backups before every apply.** Touched files are copied to
   `/data/backup/<timestamp>/` before being overwritten, and the agent
   requests a partial Supervisor backup before applying. Registry
-  changes get the same treatment: every floor, area, label, or helper
-  object about to be touched is snapshotted first, and so is every
-  entity customization, every dashboard's prior metadata and view
+  changes get the same treatment: every floor, area, label, helper, zone
+  or person about to be touched is snapshotted first, and so is every
+  entity and device customization, every Lovelace resource about to be
+  created, changed or deleted, every dashboard's prior metadata and view
   config, every add-on's prior option values, and every integration
   about to be created, adopted, or deleted, so Rollback in the web UI
-  undoes registry, entity, dashboard, add-on option, and integration
-  changes alongside file changes - with one caveat unique to
+  undoes registry, device, entity, dashboard, Lovelace resource, add-on
+  option, and integration changes alongside file changes - with one caveat unique to
   integrations: rolling back a deletion re-creates the integration by
   re-running its setup flow, which gets it a new identity rather than
   restoring the exact one that was removed (see "Ownership
@@ -2479,10 +2773,12 @@ text is what reaches `GET /status.json` and the
   create. The same scoping applies to registry objects, dashboards and
   integrations - see "Ownership (floors, areas, labels, helpers)",
   "Ownership (dashboards)" and "Ownership (integrations)" above - and, in
-  its own update-only way, to entities and add-on options - see
-  "Ownership" under `gitops/entities.yaml` and "Ownership (add-ons)"
-  above. Two layers never delete anything at all, whatever the repository
-  says: removing a subentry from `gitops/subentries.yaml` or a repository
+  its own update-only way, to devices, entities and add-on options - see
+  "Ownership (devices)", "Ownership" under `gitops/entities.yaml` and
+  "Ownership (add-ons)" above. Lovelace resources follow dashboards: only
+  a managed one is ever deleted, and one you did not declare - every
+  HACS card included - is never touched. Two layers never delete
+  anything at all, whatever the repository says: removing a subentry from `gitops/subentries.yaml` or a repository
   from `gitops/hacs.yaml` only stops the agent following it (see
   "Ownership (subentries)" and "Ownership (HACS)" above).
 - **Import is opt-in, manual and additive.** The one operation that
@@ -2715,10 +3011,13 @@ normal interval while paused, so this stays fresh.
 
 ### Managed by this agent
 
-A read-only card listing everything the add-on currently owns, in eight
-groups: files, floors/areas/labels/helpers, entities, dashboards, add-on
-options, integrations, subentries and HACS integrations. Names only - no
-option values, no flow data, no hashes.
+A read-only card listing everything the add-on currently owns, in ten
+groups: files, floors/areas/labels/helpers (zones and persons included),
+devices, entities, dashboards, Lovelace resources, add-on options,
+integrations, subentries and HACS integrations. Names only - no option
+values, no flow data, no hashes. Devices are listed by their device id:
+a device has no name the agent could record, only the manifest entry
+that found it.
 
 The HACS group is the one whose names the add-on will never act on again
 by itself: that layer installs and adopts and never removes (see

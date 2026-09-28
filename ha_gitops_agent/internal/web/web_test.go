@@ -76,6 +76,7 @@ type fakeAgent struct {
 	importPreview     *recon.ImportPreview
 	importErr         error
 	lastBackupError   string
+	fetchFailingSince string
 	autoUpdateEnabled bool
 	addonUpdates      []recon.AddonUpdateStatus
 	// addonCheckRunning is Status.AddonCheckRunning: checkLock, NOT busy.
@@ -282,6 +283,7 @@ func (f *fakeAgent) Status() recon.Status {
 		RollbackPreview:   f.rollbackPreview,
 		LastError:         lastError,
 		LastBackupError:   f.lastBackupError,
+		FetchFailingSince: f.fetchFailingSince,
 		Warnings:          f.warnings,
 		CommitBackEnabled: f.commitBackEnabled,
 		LastDriftBranch:   f.lastDriftBranch,
@@ -336,7 +338,9 @@ func normalizeManaged(m recon.ManagedInventory) recon.ManagedInventory {
 		Files:        append([]string{}, m.Files...),
 		Registry:     append([]string{}, m.Registry...),
 		Entities:     append([]string{}, m.Entities...),
+		Devices:      append([]string{}, m.Devices...),
 		Dashboards:   append([]string{}, m.Dashboards...),
+		Resources:    append([]string{}, m.Resources...),
 		Addons:       append([]string{}, m.Addons...),
 		Integrations: append([]string{}, m.Integrations...),
 		Subentries:   append([]string{}, m.Subentries...),
@@ -3839,7 +3843,7 @@ func TestStatusJSONCarriesTheManagedInventory(t *testing.T) {
 	if !ok {
 		t.Fatalf("status.json has no managed object: %s", body)
 	}
-	want := `{"files":[],"registry":[],"entities":[],"dashboards":[],"addons":[],"integrations":[],"subentries":[],"hacs":[]}`
+	want := `{"files":[],"registry":[],"entities":[],"devices":[],"dashboards":[],"resources":[],"addons":[],"integrations":[],"subentries":[],"hacs":[]}`
 	if string(managed) != want {
 		t.Errorf("managed = %s, want %s", managed, want)
 	}
@@ -4454,5 +4458,26 @@ func TestApplyRouteRefusesAnUnreadableForm(t *testing.T) {
 	}
 	if got := agent.dispatchedCalls().apply; len(got) != 0 {
 		t.Errorf("apply calls = %q, want none", got)
+	}
+}
+
+// A forge outage the agent is riding out gets a notice, so a state shown
+// as in sync is not taken for a fresh check; once it is an error, the
+// error card says it instead.
+func TestForgeOutageNoticeShowsOnlyWhileRiddenOut(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.state = recon.StateInSync
+	agent.fetchFailingSince = "2026-09-28T05:35:28+00:00"
+
+	body := doRequest(t, New(agent), http.MethodGet, "/", nil).Body.String()
+	if !strings.Contains(body, "Git host unreachable") || !strings.Contains(body, "No fetch has succeeded since") {
+		t.Errorf("outage notice missing:\n%s", body)
+	}
+
+	agent.state = recon.StateError
+	body = doRequest(t, New(agent), http.MethodGet, "/", nil).Body.String()
+	if strings.Contains(body, "Git host unreachable") {
+		t.Error("outage notice shown beside the error card")
 	}
 }

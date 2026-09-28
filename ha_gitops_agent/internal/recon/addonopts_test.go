@@ -338,7 +338,9 @@ func TestApplyNowAddonFailureDoesNotUndoDashboardSuccess(t *testing.T) {
 	}
 }
 
-func TestApplyNowAddonsNeverRunWhenDashboardApplyItselfFails(t *testing.T) {
+// Add-on options depend on no other layer, so a dashboard that failed to
+// save says nothing about them. They used to be skipped with it.
+func TestApplyNowAddonsStillRunWhenDashboardApplyFails(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.dashboards.desired = dashboards.Desired{
 		Dashboards: []map[string]any{{"id": "home", "title": "Home", "config": "home.yaml"}},
@@ -361,8 +363,11 @@ func TestApplyNowAddonsNeverRunWhenDashboardApplyItselfFails(t *testing.T) {
 
 	r.ApplyNow(context.Background(), true)
 
-	if len(fakes.registryApplier.applyAddonPlanCalls) != 0 {
-		t.Errorf("apply_addon_plan_calls = %+v, want none", fakes.registryApplier.applyAddonPlanCalls)
+	if len(fakes.registryApplier.applyAddonPlanCalls) != 1 {
+		t.Errorf("apply_addon_plan_calls = %+v, want one", fakes.registryApplier.applyAddonPlanCalls)
+	}
+	if status := r.Status(); status.State != StateError {
+		t.Errorf("state = %q, want error: the dashboard layer still failed", status.State)
 	}
 }
 

@@ -173,7 +173,7 @@ func run() int {
 	if opts.WebhookSecret != "" {
 		hookSrv = &http.Server{
 			Addr:              hookBindAddr,
-			Handler:           hook.New(ctx, reconciler, opts.WebhookSecret),
+			Handler:           hook.New(ctx, reconciler, opts.WebhookSecret, opts.Branch),
 			ReadHeaderTimeout: readHeaderTimeout,
 			ReadTimeout:       readTimeout,
 			WriteTimeout:      writeTimeout,

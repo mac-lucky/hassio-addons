@@ -227,6 +227,13 @@ to once a day; a different plan (a new commit, a change on this machine) is
 not held. Press Apply to retry it now.`)}}
 {{end}}
 
+{{if and .Status.FetchFailingSince (ne .Status.State "error")}}
+{{template "callout" (callout "warning" "Git host unreachable" (printf "No fetch has succeeded since %s UTC." (humanTime .Status.FetchFailingSince)) `A short outage - a forge restarting, or stopped for its backup - is
+ridden out: the plan and state shown are from the last fetch that worked,
+and nothing is applied automatically until the git host answers again. If
+it is still unreachable after 15 minutes, this becomes an error.`)}}
+{{end}}
+
 {{if .Status.Warnings}}
 {{template "callout" (callout "warning" "Configuration warnings" .Status.Warnings "")}}
 {{end}}
@@ -427,8 +434,10 @@ there is no restore point outside this add-on for that change.`)}}
   <div class="changes">
     {{template "inventory" (inventoryGroup "files" .Status.Managed.Files)}}
     {{template "inventory" (inventoryGroup "floors, areas, labels and helpers" .Status.Managed.Registry)}}
+    {{template "inventory" (inventoryGroup "devices (by device id)" .Status.Managed.Devices)}}
     {{template "inventory" (inventoryGroup "entities" .Status.Managed.Entities)}}
     {{template "inventory" (inventoryGroup "dashboards" .Status.Managed.Dashboards)}}
+    {{template "inventory" (inventoryGroup "Lovelace resources" .Status.Managed.Resources)}}
     {{template "inventory" (inventoryGroup "add-on options" .Status.Managed.Addons)}}
     {{template "inventory" (inventoryGroup "integrations" .Status.Managed.Integrations)}}
     {{template "inventory" (inventoryGroup "subentries" .Status.Managed.Subentries)}}

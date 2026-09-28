@@ -19,9 +19,17 @@ type RepoTransform func(rel string, data []byte) (out []byte, encrypted bool, er
 // so it leaks nothing about the value it hides, not even its length.
 const maskMarker = "*****"
 
-// encryptedSummary is the whole-file DiffText when no real diff can be
-// published safely. Not "", which reads as a phantom no-op on the page.
+// encryptedSummary is the whole-file DiffText when no real diff of an
+// encrypted file can be published safely. Not "", which reads as a phantom
+// no-op on the page.
 const encryptedSummary = "encrypted values changed (hidden)"
+
+// secretSummary is encryptedSummary for a file that is NOT encrypted but
+// holds secret values - a plaintext-tracked file with a password typed into
+// it, secrets.yaml, or a JSON/dotenv file with a secret-shaped key. Saying
+// "encrypted" there would send people looking for sops or an age key that
+// has nothing to do with it.
+const secretSummary = "diff hidden: the file holds secret values"
 
 // noAgeKeyReason is the decryptFailure reason for repository content that
 // is sops ciphertext when no decryption is available at all.
@@ -64,25 +72,27 @@ func yamlSemanticallyEqual(a, b []byte) bool {
 	return sopscrypt.SemanticallyEqual(a, b)
 }
 
-// maskedDiff is makeDiff for an encrypted file: BOTH sides are masked
+// maskedDiff is makeDiff for a secret-bearing file: BOTH sides are masked
 // before the diff, since DiffText is published verbatim and a unified diff
 // quotes context from both. Only YAML reaches maskSecrets - JSON and
-// dotenv fail closed rather than be classified by YAML rules.
-func maskedDiff(beforeBytes, afterBytes []byte, path string) string {
+// dotenv fail closed rather than be classified by YAML rules. summary is
+// what stands in for the whole diff when none can be shown
+// (encryptedSummary or secretSummary, see diffTextFor).
+func maskedDiff(beforeBytes, afterBytes []byte, path, summary string) string {
 	if !sopscrypt.IsYAMLFile(path) {
-		return encryptedSummary
+		return summary
 	}
 	before, beforeOK := maskSecrets(beforeBytes, path)
 	after, afterOK := maskSecrets(afterBytes, path)
 	if !beforeOK || !afterOK {
-		return encryptedSummary
+		return summary
 	}
 	if before == after {
-		return encryptedSummary
+		return summary
 	}
 	text := makeDiff([]byte(before), []byte(after), path)
 	if text == "" {
-		return encryptedSummary
+		return summary
 	}
 	return text
 }

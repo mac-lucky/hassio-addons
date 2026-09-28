@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func newFakeAgent() *fakeAgent {
 	return &fakeAgent{done: make(chan struct{}, 8)}
 }
 
-func (f *fakeAgent) SyncNow(ctx context.Context) {
+func (f *fakeAgent) SyncNow(ctx context.Context, acceptedAt time.Time) {
 	f.mu.Lock()
 	f.calls++
 	f.ctxs = append(f.ctxs, ctx)
@@ -64,7 +65,7 @@ func doBodyReq(handler http.Handler, method, target string, body []byte, headers
 
 func TestWebhookMatchingHeaderTokenReturns202AndTriggersReconcile(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "s3cret"})
 
@@ -79,7 +80,7 @@ func TestWebhookMatchingHeaderTokenReturns202AndTriggersReconcile(t *testing.T) 
 
 func TestWebhookMatchingQueryTokenReturns202(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook?token=s3cret", nil)
 
@@ -92,7 +93,7 @@ func TestWebhookMatchingQueryTokenReturns202(t *testing.T) {
 func TestWebhookHeaderTokenTakesPrecedenceOverQuery(t *testing.T) {
 	// Documents which one wins: validToken checks the header first.
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook?token=wrong", map[string]string{"X-Gitops-Token": "s3cret"})
 
@@ -103,7 +104,7 @@ func TestWebhookHeaderTokenTakesPrecedenceOverQuery(t *testing.T) {
 
 func TestWebhookMismatchedTokenReturns403AndDoesNotTrigger(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "wrong"})
 
@@ -118,7 +119,7 @@ func TestWebhookMismatchedTokenReturns403AndDoesNotTrigger(t *testing.T) {
 
 func TestWebhookMissingTokenReturns403(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", nil)
 
@@ -129,7 +130,7 @@ func TestWebhookMissingTokenReturns403(t *testing.T) {
 
 func TestWebhookEmptySecretAlwaysRejects(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "")
+	handler := New(t.Context(), agent, "", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": ""})
 
@@ -157,7 +158,7 @@ func TestWebhookValidSignatureReturns202AndTriggersOnce(t *testing.T) {
 	} {
 		t.Run(tc.header, func(t *testing.T) {
 			agent := newFakeAgent()
-			handler := New(context.Background(), agent, "s3cret")
+			handler := New(t.Context(), agent, "s3cret", "main")
 
 			rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{tc.header: tc.value})
 
@@ -177,7 +178,7 @@ func TestWebhookForgejoDeliveryWithEverySignatureHeaderReturns202(t *testing.T) 
 	// Forgejo signs one delivery under its own, Gitea's and GitHub's
 	// header names at once.
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := []byte(pushBody)
 	sig := sign("s3cret", body)
 
@@ -196,7 +197,7 @@ func TestWebhookForgejoDeliveryWithEverySignatureHeaderReturns202(t *testing.T) 
 func TestWebhookOneBadSignatureAmongSeveralReturns403(t *testing.T) {
 	// Every signature header present must verify, not just the first.
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := []byte(pushBody)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{
@@ -215,7 +216,7 @@ func TestWebhookOneBadSignatureAmongSeveralReturns403(t *testing.T) {
 
 func TestWebhookSignatureOverAModifiedBodyReturns403AndCountsTowardLockout(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := []byte(pushBody)
 	sig := sign("s3cret", body)
 	tampered := bytes.Clone(body)
@@ -252,7 +253,7 @@ func TestWebhookMalformedSignatureReturns403(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			agent := newFakeAgent()
-			handler := New(context.Background(), agent, "s3cret")
+			handler := New(t.Context(), agent, "s3cret", "main")
 
 			rec := doBodyReq(handler, http.MethodPost, "/webhook", body, headers)
 
@@ -269,7 +270,7 @@ func TestWebhookMalformedSignatureReturns403(t *testing.T) {
 
 func TestWebhookSignedBodyOverTheLimitReturns413AndDoesNotTrigger(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := bytes.Repeat([]byte("a"), maxBodyBytes+1)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{"X-Hub-Signature-256": "sha256=" + sign("s3cret", body)})
@@ -285,7 +286,7 @@ func TestWebhookSignedBodyOverTheLimitReturns413AndDoesNotTrigger(t *testing.T) 
 
 func TestWebhookSignedBodyAtTheLimitReturns202(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := bytes.Repeat([]byte("a"), maxBodyBytes)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{"X-Hub-Signature-256": "sha256=" + sign("s3cret", body)})
@@ -300,7 +301,7 @@ func TestWebhookValidTokenIsAcceptedWhateverTheSignature(t *testing.T) {
 	// A forge can sign with a secret of its own while the URL carries
 	// ?token=; that worked before signatures were checked and still must.
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := []byte(pushBody)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook?token=s3cret", body, map[string]string{"X-Gitea-Signature": sign("forge-side-secret", body)})
@@ -313,7 +314,7 @@ func TestWebhookValidTokenIsAcceptedWhateverTheSignature(t *testing.T) {
 
 func TestWebhookWrongTokenIsNotRescuedByAValidSignature(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 	body := []byte(pushBody)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{
@@ -332,7 +333,7 @@ func TestWebhookWrongTokenIsNotRescuedByAValidSignature(t *testing.T) {
 
 func TestWebhookEmptySecretRejectsASignatureMadeWithAnEmptyKey(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "")
+	handler := New(t.Context(), agent, "", "main")
 	body := []byte(pushBody)
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, map[string]string{"X-Hub-Signature-256": "sha256=" + sign("", body)})
@@ -344,7 +345,7 @@ func TestWebhookEmptySecretRejectsASignatureMadeWithAnEmptyKey(t *testing.T) {
 
 func TestWebhookBodyWithoutTokenOrSignatureReturns403(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doBodyReq(handler, http.MethodPost, "/webhook", []byte(pushBody), map[string]string{"Content-Type": "application/json"})
 
@@ -355,7 +356,7 @@ func TestWebhookBodyWithoutTokenOrSignatureReturns403(t *testing.T) {
 
 func TestWebhookWrongMethodNotFound(t *testing.T) {
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodGet, "/webhook", map[string]string{"X-Gitops-Token": "s3cret"})
 
@@ -371,7 +372,7 @@ func TestWebhookBusyAgentStillReturns202(t *testing.T) {
 	// The handler never inspects what SyncNow decides to do, so a
 	// busy reconciler still gets a 202.
 	agent := newFakeAgent()
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "s3cret"})
 
@@ -410,7 +411,7 @@ type panickingAgent struct {
 	entered chan struct{}
 }
 
-func (p *panickingAgent) SyncNow(ctx context.Context) {
+func (p *panickingAgent) SyncNow(ctx context.Context, acceptedAt time.Time) {
 	defer close(p.entered)
 	panic("gitsync exploded")
 }
@@ -420,7 +421,7 @@ func (p *panickingAgent) SyncNow(ctx context.Context) {
 // A regression crashes the test binary rather than failing.
 func TestPanicInTheTriggeredReconcileDoesNotKillTheProcess(t *testing.T) {
 	agent := &panickingAgent{entered: make(chan struct{})}
-	handler := New(context.Background(), agent, "s3cret")
+	handler := New(t.Context(), agent, "s3cret", "main")
 
 	rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "s3cret"})
 
@@ -445,7 +446,7 @@ func TestPanicInTheTriggeredReconcileDoesNotKillTheProcess(t *testing.T) {
 func TestWebhookCycleStopsWithTheApp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := newFakeAgent()
-	handler := New(ctx, agent, "s3cret-s3cret-s3cret")
+	handler := New(ctx, agent, "s3cret-s3cret-s3cret", "main")
 
 	doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "s3cret-s3cret-s3cret"})
 	agent.waitForCall(t)
@@ -455,5 +456,306 @@ func TestWebhookCycleStopsWithTheApp(t *testing.T) {
 	defer agent.mu.Unlock()
 	if len(agent.ctxs) != 1 || agent.ctxs[0].Err() == nil {
 		t.Error("the cycle's context outlives the app; a shutdown cannot stop it before an apply")
+	}
+}
+
+func withCycleSpacing(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := minCycleSpacing
+	minCycleSpacing = d
+	t.Cleanup(func() { minCycleSpacing = old })
+}
+
+func signedHeaders(secret string, body []byte, event string) map[string]string {
+	h := map[string]string{"X-Forgejo-Signature": sign(secret, body)}
+	if event != "" {
+		h["X-Forgejo-Event"] = event
+	}
+	return h
+}
+
+func expectNoCall(t *testing.T, agent *fakeAgent) {
+	t.Helper()
+	time.Sleep(50 * time.Millisecond)
+	if n := agent.callCount(); n != 0 {
+		t.Errorf("reconcile calls = %d, want 0", n)
+	}
+}
+
+// A forge pings when the webhook is created or tested; answering it with a
+// cycle would be harmless but misleading in the forge's delivery log.
+func TestWebhookPingAnswersWithoutACycle(t *testing.T) {
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(`{"zen":"hello"}`)
+
+	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "ping"))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pong") {
+		t.Errorf("status = %d body = %q, want 200 pong", rec.Code, rec.Body.String())
+	}
+	expectNoCall(t, agent)
+}
+
+func TestWebhookOtherEventsAreIgnored(t *testing.T) {
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(`{"action":"opened"}`)
+
+	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "issues"))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	expectNoCall(t, agent)
+}
+
+// A push to a feature branch says nothing about the tracked one.
+func TestWebhookPushToAnotherBranchIsIgnored(t *testing.T) {
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(`{"ref":"refs/heads/feature/x","after":"abc"}`)
+
+	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "push"))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "another branch") {
+		t.Errorf("status = %d body = %q, want 200 ignoring the push", rec.Code, rec.Body.String())
+	}
+	expectNoCall(t, agent)
+}
+
+// The same filter for a forge still configured with ?token=: its body is
+// read after the token check, bounded the same way.
+func TestWebhookTokenPushToAnotherBranchIsIgnored(t *testing.T) {
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(`{"ref":"refs/tags/v1.0.0"}`)
+
+	rec := doBodyReq(handler, http.MethodPost, "/webhook?token=s3cret", body, map[string]string{"X-GitHub-Event": "push"})
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	expectNoCall(t, agent)
+}
+
+// A body the agent cannot read is not a reason to miss a push.
+func TestWebhookPushWithUnreadableBodyStillTriggers(t *testing.T) {
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte("payload=%7B%22ref%22%3A%22refs%2Fheads%2Fmain%22%7D")
+
+	rec := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "push"))
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	agent.waitForCall(t)
+}
+
+// A signature proves the sender, not the moment: a captured delivery
+// replays verbatim, and used to run a cycle each time.
+func TestWebhookReplayedSignedDeliveryIsDropped(t *testing.T) {
+	withCycleSpacing(t, time.Millisecond)
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(pushBody)
+
+	first := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "push"))
+	agent.waitForCall(t)
+	time.Sleep(20 * time.Millisecond)
+	replay := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "push"))
+
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202", first.Code)
+	}
+	if replay.Code != http.StatusOK || !strings.Contains(replay.Body.String(), "duplicate") {
+		t.Errorf("replay status = %d body = %q, want 200 duplicate", replay.Code, replay.Body.String())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := agent.callCount(); n != 1 {
+		t.Errorf("reconcile calls = %d, want 1", n)
+	}
+
+	// A different push is a different body.
+	next := []byte(`{"ref":"refs/heads/main","after":"fedcba9876543210"}`)
+	if rec := doBodyReq(handler, http.MethodPost, "/webhook", next, signedHeaders("s3cret", next, "push")); rec.Code != http.StatusAccepted {
+		t.Errorf("new push status = %d, want 202", rec.Code)
+	}
+	agent.waitForCall(t)
+}
+
+// A script posting the same (empty) body twice means it twice, and it
+// knows the secret anyway, so token requests are never deduplicated.
+func TestWebhookTokenRequestsAreNotDeduplicated(t *testing.T) {
+	withCycleSpacing(t, time.Millisecond)
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+
+	for range 2 {
+		if rec := doReq(handler, http.MethodPost, "/webhook", map[string]string{"X-Gitops-Token": "s3cret"}); rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", rec.Code)
+		}
+		agent.waitForCall(t)
+	}
+}
+
+// blockingAgent holds its first cycle until released, standing in for a
+// cycle that is past its fetch when the next push is announced.
+type blockingAgent struct {
+	release chan struct{}
+	started chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (b *blockingAgent) SyncNow(ctx context.Context, acceptedAt time.Time) {
+	b.mu.Lock()
+	b.calls++
+	first := b.calls == 1
+	b.mu.Unlock()
+	b.started <- struct{}{}
+	if first {
+		<-b.release
+	}
+}
+
+func (b *blockingAgent) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// A push announced during a cycle used to be dropped: the cycle had
+// already fetched, and the trigger found the agent busy. Now it queues one
+// more cycle - one, however many deliveries arrive meanwhile.
+func TestWebhookDeliveriesDuringACycleQueueExactlyOneMore(t *testing.T) {
+	withCycleSpacing(t, time.Millisecond)
+	agent := &blockingAgent{release: make(chan struct{}), started: make(chan struct{}, 8)}
+	handler := New(t.Context(), agent, "s3cret", "main")
+	token := map[string]string{"X-Gitops-Token": "s3cret"}
+
+	doReq(handler, http.MethodPost, "/webhook", token)
+	select {
+	case <-agent.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first cycle never started")
+	}
+	for range 3 {
+		if rec := doReq(handler, http.MethodPost, "/webhook", token); rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202 while busy", rec.Code)
+		}
+	}
+	close(agent.release)
+
+	select {
+	case <-agent.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued cycle never ran")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := agent.callCount(); n != 2 {
+		t.Errorf("cycles = %d, want 2 - the running one and exactly one queued", n)
+	}
+}
+
+func TestSeenBodiesForgetsAfterTheWindowAndPastTheCap(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	s := &seenBodies{window: time.Minute, max: 2}
+
+	a, b, c := sha256.Sum256([]byte("a")), sha256.Sum256([]byte("b")), sha256.Sum256([]byte("c"))
+	if !s.add(a, now) {
+		t.Fatal("first add of a reported a duplicate")
+	}
+	if s.add(a, now.Add(30*time.Second)) {
+		t.Error("a within the window was not reported as a duplicate")
+	}
+	if !s.add(a, now.Add(2*time.Minute)) {
+		t.Error("a after the window was still a duplicate")
+	}
+
+	s = &seenBodies{window: time.Hour, max: 2}
+	s.add(a, now)
+	s.add(b, now)
+	s.add(c, now)
+	if !s.add(a, now) {
+		t.Error("a was not evicted by the cap")
+	}
+}
+
+// The ref sits at the top of a forge's push payload; the prefix the agent
+// keeps is usually a cut-off document, and must still yield it.
+func TestPushRefReadsTheRefFromATruncatedPayload(t *testing.T) {
+	cases := []struct{ name, prefix, want string }{
+		{"whole", `{"ref":"refs/heads/main","after":"abc"}`, "refs/heads/main"},
+		{"cut after ref", `{"ref":"refs/heads/dev","commits":[{"id":"ab`, "refs/heads/dev"},
+		{"ref after other keys", `{"secret":"","ref":"refs/tags/v1","before":"0"}`, "refs/tags/v1"},
+		{"cut before ref", `{"before":"0000","commits":[{"id":"ab`, ""},
+		{"not json", "payload=%7B%22ref", ""},
+		{"not an object", `["refs/heads/main"]`, ""},
+		{"empty", "", ""},
+	}
+	for _, c := range cases {
+		if got := pushRef([]byte(c.prefix)); got != c.want {
+			t.Errorf("%s: pushRef = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// An event header is not signed: garbage in it is neither logged nor
+// honoured, and a replay cannot get past the duplicate check by changing
+// it.
+func TestWebhookUnsignedEventHeaderCannotDodgeTheReplayCheck(t *testing.T) {
+	withCycleSpacing(t, time.Millisecond)
+	agent := newFakeAgent()
+	handler := New(t.Context(), agent, "s3cret", "main")
+	body := []byte(pushBody)
+
+	if rec := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, "push")); rec.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202", rec.Code)
+	}
+	agent.waitForCall(t)
+
+	replay := doBodyReq(handler, http.MethodPost, "/webhook", body, signedHeaders("s3cret", body, strings.Repeat("x", 4096)))
+	if replay.Code != http.StatusOK || !strings.Contains(replay.Body.String(), "duplicate") {
+		t.Errorf("replay status = %d body = %q, want 200 duplicate", replay.Code, replay.Body.String())
+	}
+}
+
+func TestDeliveryEventRejectsWhatNoForgeSends(t *testing.T) {
+	for header, want := range map[string]string{
+		"Push":                  "push",
+		" ping ":                "ping",
+		"pull_request":          "pull_request",
+		"push\nforged log line": "unrecognized",
+		strings.Repeat("a", 65): "unrecognized",
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/webhook", nil)
+		req.Header.Set("X-Gitea-Event", header)
+		if got := deliveryEvent(req); got != want {
+			t.Errorf("deliveryEvent(%q) = %q, want %q", header, got, want)
+		}
+	}
+}
+
+// The queued cycle carries when its newest delivery arrived, which is what
+// lets SyncNow drop a cycle a Roll Back overtook while it was queued.
+func TestPendingTriggerKeepsTheNewestAcceptanceTime(t *testing.T) {
+	p := newPendingTrigger()
+	early := time.Unix(1_000, 0)
+	late := early.Add(time.Minute)
+
+	p.set(late)
+	p.set(early)
+	if got := p.take(); !got.Equal(late) {
+		t.Errorf("take = %v, want the newest %v", got, late)
+	}
+	if got := p.take(); !got.IsZero() {
+		t.Errorf("second take = %v, want zero once taken", got)
+	}
+	select {
+	case <-p.ready:
+	default:
+		t.Error("set did not wake the worker")
 	}
 }

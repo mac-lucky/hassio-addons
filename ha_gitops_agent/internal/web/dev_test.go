@@ -456,11 +456,14 @@ func TestDevPreviewManagedRendersEveryGroup(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
-		`Managed by this agent <span class="count">234</span>`,
+		`Managed by this agent <span class="count">237</span>`,
 		`<span class="path">files</span>`,
 		`<span class="path">floors, areas, labels and helpers</span>`,
+		`<span class="path">devices (by device id)</span>`,
 		`<span class="path">entities</span>`,
 		`<span class="path">dashboards</span>`,
+		`<span class="path">Lovelace resources</span>`,
+		"<code>bubble_card</code>",
 		`<span class="path">add-on options</span>`,
 		`<span class="path">integrations</span>`,
 		`<span class="path">subentries</span>`,

@@ -53,10 +53,10 @@ configuration:
         description: Sync the repository's files, such as automations, scripts and packages, into /homeassistant. Off, no file is written, deleted, captured or committed back; the gitops/ manifests are still read.
       registries:
         name: Registries
-        description: Sync floors, areas, labels, helper entities, and entity customizations declared under gitops/ in the repository.
+        description: Sync floors, areas, labels, helper entities, zones, persons, device settings (name, area, labels, disabled) and entity customizations declared under gitops/ in the repository.
       dashboards:
         name: Dashboards
-        description: Sync Lovelace dashboards (metadata and view config) declared under gitops/ in the repository.
+        description: Sync Lovelace dashboards (metadata and view config) and Lovelace resources declared under gitops/ in the repository.
       addon_options:
         name: App options
         description: Sync other apps' options declared under gitops/ in the repository.

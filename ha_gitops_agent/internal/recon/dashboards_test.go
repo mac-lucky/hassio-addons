@@ -310,7 +310,9 @@ func TestApplyNowDashboardFailureDoesNotUndoEntitySuccess(t *testing.T) {
 	}
 }
 
-func TestApplyNowDashboardsNeverRunWhenEntityApplyItselfFails(t *testing.T) {
+// Dashboards depend on no other layer: an entity update that failed leaves
+// nothing a dashboard op was planned against changed.
+func TestApplyNowDashboardsStillRunWhenEntityApplyFails(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.entities.desired = entities.Desired{Entities: []map[string]any{{"entity_id": "light.x", "name": "X"}}}
 	fakes.entities.planOps = []registries.RegOp{{Kind: "update", RType: "entity", Key: "light.x", DiffText: "+y"}}
@@ -331,8 +333,8 @@ func TestApplyNowDashboardsNeverRunWhenEntityApplyItselfFails(t *testing.T) {
 
 	r.ApplyNow(context.Background(), true)
 
-	if len(fakes.registryApplier.applyDashboardPlanCalls) != 0 {
-		t.Errorf("apply_dashboard_plan_calls = %+v, want none", fakes.registryApplier.applyDashboardPlanCalls)
+	if len(fakes.registryApplier.applyDashboardPlanCalls) != 1 {
+		t.Errorf("apply_dashboard_plan_calls = %+v, want one", fakes.registryApplier.applyDashboardPlanCalls)
 	}
 }
 

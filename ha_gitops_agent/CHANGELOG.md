@@ -6,7 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Zones and persons in `gitops/helpers.yaml`, under `zone:` and `person:`,
+  created, adopted, updated and deleted like the other helpers. A zone
+  needs `name`, `latitude` and `longitude`; a person takes `name` and
+  `device_trackers`, while its linked user and picture stay whatever the
+  UI sets, since neither carries over between installs. Home Assistant
+  merges updates to both, so `null` is refused on their fields. The home
+  zone and YAML-defined zones and persons cannot be managed; a declared
+  person named like a YAML one is reported instead of created.
+- `gitops/devices.yaml`: the name, area, labels and disabled state of
+  devices that already exist, under `reconcile.registries`. Each entry
+  finds its device by the integration's name for it, an identifier or a
+  device id, and must match exactly one. Update-only, like entities:
+  removing an entry puts back the values it changed, and nothing is
+  restored while an entry that sets anything matches no device (a renamed
+  device should not lose its settings in the meantime). `disabled` is refused on a
+  device an integration disabled.
+- Lovelace resources in `gitops/dashboards.yaml`, under `resources:`,
+  with the dashboards toggle. A resource is identified by its URL path, so
+  HACS's `?hacstag=` rewrites are not drift and declaring a HACS card
+  adopts its existing entry. Undeclared resources are never touched. Not
+  available when Home Assistant keeps resources in YAML mode. A resource
+  is script that runs in every user's browser session, so with
+  `reconcile.dashboards` on, push access to the repository now also
+  means that (see DOCS.md, "Lovelace resources").
+- `fetch_failing_since` on `sensor.gitops_agent_status`, and a "Git host
+  unreachable" notice on the dashboard (see Changed).
+- `pending_device_ops` and `pending_resource_ops` on
+  `sensor.gitops_agent_status`, and "devices (by device id)" and
+  "Lovelace resources" groups on the dashboard's "Managed by this agent"
+  card.
+
+### Changed
+
+- A git host that stays unreachable past the two quick fetch retries no
+  longer puts the add-on in the error state straight away. For up to 15
+  minutes the state, the pending plan and the last error stay as the last
+  successful check left them, nothing is applied automatically, and one
+  warning is logged; after that it is an error as before. A self-hosted
+  forge stopped for a few minutes by its nightly backup used to turn the
+  add-on red every morning. A rejected token or a missing repository is
+  still an error at once, and so is an unreachable host right after the
+  add-on starts.
+- A registry layer that fails to apply no longer stops every layer after
+  it. Each layer's changes were planned against live state before the
+  apply, so a failed dashboard save now leaves add-on options, HACS and
+  integrations to apply as planned. Only real dependencies still wait:
+  devices and entities on floors/areas/labels/helpers, entities on
+  devices, integrations on HACS, and subentries on every other layer (a
+  subentry nothing recorded would come back as a duplicate). The
+  activity log names every layer that failed and every layer held back,
+  and `last_error` names each failed layer when more than one did.
+- Webhook deliveries are queued instead of dropped. A push announced
+  while a cycle (or Apply, or Roll Back) was running found the agent busy
+  and was lost until the next interval; it now queues another cycle, and
+  every delivery arriving in the meantime shares at most two; only one queued
+  behind a Roll Back is dropped, since the rollback pauses until the
+  repository is fixed. Webhook cycles run at least 10 seconds apart.
+- The webhook answers a `ping` with `200 pong`, and ignores (with `200`) a
+  push to another branch or tag and any event other than a push, instead
+  of running a cycle for each. A request that names no event, such as a
+  script's, still always triggers.
+- A signed webhook body identical to one accepted in the last hour is
+  answered `200 duplicate delivery ignored` and runs nothing, so a
+  captured delivery cannot be replayed to keep the agent busy. Token
+  requests are never treated as duplicates.
+
+### Fixed
+
+- A diff hidden because a plaintext file holds secret values (for example
+  a JSON or dotenv file with a `password` key) said `encrypted values
+  changed (hidden)`, sending people to look for sops or an age key that
+  had nothing to do with it. It now says `diff hidden: the file holds
+  secret values`, as does the diff of any file being deleted, which
+  quotes the plaintext live copy; the encrypted wording stays for adds
+  and updates of encrypted files.
 
 ## [0.7.0] - 2026-09-28
 

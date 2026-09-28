@@ -52,8 +52,14 @@ func PoisonedState(t *testing.T) applier.State {
 				"entity:light.kitchen":      {"name": Sentinel},
 				"entity:sensor.outdoor_dew": {"name": Sentinel},
 			}
+		case "DeviceOriginals":
+			state.DeviceOriginals = map[string]map[string]any{
+				"device:9a1b2c3d4e5f60718293a4b5c6d7e8f9": {"name_by_user": Sentinel},
+			}
 		case "DashboardManaged":
-			state.DashboardManaged = map[string]string{"dashboard:energy": Sentinel}
+			// Dashboards and Lovelace resources share this map, told apart
+			// by prefix; both are planted so each group is exercised.
+			state.DashboardManaged = map[string]string{"dashboard:energy": Sentinel, "resource:card_mod": Sentinel}
 		case "AddonOriginals":
 			state.AddonOriginals = map[string]map[string]any{
 				"addon:core_ssh": {"authorized_keys": Sentinel},

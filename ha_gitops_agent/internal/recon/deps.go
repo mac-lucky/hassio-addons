@@ -7,6 +7,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/addonopts"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/dashboards"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/devices"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/entities"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/flows"
@@ -309,6 +310,32 @@ func (realEntities) Plan(
 
 var _ Entities = realEntities{}
 
+// Devices is the internal/devices seam: load gitops/devices.yaml and plan
+// against the live device registry. Separate from Entities for Entities'
+// own reason: its own originals map, and a live list only it needs.
+type Devices interface {
+	LoadManifest(workdir string) (devices.Desired, error)
+	Plan(
+		desired devices.Desired, liveDevices []map[string]any,
+		originals map[string]map[string]any, refs entities.RefResolver,
+	) []registries.RegOp
+}
+
+type realDevices struct{}
+
+func (realDevices) LoadManifest(workdir string) (devices.Desired, error) {
+	return devices.LoadManifest(workdir)
+}
+
+func (realDevices) Plan(
+	desired devices.Desired, liveDevices []map[string]any,
+	originals map[string]map[string]any, refs entities.RefResolver,
+) []registries.RegOp {
+	return devices.Plan(desired, liveDevices, originals, refs)
+}
+
+var _ Devices = realDevices{}
+
 // Dashboards is the internal/dashboards seam: load gitops/dashboards.yaml
 // plus each declared config file, and plan against live state. Separate
 // because dashboards.Plan needs a live content map; its ownership rules
@@ -319,9 +346,20 @@ type Dashboards interface {
 		desired dashboards.Desired, liveDashboards []map[string]any,
 		liveContent map[string]map[string]any, managed map[string]string,
 	) []registries.RegOp
+	// PlanResources plans the manifest's Lovelace resources, which share
+	// its file, its toggle and the managed map ("resource:<id>" keys).
+	PlanResources(
+		desired dashboards.Desired, liveResources []map[string]any, resourceMode string, managed map[string]string,
+	) []registries.RegOp
 }
 
 type realDashboards struct{}
+
+func (realDashboards) PlanResources(
+	desired dashboards.Desired, liveResources []map[string]any, resourceMode string, managed map[string]string,
+) []registries.RegOp {
+	return dashboards.PlanResources(desired, liveResources, resourceMode, managed)
+}
 
 func (realDashboards) LoadManifest(workdir string) (dashboards.Desired, error) {
 	return dashboards.LoadManifest(workdir)
@@ -466,16 +504,27 @@ type RegistryApplier interface {
 	ApplyEntityPlan(
 		ctx context.Context, ops []registries.RegOp, originals map[string]map[string]any, stashDir string,
 	) regapply.RegistryApplyResult
+	// FetchLiveDevices lists the device registry for internal/devices.
+	FetchLiveDevices(ctx context.Context) ([]map[string]any, error)
+	// ApplyDevicePlan is ApplyEntityPlan's sibling for internal/devices.
+	ApplyDevicePlan(
+		ctx context.Context, ops []registries.RegOp, deviceOriginals map[string]map[string]any, stashDir string,
+	) regapply.RegistryApplyResult
 	// FetchLiveDashboards fetches every dashboard's metadata, plus the
 	// saved content of each id in ids.
 	FetchLiveDashboards(ctx context.Context, ids []string) ([]map[string]any, map[string]map[string]any, error)
-	// ApplyDashboardPlan is ApplyPlan's sibling for internal/dashboards.
+	// FetchLiveResources reads the Lovelace resource mode and, in storage
+	// mode, every live resource.
+	FetchLiveResources(ctx context.Context) ([]map[string]any, string, error)
+	// ApplyDashboardPlan is ApplyPlan's sibling for internal/dashboards,
+	// Lovelace resource ops included.
 	ApplyDashboardPlan(
 		ctx context.Context, ops []registries.RegOp, dashboardManaged map[string]string, stashDir string,
 	) regapply.RegistryApplyResult
 	RollbackRegistry(
 		ctx context.Context, stashDir string,
 		managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
+		deviceOriginals map[string]map[string]any,
 	) regapply.RegistryApplyResult
 
 	// FetchAddonInfoAll fetches GET /addons/<slug>/info per slug - see
@@ -604,11 +653,26 @@ func (r *realRegistryApplier) ApplyDashboardPlan(
 	return regapply.ApplyDashboardPlan(ctx, r.dialer, ops, dashboardManaged, stashDir)
 }
 
+func (r *realRegistryApplier) FetchLiveDevices(ctx context.Context) ([]map[string]any, error) {
+	return regapply.FetchLiveDevices(ctx, r.dialer)
+}
+
+func (r *realRegistryApplier) ApplyDevicePlan(
+	ctx context.Context, ops []registries.RegOp, deviceOriginals map[string]map[string]any, stashDir string,
+) regapply.RegistryApplyResult {
+	return regapply.ApplyDevicePlan(ctx, r.dialer, ops, deviceOriginals, stashDir)
+}
+
+func (r *realRegistryApplier) FetchLiveResources(ctx context.Context) ([]map[string]any, string, error) {
+	return regapply.FetchLiveResources(ctx, r.dialer)
+}
+
 func (r *realRegistryApplier) RollbackRegistry(
 	ctx context.Context, stashDir string,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
+	deviceOriginals map[string]map[string]any,
 ) regapply.RegistryApplyResult {
-	return regapply.RollbackRegistry(ctx, r.dialer, stashDir, managed, originals, dashboardManaged)
+	return regapply.RollbackRegistry(ctx, r.dialer, stashDir, managed, originals, dashboardManaged, deviceOriginals)
 }
 
 // The add-on methods below go over Supervisor's REST API, not the WS
@@ -718,6 +782,7 @@ type Deps struct {
 	Registries      Registries
 	RegistryApplier RegistryApplier
 	Entities        Entities
+	Devices         Devices
 	Dashboards      Dashboards
 	AddonOpts       AddonOpts
 	Flows           Flows

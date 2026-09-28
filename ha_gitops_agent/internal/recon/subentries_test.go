@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/dashboards"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/flows"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/regapply"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
@@ -612,5 +613,37 @@ func TestPushStatusReportsPendingSubentryOpsSeparately(t *testing.T) {
 	}
 	if pushed["pending_subentry_ops"] != 1 {
 		t.Errorf("pending_subentry_ops = %v, want 1", pushed["pending_subentry_ops"])
+	}
+}
+
+// A subentry CREATE is recorded only by the StateSave at the end of the
+// apply, and every stash-writing layer fails first on a full /data - so
+// any failed layer, related or not, holds subentries back rather than
+// risk a create nothing records.
+func TestApplyNowSubentriesWaitOnAnyFailedLayer(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.dashboards.desired = dashboards.Desired{
+		Dashboards: []map[string]any{{"id": "home", "title": "Home", "config": "home.yaml"}},
+		Content:    map[string]dashboards.DashboardContent{"home": {Data: map[string]any{}}},
+	}
+	fakes.dashboards.planOps = []registries.RegOp{{Kind: dashboards.KindCreate, RType: "dashboard", Key: "home", DiffText: "+z"}}
+	fakes.registryApplier.applyDashboardResult = regapply.RegistryApplyResult{
+		OK: false, Error: "stash write failed: no space left on device",
+	}
+	fakes.subentries.desired = subentries.Desired{Subentries: []map[string]any{declaredSubentry("kitchen", "pushward")}}
+	fakes.subentries.planOps = []registries.RegOp{
+		{Kind: subentries.KindCreate, RType: "subentry", Key: "kitchen", DiffText: "+k"},
+	}
+	opts := baseOpts()
+	opts.DryRun = false
+	opts.ReconcileDashboards = true
+	opts.ReconcileSubentries = true
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+
+	r.ApplyNow(context.Background(), true)
+
+	if len(fakes.registryApplier.applySubentryPlanCalls) != 0 {
+		t.Errorf("apply_subentry_plan_calls = %+v, want none after a failed layer", fakes.registryApplier.applySubentryPlanCalls)
 	}
 }

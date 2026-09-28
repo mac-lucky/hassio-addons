@@ -91,10 +91,11 @@ type stashEntry struct {
 	PriorObject   map[string]any // nil for a fresh create
 	ForwardParams map[string]any // non-nil only for "update"
 
-	// OriginalsExisted/OriginalsSnapshot are entity-only: state.EntityOriginals'
-	// entry for this entity_id from immediately BEFORE this op, so
-	// invertEntityOp restores the bookkeeping as well as the live fields.
-	// False means no entry existed yet, so invert deletes the key.
+	// OriginalsExisted/OriginalsSnapshot are for entities and devices only:
+	// the state.EntityOriginals (or DeviceOriginals) entry for this object
+	// from immediately BEFORE this op, so invertEntityOp/invertDeviceOp
+	// restore the bookkeeping as well as the live fields. False means no
+	// entry existed yet, so invert deletes the key.
 	OriginalsExisted  bool
 	OriginalsSnapshot map[string]any
 
