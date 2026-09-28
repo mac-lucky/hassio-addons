@@ -7,7 +7,9 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 
 - Collects systemd journal logs (Home Assistant Core, Supervisor, add-ons, host system)
 - Low memory footprint (~30-50MB RAM)
-- Configurable filtering by systemd unit
+- Filtering by add-on container or systemd unit
+- Python tracebacks and other multi-line output joined into one entry
+- Colour codes stripped and log levels read from the line itself
 - Custom labels for log enrichment
 - Optional redaction of secrets found in log messages
 - Built-in configuration validation
@@ -40,13 +42,16 @@ appends `/_bulk`, so the insert path has to be part of the URL. A bare
 |--------|---------|-------------|
 | `victorialogs_username` | `""` | Username for basic auth (leave empty to disable) |
 | `victorialogs_password` | `""` | Password for basic auth, only used when a username is set |
-| `hostname` | System hostname | Override the hostname label |
+| `hostname` | From the journal | Override the `host` label |
 | `instance` | `homeassistant` | Instance identifier for multi-HA setups |
 | `log_level` | `info` | Logging verbosity (trace/debug/info/warning/error) |
 | `collect_journal` | `true` | Collect systemd journal logs |
 | `redact_sensitive` | `true` | Replace API keys, tokens and passwords found in log messages with `[REDACTED]` |
 | `journal_include_units` | `[]` | Only collect from these systemd units |
 | `journal_exclude_units` | `[]` | Exclude these systemd units |
+| `include_containers` | `[]` | Only collect these add-on containers (see [Containers](#containers)) |
+| `exclude_containers` | `[]` | Never collect these add-on containers |
+| `multiline_containers` | `["homeassistant", "hassio_supervisor"]` | Join multi-line output from these containers into one entry |
 | `stream_fields` | `["host", "container_name", "unit"]` | Fields for VictoriaLogs stream identifiers |
 | `extra_labels` | `{}` | Additional key-value labels to add to all logs |
 | `custom_config_path` | `""` | Path to custom Vector config file (advanced) |
@@ -65,6 +70,12 @@ redact_sensitive: true
 journal_exclude_units:
   - "systemd-resolved.service"
   - "systemd-timesyncd.service"
+exclude_containers:
+  - "wmbusmeters-ha-addon"
+multiline_containers:
+  - "homeassistant"
+  - "hassio_supervisor"
+  - "music_assistant"
 extra_labels:
   environment: "production"
   location: "home"
@@ -80,27 +91,91 @@ validate.
 
 ### Journal Logs
 
-When `collect_journal` is enabled, the add-on collects all systemd journal entries including:
+When `collect_journal` is enabled, the add-on collects every systemd journal
+entry on the host:
 
-- **Home Assistant Core** logs
-- **Supervisor** logs
-- **Add-on** logs (via systemd units)
-- **Host system** services
+- **Home Assistant Core**, the **Supervisor**, its plugins and every
+  **add-on**, all of which run as Docker containers
+- **Host system** services, the kernel and the audit log
 
-Use `journal_include_units` to collect only specific units, or `journal_exclude_units` to filter out noisy services.
+Kernel and audit entries have no systemd unit, so they are labelled after
+their source instead (`unit` and `container_name` are `kernel` or `audit`)
+and get a stream of their own.
 
-### Multi-line tracebacks
+### Containers
 
-The journald docker driver stamps every stderr line `PRIORITY=3`, so each frame of a Python
-traceback would otherwise arrive as its own `error` entry. Lines that do not open a new Home
-Assistant log line are merged into the one that does, giving one entry per error with the
-stack attached and the level taken from the opening line.
+On Home Assistant OS every container logs through `docker.service`, so
+`journal_include_units` and `journal_exclude_units` cannot tell one add-on from
+another. Use `include_containers` and `exclude_containers` for that, and keep
+the unit options for host services.
 
-This applies to the container named `homeassistant`, which is what Supervisor calls Core. Logs
-from any other container are passed through one line at a time, unchanged. Because a merged
-entry is only complete once the next log line arrives, an isolated error can reach VictoriaLogs
-up to about three seconds later than it used to; a merged entry is capped at 200 lines or ten
-seconds, whichever comes first.
+An entry matches a container that has exactly that name, or whose name ends
+in `_<entry>`. `music_assistant` therefore matches
+`app_d5369777_music_assistant`, and it keeps matching if the Supervisor
+renames the container prefix. The names to use are the `container_name`
+values you already see in VictoriaLogs; Core is `homeassistant` and the
+Supervisor is `hassio_supervisor`. Only letters, digits, `_` and `-` are
+allowed.
+
+- `exclude_containers` drops everything those containers log.
+- `include_containers`, when not empty, drops every container that is not on
+  the list. Host services, the kernel and the audit log are not containers and
+  are left to the unit options.
+
+### Multi-line entries
+
+The journald Docker driver stamps every stderr line `PRIORITY=3`, so each
+frame of a Python traceback would otherwise arrive as its own `error` entry.
+For the containers in `multiline_containers`, a line that does not open a new
+log record is merged into the one before it, giving one entry per error with
+the stack attached and the level taken from the opening line. A line opens a
+new record when it starts with a date and time, a bracketed time such as
+`[12:00:00]`, or a level word such as `INFO` or `ERROR`.
+
+Add a container here only if its log lines start that way. Otherwise every
+line looks like a continuation, and lines are merged until one of the caps
+below is reached.
+
+`homeassistant` and `hassio_supervisor` are on the list by default. Other
+Python-based add-ons such as `music_assistant`, `appdaemon` or `esphome`
+usually benefit too. Set the option to `[]` to turn joining off. Because a
+merged entry is only complete once the next log line arrives, an isolated
+error from these containers can reach VictoriaLogs up to about three seconds
+later. A merged entry is capped at 200 lines or ten seconds, whichever comes
+first.
+
+Docker also splits any single line longer than 16 KB into pieces. The add-on
+always puts those back together before anything else happens to them, so a
+long line arrives as one entry.
+
+### What happens to each entry
+
+- **Level.** The level word in the line itself wins over the journal
+  priority, since Docker marks all of stderr as an error. The formats that are
+  recognised are:
+  - Home Assistant style `2026-01-11 09:04:15 WARNING`
+  - ISO timestamps as written by Vector, Go and Rust programs, and
+    cloudflared's `INF`/`WRN`/`ERR`
+  - zigbee2mqtt's `[2026-01-11 09:04:15] error:`
+  - bashio's `[09:04:15] INFO:`
+  - `s6-rc: info:`
+  - logfmt `level=error`
+
+  The level is one of `debug`, `info`, `notice`, `warn` and `error`; critical
+  and fatal count as `error`. An entry with no priority at all (the audit log)
+  is `info`, or `warn` for an AppArmor denial.
+- **Colour codes** are removed from the message.
+- **Blank lines** are dropped.
+- **Very long messages** are cut at 100,000 characters. VictoriaLogs silently
+  drops entries over 256 KB.
+- **Redaction.** With `redact_sensitive` on, the message is scrubbed of:
+  - authorization headers and API keys;
+  - tokens, passwords and secrets written as `key: value` or `key=value`;
+  - credentials inside URLs;
+  - bare JWTs, which is what Home Assistant access tokens are.
+
+  The process command line (`_CMDLINE`) is dropped as well, since it can carry
+  credentials.
 
 ## VictoriaLogs Integration
 
@@ -109,6 +184,10 @@ Logs are sent to VictoriaLogs using the Elasticsearch-compatible bulk API:
 - **Endpoint**: `{victorialogs_endpoint}` with `/_bulk` appended by Vector
 - **Compression**: gzip
 - **API version**: v8
+- **Delivery**: acknowledged. The journal position only moves past an entry
+  once VictoriaLogs has accepted it, so a restart while VictoriaLogs is down
+  resends what was in flight rather than losing it. The price is that such a
+  restart can store an entry twice.
 
 ### Stream Fields
 
@@ -123,21 +202,25 @@ The `stream_fields` option controls how logs are grouped in VictoriaLogs. The de
 Once running, you can query your logs using LogsQL:
 
 ```logsql
-# All Home Assistant logs
-{instance="homeassistant"}
+# All logs from this Home Assistant instance
+instance:=homeassistant
 
-# Logs from a specific container
+# Logs from a specific container (a stream field, so {} works)
 {container_name="homeassistant"}
 
 # Logs from a specific host
 {host="homeassistant-prod"}
 
-# Error level logs
-{instance="homeassistant"} level:error
+# Errors from every container, counted
+instance:=homeassistant level:=error | stats by (container_name) count()
 
 # Search for specific text
-{instance="homeassistant"} "error connecting"
+instance:=homeassistant "error connecting"
 ```
+
+`{...}` filters only work on stream fields (`stream_fields`, by default
+`host`, `container_name` and `unit`). `instance`, `level` and your extra labels
+are ordinary fields, so filter them with `field:=value` instead.
 
 ## Advanced: Custom Configuration
 
@@ -182,7 +265,9 @@ If a custom config fails validation the add-on will not print it. Run
 
 ### Configuration validation failed
 
-The add-on validates the generated configuration before starting. If validation fails:
+The add-on validates the generated configuration before starting. If validation
+fails, or an option is invalid, the add-on stops with the reason at the end of
+its log instead of restarting. To fix it:
 
 1. Check the add-on logs for the specific error
 2. Review your configuration options
@@ -191,16 +276,16 @@ The add-on validates the generated configuration before starting. If validation 
 On failure the add-on prints the generated configuration with credentials
 redacted, so it is safe to paste into a bug report.
 
-### High memory usage
+### High memory usage or noisy logs
 
-Vector typically uses 30-50MB of RAM. If usage is higher, add exclusions for
-noisy units:
+Vector typically uses 30-50MB of RAM. If usage is higher, or one add-on floods
+the logs, exclude it by container, and noisy host services by unit:
 
 ```yaml
+exclude_containers:
+  - "wmbusmeters-ha-addon"
 journal_exclude_units:
-  - "systemd-journald.service"
   - "systemd-timesyncd.service"
-  - "systemd-resolved.service"
 ```
 
 ### Connection refused errors

@@ -17,8 +17,8 @@ configuration:
   hostname:
     name: Hostname
     description: >-
-      Override the hostname label added to all logs.
-      Leave empty to use the system hostname.
+      Override the host label added to all logs.
+      Leave empty to use the host name the journal reports.
   instance:
     name: Instance
     description: >-
@@ -42,15 +42,34 @@ configuration:
   journal_include_units:
     name: Journal Include Units
     description: >-
-      Only collect logs from these systemd units.
-      Leave empty to collect from all units.
-      Example: ["home-assistant.service", "hassio-supervisor.service"]
+      Only collect logs from these systemd units on the host.
+      Leave empty to collect from all units. Core and every add-on run as
+      containers under docker.service; pick those with include_containers.
+      Example: ["docker.service", "NetworkManager.service"]
   journal_exclude_units:
     name: Journal Exclude Units
     description: >-
       Exclude logs from these systemd units.
       Useful for filtering out noisy services.
       Example: ["systemd-resolved.service", "systemd-timesyncd.service"]
+  include_containers:
+    name: Include Containers
+    description: >-
+      Only collect logs from these containers. An entry matches the full
+      container name or its ending, so music_assistant matches
+      app_d5369777_music_assistant. Leave empty to collect every container.
+      Host services, the kernel and the audit log are not affected.
+  exclude_containers:
+    name: Exclude Containers
+    description: >-
+      Never collect logs from these containers. Matched the same way as
+      Include Containers. Example: ["wmbusmeters-ha-addon"]
+  multiline_containers:
+    name: Multi-line Containers
+    description: >-
+      Join multi-line output such as Python tracebacks from these containers
+      into one entry. Only for containers whose log lines start with a
+      timestamp or a level word. Set to an empty list to turn joining off.
   stream_fields:
     name: Stream Fields
     description: >-
