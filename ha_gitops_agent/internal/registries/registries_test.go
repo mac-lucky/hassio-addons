@@ -1,6 +1,7 @@
 package registries
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -401,14 +402,255 @@ func TestDeleteOnlyManagedUndeclaredLiveObjectsNeverTouched(t *testing.T) {
 	}
 }
 
-func TestDeleteSkippedWhenLiveObjectAlreadyGone(t *testing.T) {
+// A stale mapping used to be skipped and kept forever. Live ids are name
+// slugs, so the next hand-made object with that name got the same id - and
+// the agent deleted it as "managed but undeclared".
+func TestForgetWhenLiveObjectAlreadyGone(t *testing.T) {
 	desired := Desired{}
 	live := map[string][]map[string]any{"floor": {}}
 	managed := map[string]string{"floor:ground": "abc"}
 
 	ops := Plan(desired, live, managed)
+	if len(ops) != 1 {
+		t.Fatalf("got %d ops, want 1: %+v", len(ops), ops)
+	}
+	op := ops[0]
+	if op.Kind != KindForget || op.RType != "floor" || op.Key != "ground" || op.LiveID != "abc" || len(op.Params) != 0 {
+		t.Errorf("unexpected op: %+v", op)
+	}
+	if want := "stop tracking floor:ground: live object abc is gone"; op.DiffText != want {
+		t.Errorf("diff_text = %q, want %q", op.DiffText, want)
+	}
+}
+
+// The other half: once the forget applied, a hand-made object that comes
+// back under the same slug is a stranger, not something to delete.
+func TestSameSlugReappearingAfterForgetIsNotDeleted(t *testing.T) {
+	live := map[string][]map[string]any{
+		"input_boolean": {{"id": "demo_flag", "name": "Demo flag"}},
+	}
+
+	ops := Plan(Desired{}, live, map[string]string{})
 	if len(ops) != 0 {
 		t.Errorf("got %d ops, want 0: %+v", len(ops), ops)
+	}
+}
+
+// --- Plan(): renaming a manifest id ------------------------------------
+
+// Renaming the key while keeping the name used to fail every cycle: the
+// old key still claimed the live object, so the new key could not adopt
+// it, and its create ran before the delete and hit the duplicate name.
+func TestRenamedKeyAdoptsTheObjectAndForgetsTheOldKey(t *testing.T) {
+	desired := Desired{Floors: []map[string]any{{"id": "new", "name": "Ground"}}}
+	live := map[string][]map[string]any{"floor": {{"floor_id": "ground", "name": "Ground"}}}
+	managed := map[string]string{"floor:old": "ground"}
+
+	ops := Plan(desired, live, managed)
+
+	if len(ops) != 2 {
+		t.Fatalf("got %d ops, want 2: %+v", len(ops), ops)
+	}
+	if op := ops[0]; op.Kind != KindUpdate || op.Key != "new" || op.LiveID != "ground" {
+		t.Errorf("ops[0] = %+v, want the adopt of floor:new", op)
+	}
+	if op := ops[1]; op.Kind != KindForget || op.Key != "old" || op.LiveID != "ground" {
+		t.Errorf("ops[1] = %+v, want a forget of floor:old", op)
+	}
+	if !strings.Contains(ops[1].DiffText, "now managed as floor:new") {
+		t.Errorf("forget diff_text = %q", ops[1].DiffText)
+	}
+}
+
+// For a helper the failure was worse than a loop: HA accepts duplicate
+// helper names, so the create succeeded as <slug>_2 and the delete then
+// removed the original, taking its entity_id with it.
+func TestRenamedHelperKeyKeepsItsEntity(t *testing.T) {
+	desired := Desired{Helpers: map[string][]map[string]any{
+		"input_boolean": {{"id": "new_flag", "name": "Demo flag"}},
+	}}
+	live := map[string][]map[string]any{"input_boolean": {{"id": "demo_flag", "name": "Demo flag"}}}
+	managed := map[string]string{"input_boolean:old_flag": "demo_flag"}
+
+	ops := Plan(desired, live, managed)
+
+	type kindKey struct{ kind, key, liveID string }
+	got := make([]kindKey, len(ops))
+	for i, op := range ops {
+		got[i] = kindKey{op.Kind, op.Key, op.LiveID}
+	}
+	want := []kindKey{{KindUpdate, "new_flag", "demo_flag"}, {KindForget, "old_flag", "demo_flag"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ops = %+v, want %+v", got, want)
+	}
+}
+
+// Changing the id and the name together is a different object: the old
+// one is deleted and a new one created.
+func TestRenamedKeyWithNewNameDeletesAndCreates(t *testing.T) {
+	desired := Desired{Floors: []map[string]any{{"id": "new", "name": "Upstairs"}}}
+	live := map[string][]map[string]any{"floor": {{"floor_id": "ground", "name": "Ground"}}}
+	managed := map[string]string{"floor:old": "ground"}
+
+	ops := Plan(desired, live, managed)
+
+	if len(ops) != 2 || ops[0].Kind != KindCreate || ops[0].Key != "new" || ops[1].Kind != KindDelete || ops[1].Key != "old" {
+		t.Errorf("ops = %+v, want [create floor:new, delete floor:old]", ops)
+	}
+}
+
+// A declared key still claims its object: a second key with the same name
+// must not adopt it out from under the first.
+func TestDeclaredKeyStillClaimsItsObject(t *testing.T) {
+	desired := Desired{Helpers: map[string][]map[string]any{
+		"input_boolean": {{"id": "first", "name": "Flag"}, {"id": "second", "name": "Flag"}},
+	}}
+	live := map[string][]map[string]any{"input_boolean": {{"id": "flag", "name": "Flag"}}}
+	managed := map[string]string{"input_boolean:first": "flag"}
+
+	ops := Plan(desired, live, managed)
+
+	if len(ops) != 1 || ops[0].Kind != KindCreate || ops[0].Key != "second" {
+		t.Errorf("ops = %+v, want only a create of input_boolean:second", ops)
+	}
+}
+
+// A rename next to a hand-made helper of the same name is ambiguous, and
+// the old key's helper may be the one the rename meant to keep: it is left
+// alone rather than deleted until the ambiguity is resolved.
+func TestRenameIntoAmbiguousAdoptDeletesNothing(t *testing.T) {
+	desired := Desired{Helpers: map[string][]map[string]any{
+		"input_boolean": {{"id": "new_flag", "name": "Flag"}},
+	}}
+	live := map[string][]map[string]any{"input_boolean": {
+		{"id": "flag", "name": "Flag"},
+		{"id": "flag_2", "name": "Flag"},
+	}}
+	managed := map[string]string{"input_boolean:old_flag": "flag"}
+
+	ops := Plan(desired, live, managed)
+
+	if len(ops) != 1 || ops[0].Kind != KindError || ops[0].Key != "new_flag" {
+		t.Errorf("ops = %+v, want only the ambiguous-adopt error", ops)
+	}
+}
+
+// The same for an area that errors on a broken reference before it ever
+// reaches adoption.
+func TestRenamedAreaWithBrokenRefDeletesNothing(t *testing.T) {
+	desired := Desired{
+		Floors: []map[string]any{{"id": "ground", "name": "Ground"}},
+		Areas:  []map[string]any{{"id": "new_room", "name": "Living room", "floor": "ground"}},
+	}
+	live := map[string][]map[string]any{
+		"floor": {{"floor_id": "F1", "name": "Ground"}, {"floor_id": "F2", "name": "ground"}},
+		"area":  {{"area_id": "living_room", "name": "Living room"}},
+	}
+	managed := map[string]string{"area:old_room": "living_room"}
+
+	ops := Plan(desired, live, managed)
+
+	for _, op := range ops {
+		if op.Kind != KindError {
+			t.Errorf("unexpected %s op %s:%s, want only errors: %+v", op.Kind, op.RType, op.Key, ops)
+		}
+	}
+}
+
+// --- Plan(): adopt-by-name matches the way Home Assistant compares -------
+
+// HA refuses a floor/area/label whose casefold().replace(" ", "") equals an
+// existing one's, so an exact compare planned a create HA always rejected.
+func TestRegistryAdoptMatchesNormalizedName(t *testing.T) {
+	desired := Desired{Areas: []map[string]any{{"id": "living_room", "name": "living room"}}}
+	live := map[string][]map[string]any{"area": {{"area_id": "living_room", "name": "Living Room"}}}
+
+	ops := Plan(desired, live, nil)
+
+	if len(ops) != 1 {
+		t.Fatalf("got %d ops, want 1: %+v", len(ops), ops)
+	}
+	op := ops[0]
+	if op.Kind != KindUpdate || op.LiveID != "living_room" {
+		t.Errorf("unexpected op: %+v", op)
+	}
+	// The adopt writes the manifest's spelling.
+	if !strings.Contains(op.DiffText, "-name: 'Living Room'") || !strings.Contains(op.DiffText, "+name: 'living room'") {
+		t.Errorf("diff_text = %q", op.DiffText)
+	}
+}
+
+func TestRegistryAdoptIgnoresSpacesInName(t *testing.T) {
+	desired := Desired{Labels: []map[string]any{{"id": "gitops", "name": "Git Ops"}}}
+	live := map[string][]map[string]any{"label": {{"label_id": "gitops", "name": "GitOps"}}}
+
+	ops := Plan(desired, live, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindUpdate || ops[0].LiveID != "gitops" {
+		t.Errorf("ops = %+v, want an adopt of the live label", ops)
+	}
+}
+
+// Helpers have no unique-name rule, so a differently cased live helper is
+// someone else's.
+func TestHelperAdoptStaysCaseSensitive(t *testing.T) {
+	desired := Desired{Helpers: map[string][]map[string]any{"input_boolean": {{"id": "flag", "name": "flag"}}}}
+	live := map[string][]map[string]any{"input_boolean": {{"id": "flag", "name": "Flag"}}}
+
+	ops := Plan(desired, live, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindCreate {
+		t.Errorf("ops = %+v, want a create", ops)
+	}
+}
+
+// --- Plan(): null fields -------------------------------------------------
+
+// floor: null used to resolve as floor id "", a $ref nothing could
+// satisfy, failing the whole layer every cycle.
+func TestAreaNullFloorUpdateClearsIt(t *testing.T) {
+	desired := Desired{Areas: []map[string]any{{"id": "living_room", "name": "Living room", "floor": nil}}}
+	live := map[string][]map[string]any{"area": {{"area_id": "A1", "name": "Living room", "floor_id": "F1"}}}
+	managed := map[string]string{"area:living_room": "A1"}
+
+	ops := Plan(desired, live, managed)
+
+	if len(ops) != 1 || ops[0].Kind != KindUpdate {
+		t.Fatalf("ops = %+v, want one update", ops)
+	}
+	floorID, present := ops[0].Params["floor_id"]
+	if !present || floorID != nil {
+		t.Errorf("params = %+v, want floor_id: nil", ops[0].Params)
+	}
+}
+
+func TestAreaNullFloorMatchesLiveNull(t *testing.T) {
+	desired := Desired{Areas: []map[string]any{{"id": "living_room", "name": "Living room", "floor": nil}}}
+	live := map[string][]map[string]any{"area": {{"area_id": "A1", "name": "Living room", "floor_id": nil}}}
+	managed := map[string]string{"area:living_room": "A1"}
+
+	if ops := Plan(desired, live, managed); len(ops) != 0 {
+		t.Errorf("got %d ops, want 0: %+v", len(ops), ops)
+	}
+}
+
+// The create schema types floor_id as a plain str, so a null there is left
+// out rather than sent.
+func TestCreateOmitsNullFields(t *testing.T) {
+	desired := Desired{
+		Areas: []map[string]any{{"id": "living_room", "name": "Living room", "floor": nil, "icon": nil}},
+	}
+
+	ops := Plan(desired, nil, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindCreate {
+		t.Fatalf("ops = %+v, want one create", ops)
+	}
+	if want := map[string]any{"name": "Living room"}; !reflect.DeepEqual(ops[0].Params, want) {
+		t.Errorf("params = %+v, want %+v", ops[0].Params, want)
+	}
+	if strings.Contains(ops[0].DiffText, "floor_id") {
+		t.Errorf("diff_text = %q, want no floor_id line", ops[0].DiffText)
 	}
 }
 
@@ -1139,6 +1381,124 @@ func TestDiffTextNeverRendersARawRefPlaceholder(t *testing.T) {
 
 // --- manifest items can't declare fields that collide with reserved WS
 // envelope/request-id keys --------------------------------------------------
+
+// --- helper boolean fields -------------------------------------------------
+
+// yaml.v3 keeps an unquoted YAML 1.1 on/yes as the string, HA's cv.boolean
+// stores True, and the two never compare equal: an update every cycle.
+func TestHelperBoolFieldRejectsUnquotedYAML11Words(t *testing.T) {
+	workdir, gitops := mkGitops(t)
+	writeFile(t, gitops, "helpers.yaml", `
+input_boolean:
+  - id: flag
+    name: Flag
+    initial: on
+counter:
+  - id: visits
+    name: Visits
+    restore: yes
+input_datetime:
+  - id: alarm
+    name: Alarm
+    has_time: "true"
+`)
+
+	_, err := LoadManifests(workdir)
+	var manifestErr *ManifestError
+	if !errors.As(err, &manifestErr) {
+		t.Fatalf("err = %v, want a *ManifestError", err)
+	}
+	for _, want := range []string{
+		"helpers.yaml: counter 'visits' field 'restore' must be true or false (unquoted on/yes read as text)",
+		"helpers.yaml: input_boolean 'flag' field 'initial' must be true or false",
+		"helpers.yaml: input_datetime 'alarm' field 'has_time' must be true or false",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestHelperBoolFieldAcceptsBooleansAndNull(t *testing.T) {
+	workdir, gitops := mkGitops(t)
+	writeFile(t, gitops, "helpers.yaml", `
+input_boolean:
+  - id: flag
+    name: Flag
+    initial: true
+timer:
+  - id: tea
+    name: Tea
+    restore: false
+input_datetime:
+  - id: alarm
+    name: Alarm
+    has_date: true
+input_select:
+  - id: mode
+    name: Mode
+    options: [a, b]
+    initial: null
+`)
+
+	desired, err := LoadManifests(workdir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if desired.Helpers["input_boolean"][0]["initial"] != true {
+		t.Errorf("initial = %#v, want true", desired.Helpers["input_boolean"][0]["initial"])
+	}
+}
+
+// null drops a field from the update, and on a field HA defaults that
+// stores the default: nil against it again next cycle, an apply (and a
+// backup) every interval.
+func TestHelperNullIsRefusedOnAFieldWithADefault(t *testing.T) {
+	workdir, gitops := mkGitops(t)
+	writeFile(t, gitops, "helpers.yaml", `
+counter:
+  - id: visits
+    name: Visits
+    restore: null
+input_number:
+  - id: level
+    name: Level
+    min: 0
+    max: 10
+    mode: null
+`)
+
+	_, err := LoadManifests(workdir)
+	if err == nil {
+		t.Fatal("null on defaulted fields loaded")
+	}
+	for _, want := range []string{
+		"helpers.yaml: counter 'visits' field 'restore' cannot be null",
+		"helpers.yaml: input_number 'level' field 'mode' cannot be null",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+func TestHelperDefaultedFieldsNameSupportedDomains(t *testing.T) {
+	for domain := range helperDefaultedFields {
+		if !supportedHelperDomainSet[domain] {
+			t.Errorf("helperDefaultedFields has unsupported domain %q", domain)
+		}
+	}
+}
+
+// Every field the check covers must be one a supported domain's schema
+// reads with cv.boolean, so a domain typo here would silently check nothing.
+func TestHelperBoolFieldsNameSupportedDomains(t *testing.T) {
+	for domain := range helperBoolFields {
+		if !supportedHelperDomainSet[domain] {
+			t.Errorf("helperBoolFields has unsupported domain %q", domain)
+		}
+	}
+}
 
 func TestReservedFieldNameTypeIsRejected(t *testing.T) {
 	workdir, gitops := mkGitops(t)

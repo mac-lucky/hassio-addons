@@ -6,7 +6,163 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+Fixes from a review of the sync engine and the registry layers, plus
+signed webhook deliveries. No new options, but three behaviour changes
+to know about (see Changed): with `dry_run` off a webhook delivery now
+applies, a successful Roll Back pauses automatic checks, and
+`gitops/helpers.yaml` is checked more strictly.
+
+### Added
+
+- The webhook trigger accepts a git host's signed delivery. Put the
+  value of `webhook_secret` in the webhook's secret field on GitHub,
+  Forgejo or Gitea and drop `?token=` from the URL: the agent checks the
+  HMAC-SHA256 of the body in `X-Hub-Signature-256`, `X-Forgejo-Signature`
+  or `X-Gitea-Signature` against the same secret, so the secret itself
+  never crosses the network. Port 8098 is plain HTTP, so this is the
+  better option whenever the host reaches the agent over a network. The
+  `X-Gitops-Token` header and `?token=` keep working unchanged; a
+  request carrying a token is judged on the token alone. Bad signatures
+  count toward the same 30-a-minute lockout as wrong tokens, and a
+  signed body over 5 MiB is answered `413` without triggering anything.
+- Fetches retry twice (after 2 and 8 seconds) when the failure looks
+  transient: an HTTP 5xx from the forge, a DNS failure, a refused or reset
+  connection. A forge that is back within a few seconds, such as one
+  restarting behind its proxy, no longer puts the agent in the error
+  state.
+- `apply_held` on `sensor.gitops_agent_status`, and an "Automatic apply
+  held" notice on the dashboard (see Fixed).
+
+### Changed
+
+- A webhook delivery now runs a full cycle, apply included, instead of
+  only checking. With `dry_run` off a push lands as soon as the forge
+  announces it rather than up to an interval later. While paused, or with
+  `dry_run` on, it still only checks.
+- Activity events now reach the add-on log at their real level: failures
+  as `ERROR`, degraded outcomes (backup failed, conflict, config warnings)
+  as `WARN`. Every event used to be logged as `INFO`, so a log shipper
+  filtering on level never saw a failed cycle.
+- Pressing Apply applies only the plan the page showed. If a webhook or the
+  timer replaced it in between, nothing is applied and the dashboard says
+  so; review the new plan and press again. Scripts that post to `/apply`
+  without a `plan` value keep the old behaviour.
+- `/status.json`'s `operation.error` now reports a failed or refused Apply
+  or Roll Back. It was empty for both, whatever happened.
+- After a successful Roll Back with `dry_run` off (or `capture_live_changes`
+  on), automatic checks are paused. Nothing about the repository changed,
+  so the next check used to re-apply the commit just rolled back (or
+  capture the restored files over it). Resume once the repository is fixed.
+- Clone and fetch get 10 minutes instead of 60 seconds, so a first clone
+  of a repository with media in it can finish; a transfer that stalls
+  (under 1 KiB/s for 30 seconds) is aborted and retried instead of
+  holding the agent for the whole budget.
+- `gitops/helpers.yaml` now refuses an on/off field written as anything
+  but `true` or `false`. `initial` on `input_boolean`, `has_date` and
+  `has_time` on `input_datetime`, and `restore` on `counter` and `timer`
+  written as an unquoted `on`, `yes`, `off` or `no` is read as text,
+  which Home Assistant stores as a boolean, so the item never matched and
+  was re-applied on every cycle. Such a file now fails to load with an
+  error naming the item and field; write `true` or `false` instead.
+- Adopting a floor, area or label by name now matches the way Home
+  Assistant compares their names, ignoring case and spaces. A manifest
+  `living room` against a live `Living Room` used to plan a create that
+  Home Assistant refused as a duplicate on every cycle; it now adopts the
+  existing one and renames it to the manifest's spelling. Helpers still
+  match exactly, since Home Assistant does not require their names to be
+  unique.
+- Encrypted YAML, JSON and dotenv files are now written with sops'
+  `--mac-only-encrypted`, and the managed `.sops.yaml` sets
+  `mac_only_encrypted: true` on its YAML and JSON rules. The ordinary
+  values in such a file can now be edited by hand in a pull request
+  without breaking decryption. Existing files keep their old whole-file
+  check until they are next encrypted and still decrypt as before; the
+  `.sops.yaml` in the repository is rewritten once, with the next import,
+  capture or commit-back. The bundled sops already qualifies; editing
+  these files by hand now needs sops 3.9.0 or newer.
+- Base image updated to hassio-addons/base 21.0.6 (from 21.0.5).
+
+### Fixed
+
+- A commit that fails `check_config` is no longer re-applied every
+  interval. Each attempt took a full Supervisor backup, recorder database
+  included, and backups from failed applies were never pruned, so a bad
+  commit could fill the disk. The timer now holds a plan whose apply
+  failed and tries it again after an hour, then two, four and so on up to
+  a day; a different plan (a new commit, a live edit) is not held, and the
+  Apply button still tries it at once. Backups are pruned after every
+  apply, failed or not.
+- A failed apply that undid itself no longer moves the Roll Back target
+  onto its own, already restored, stash. Roll Back keeps pointing at the
+  last good apply, and that stash is no longer aged out by repeated
+  failures.
+- `reconcile.yaml_files: false` now actually stops file sync. It was read
+  and ignored: every tracked file was still written into `/homeassistant`.
+- A conflict (a file changed both in the repository and live) stays a
+  conflict until the two sides agree. An apply of other files in the same
+  cycle used to clear it, and the next cycle captured the live copy over
+  the repository's commit.
+- `capture_live_changes` no longer reverts a push that lands on a captured
+  path between the check and the capture. Such a path is left out of the
+  capture and comes back as a conflict on the next cycle.
+- Stopping the add-on during a capture or commit-back no longer leaves the
+  local clone on the capture branch, where the apply that follows would
+  write a tree nobody reviewed. An apply now also checks out the commit it
+  planned from if the clone moved, and no new apply starts once shutdown
+  has begun.
+- Pausing now stops an automatic add-on update batch between add-ons; it
+  used to be checked once, before the batch.
+- A clone that fails or is interrupted no longer leaves a half-built
+  repository behind that later cycles treat as complete.
+- Renaming a floor, area, label or helper `id` in the manifest while
+  keeping its `name` no longer fails on every cycle. The old id still
+  held the live object, so the new id could not adopt it and its create
+  collided with the existing name - and a helper, which Home Assistant
+  lets share a name, came back as a second `<name>_2` entity while the
+  original was deleted. The new id now adopts the object and the old id
+  is forgotten in the same apply; nothing is deleted or recreated.
+- Renaming an integration `id` the same way no longer deletes the
+  integration. The new id's setup flow aborted as already configured and
+  was recorded as a failure, while the old id's delete removed the
+  original entry along with its devices and entities. The new id now
+  adopts the entry and the old id is forgotten.
+- A managed floor, area, label, helper or dashboard that was deleted by
+  hand and then removed from the manifest is now forgotten instead of
+  tracked forever. Their live ids come from their names (or url_path),
+  so an object created later under the same name was deleted by the next
+  apply as one the agent still managed. The plan shows a `forget` line
+  for it, and nothing is sent to Home Assistant.
+- A rename whose new id cannot adopt yet - an ambiguous name match, an
+  area with a broken floor or label reference, an integration with an
+  unresolvable `secret://` reference - no longer deletes the old id's
+  object. It is left alone until the error is fixed.
+- Updating a helper no longer strips the fields the manifest does not
+  declare. Home Assistant replaces a helper's whole configuration on
+  update, so adopting an `input_number` by name alone dropped its icon,
+  unit and mode, and failed outright without `min` and `max`. The agent
+  now sends the undeclared fields back as they are live; a field
+  declared `null` is removed, except one Home Assistant fills with a
+  default (such as `restore` or `step`), where `null` is refused at load
+  because it would be re-applied every cycle. Rolling back a helper update now restores
+  the whole prior configuration instead of sending `null` for fields
+  that were unset before, which Home Assistant rejected.
+- An area declared with `floor: null` now clears its floor. It used to
+  be planned as a reference to a floor with an empty id, which could
+  never resolve, failing the whole registry layer on every cycle.
+- A field declared `null` is left out of a create rather than sent:
+  Home Assistant's create schemas reject `null` for most fields.
+- A registry manifest no longer fails every cycle on an install without
+  `default_config:`. The agent used to list every helper domain it
+  supports, and a helper integration that is not loaded answers with
+  `unknown_command`; it now lists only the domains the manifest declares
+  or it already manages, and names a used-but-unloaded one in the error.
+
+### Security
+
+- A secret typed into a plaintext-tracked file (for example an `api_key:`
+  added in the File editor) is now masked in the dashboard diff and in
+  `/status.json`. Update diffs were masked only when the repository copy
+  was encrypted.
 
 ## [0.6.11] - 2026-09-25
 

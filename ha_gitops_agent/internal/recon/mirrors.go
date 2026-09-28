@@ -197,7 +197,7 @@ func (r *Reconciler) RetryBlocked(key string) error {
 	if err := r.applier.StateSave(state); err != nil {
 		// Gone from the copy in hand but not from disk, so the next cycle
 		// is still blocked by it and the row will still be there.
-		r.logEvent("retry failed for " + key + ": " + err.Error())
+		r.logError("retry failed for " + key + ": " + err.Error())
 		return err
 	}
 	r.refreshStateMirrors(state)

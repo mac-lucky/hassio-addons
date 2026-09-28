@@ -85,7 +85,7 @@ func (r *Reconciler) commitDriftBack(ctx context.Context, changes []differ.Chang
 
 	branch, err := r.git.CommitBack(ctx, driftFiles(changes), ConfigRoot, lastSHA, time.Now())
 	if err != nil {
-		r.logEvent("commit-back failed: " + err.Error())
+		r.logError("commit-back failed: " + err.Error())
 		return "", err
 	}
 

@@ -27,14 +27,17 @@
 //
 //  1. key not in managed: exactly one unclaimed live entry with this domain
 //     and this exact title -> adopt (KindUpdate). Several -> error op.
-//     None -> create (KindCreate).
+//     None -> create (KindCreate). Only still-declared keys claim, so a
+//     renamed key adopts the entry its old key managed.
 //  2. key in managed and the entry still exists: hash of the declared data
 //     vs. the hash snapshotted at adoption (state.IntegrationHashes).
 //     Different -> error op telling the user to delete and re-declare.
 //  3. key in managed but the live entry is gone -> rule 1 again; a stale
 //     managed entry_id can never legitimately be reused.
-//  4. key in managed but no longer declared -> delete the live entry. An
-//     unmanaged entry sharing the same domain+title is never touched.
+//  4. key in managed but no longer declared -> delete the live entry, or
+//     only forget the key (KindForget, no live call) when a declared key
+//     holds that entry - the rename in rule 1. An unmanaged entry sharing
+//     the same domain+title is never touched.
 //
 // # Failure memory
 //
@@ -87,6 +90,7 @@ const (
 	KindCreate = registries.KindCreate
 	KindUpdate = registries.KindUpdate
 	KindDelete = registries.KindDelete
+	KindForget = registries.KindForget
 	KindError  = registries.KindError
 )
 
@@ -271,12 +275,52 @@ func Plan(
 			liveByEntryID[id] = e
 		}
 	}
-	claimed := map[string]bool{}
-	for _, liveID := range managed {
-		claimed[liveID] = true
-	}
 
 	declaredIDs := map[string]bool{}
+	for _, item := range desired.Integrations {
+		if id, _ := item["id"].(string); id != "" {
+			declaredIDs[id] = true
+		}
+	}
+
+	// claimed holds every entry a declared key already manages, plus every
+	// one adopted as the loop below runs. Only keys the manifest still
+	// declares claim: a key dropped this same plan is releasing its entry,
+	// which is what renaming a manifest id looks like, and claiming for it
+	// hid the entry from the new key - whose create then aborted
+	// already_configured, while the old key's delete removed the original.
+	claimed := map[string]bool{}
+	for fullKey, liveID := range managed {
+		if strings.HasPrefix(fullKey, "integration:") && declaredIDs[strings.TrimPrefix(fullKey, "integration:")] {
+			claimed[liveID] = true
+		}
+	}
+	// contested holds every entry a declared key might have adopted but
+	// could not decide on this plan (an ambiguous match, or a key that
+	// errored before matching). An undeclared key holding one is left alone
+	// rather than deleted: it may be exactly the entry a rename meant to
+	// keep, and deleting an entry takes its devices and entities with it.
+	contested := map[string]bool{}
+	candidates := func(domain, title string) []map[string]any {
+		var matches []map[string]any
+		for _, e := range liveEntries {
+			eDomain, _ := e["domain"].(string)
+			eTitle, _ := e["title"].(string)
+			eID, _ := e["entry_id"].(string)
+			if eDomain == domain && eTitle == title && !claimed[eID] {
+				matches = append(matches, e)
+			}
+		}
+		return matches
+	}
+	contest := func(matches []map[string]any) {
+		for _, e := range matches {
+			if eID, _ := e["entry_id"].(string); eID != "" {
+				contested[eID] = true
+			}
+		}
+	}
+
 	var ops []registries.RegOp
 
 	for _, item := range desired.Integrations {
@@ -284,7 +328,6 @@ func Plan(
 		domain, _ := item["domain"].(string)
 		title, _ := item["title"].(string)
 		declared, _ := item["data"].(map[string]any)
-		declaredIDs[id] = true
 		key := "integration:" + id
 
 		// Resolve first: the hash rule, the adopt payload and the create
@@ -292,6 +335,7 @@ func Plan(
 		data, secretValues, resolveErr := secrets.ResolveMap(declared)
 		if resolveErr != nil {
 			ops = append(ops, errorOp(id, secretref.UnresolvedMessage("integration", id, resolveErr)))
+			contest(candidates(domain, title))
 			continue
 		}
 
@@ -316,15 +360,7 @@ func Plan(
 			// adopt-or-create as if never managed.
 		}
 
-		var matches []map[string]any
-		for _, e := range liveEntries {
-			eDomain, _ := e["domain"].(string)
-			eTitle, _ := e["title"].(string)
-			eID, _ := e["entry_id"].(string)
-			if eDomain == domain && eTitle == title && !claimed[eID] {
-				matches = append(matches, e)
-			}
-		}
+		matches := candidates(domain, title)
 
 		switch {
 		case len(matches) == 1:
@@ -346,6 +382,7 @@ func Plan(
 		case len(matches) > 1:
 			ops = append(ops, errorOp(id, fmt.Sprintf(
 				"ambiguous adopt: %d live integration entries for domain '%s' titled %s", len(matches), domain, difftext.PyRepr(title))))
+			contest(matches)
 		default:
 			if refusal, blocked := failmemory.Refusal(attempts, key, data); blocked {
 				ops = append(ops, errorOp(id, refusal))
@@ -376,6 +413,19 @@ func Plan(
 		liveID := managed[fullKey]
 		liveEntry, exists := liveByEntryID[liveID]
 		if !exists {
+			continue
+		}
+		if claimed[liveID] {
+			// A declared key manages or just adopted this entry - a renamed
+			// manifest id - so the old key is only forgotten. It comes after
+			// the adopt in ops, so the entry is never left untracked.
+			ops = append(ops, registries.RegOp{
+				Kind: KindForget, RType: "integration", Key: id, Params: map[string]any{}, LiveID: liveID,
+				DiffText: fmt.Sprintf("stop tracking %s: live entry %s is now managed by another manifest id", fullKey, liveID),
+			})
+			continue
+		}
+		if contested[liveID] {
 			continue
 		}
 		domain, _ := liveEntry["domain"].(string)

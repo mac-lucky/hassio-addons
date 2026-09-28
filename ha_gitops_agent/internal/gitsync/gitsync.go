@@ -28,6 +28,12 @@ import (
 // /data persists across restarts and upgrades (a Supervisor-managed volume).
 const DefaultWorkdir = "/data/repo"
 
+// DefaultNetworkTimeout bounds clone and fetch (see GitSync.NetworkTimeout).
+// A full clone of a config repository with media under www/ over a slow
+// uplink routinely outlasts DefaultGitTimeout, and a clone that is killed
+// every time never completes at all.
+const DefaultNetworkTimeout = 10 * time.Minute
+
 // DefaultGitTimeout bounds every git subprocess call this package makes.
 const DefaultGitTimeout = 60 * time.Second
 
@@ -331,6 +337,11 @@ type GitSync struct {
 	// DefaultGitTimeout when zero.
 	Timeout time.Duration
 
+	// NetworkTimeout bounds clone and fetch instead, whose cost is a
+	// transfer - the whole history, for a first clone - rather than local
+	// work. New sets DefaultNetworkTimeout; zero falls back to Timeout.
+	NetworkTimeout time.Duration
+
 	// Crypter encrypts secrets into the worktree and back out. nil (no age
 	// key) is fine: every call site is the nil-safe g.Crypter.Enabled().
 	// Set alongside SetEncryptionEnabled - same option, checked together.
@@ -349,6 +360,7 @@ func New(opts options.Options, workdir string) *GitSync {
 		Workdir:         workdir,
 		Runner:          execx.CommandRunner{},
 		Timeout:         DefaultGitTimeout,
+		NetworkTimeout:  DefaultNetworkTimeout,
 		gitConfigGlobal: strings.TrimRight(absPath(workdir), "/") + ".gitconfig",
 	}
 }
@@ -380,11 +392,30 @@ func (g *GitSync) EnsureClone(ctx context.Context) error {
 		return fmt.Errorf("gitsync: creating parent dir: %w", err)
 	}
 
-	if _, err := g.runGit(ctx, []string{"clone", "--no-checkout", "--origin", "origin", g.Opts.RepoURL, g.Workdir}, parent, g.credentialEnv()); err != nil {
+	// Cloned beside Workdir and renamed into place only once complete. A
+	// clone killed partway - its timeout SIGKILLs the process group, so git
+	// cannot clean up, and neither can a container stop - used to leave a
+	// .git with the right origin and no history, which the check above
+	// accepted as a finished clone from then on.
+	partial := absPath(g.Workdir) + ".partial"
+	if err := os.RemoveAll(partial); err != nil {
+		return fmt.Errorf("gitsync: removing an unfinished clone: %w", err)
+	}
+	if _, err := g.runGitWith(ctx, []string{"clone", "--no-checkout", "--origin", "origin", g.Opts.RepoURL, partial}, parent, g.networkEnv(), g.NetworkTimeout); err != nil {
+		_ = os.RemoveAll(partial)
 		return err
 	}
-	if _, err := g.runGit(ctx, []string{"config", "core.autocrlf", "false"}, g.Workdir, nil); err != nil {
+	if _, err := g.runGit(ctx, []string{"config", "core.autocrlf", "false"}, partial, nil); err != nil {
+		_ = os.RemoveAll(partial)
 		return err
+	}
+	// Whatever is left at Workdir has no usable .git (see above).
+	if err := os.RemoveAll(g.Workdir); err != nil {
+		return fmt.Errorf("gitsync: removing an unusable clone: %w", err)
+	}
+	if err := os.Rename(partial, g.Workdir); err != nil {
+		_ = os.RemoveAll(partial)
+		return fmt.Errorf("gitsync: moving the finished clone into place: %w", err)
 	}
 	if _, err := g.runGit(ctx, []string{"config", "--global", "--add", "safe.directory", absPath(g.Workdir)}, g.Workdir, nil); err != nil {
 		return err
@@ -403,7 +434,7 @@ func (g *GitSync) Fetch(ctx context.Context) (string, error) {
 	if err := g.guardReadArgs(); err != nil {
 		return "", err
 	}
-	if _, err := g.runGit(ctx, []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}, g.Workdir, g.credentialEnv()); err != nil {
+	if err := g.fetchWithRetry(ctx); err != nil {
 		// Exit 128 covers a missing branch and every auth or network failure
 		// alike, so an exit code decides rather than git's prose. Only a
 		// definite absence becomes the sentinel: a probe that itself fails,
@@ -419,6 +450,60 @@ func (g *GitSync) Fetch(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(result.Stdout), nil
+}
+
+// fetchRetryDelays are the waits before each retry of a fetch that failed
+// transiently; one retry per entry. A var so tests can shorten them.
+var fetchRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second}
+
+// fetchWithRetry is the fetch itself, retried on an error that says the
+// forge or the network hiccuped rather than that anything is wrong: a
+// forge restarting behind its proxy answers 502 for a few seconds, and
+// every such blip used to put the agent in the error state and drop the
+// plan waiting for review until the next interval.
+func (g *GitSync) fetchWithRetry(ctx context.Context) error {
+	args := []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}
+	for attempt := 0; ; attempt++ {
+		_, err := g.runGitWith(ctx, args, g.Workdir, g.networkEnv(), g.NetworkTimeout)
+		if err == nil || attempt >= len(fetchRetryDelays) || !isTransientFetchError(err) {
+			return err
+		}
+		slog.Info("gitsync: fetch failed transiently, retrying", "attempt", attempt+1, "error", err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(fetchRetryDelays[attempt]):
+		}
+	}
+}
+
+// transientFetchMarkers are the git and curl messages of a failure worth
+// retrying. Matched on git's own text, which LC_ALL=C keeps stable. Our
+// own "timed out after" is deliberately absent: a fetch that ran out its
+// whole budget would not finish any faster the second time.
+var transientFetchMarkers = []string{
+	"The requested URL returned error: 5",
+	"RPC failed; HTTP 5",
+	"Could not resolve host",
+	"Temporary failure in name resolution",
+	"Failed to connect",
+	"Connection refused",
+	"Connection reset",
+	"Connection timed out",
+	"Operation timed out",
+	"Operation too slow",
+	"early EOF",
+	"unexpected disconnect",
+}
+
+func isTransientFetchError(err error) bool {
+	msg := err.Error()
+	for _, marker := range transientFetchMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoteHasBranch reports whether opts.Branch exists on the remote. Exit 2
@@ -441,6 +526,17 @@ func (g *GitSync) RemoteHasBranch(ctx context.Context) (bool, error) {
 		reason = g.redactCredentials(strings.TrimSpace(result.Stdout))
 	}
 	return false, newCommandError("git ls-remote failed (exit %d): %s", result.ExitCode, reason)
+}
+
+// networkEnv is credentialEnv plus a stall limit for the two transfers that
+// get NetworkTimeout. That budget is sized for a slow but MOVING transfer;
+// without a low-speed limit git waits out all of it on a forge that accepts
+// the connection and then sends nothing, holding the operation lock - and
+// with it Apply and Roll Back - for the whole ten minutes. Under 1 KiB/s
+// for 30 seconds aborts instead, and reads as transient (see
+// transientFetchMarkers).
+func (g *GitSync) networkEnv() []string {
+	return append(g.credentialEnv(), "GIT_HTTP_LOW_SPEED_LIMIT=1024", "GIT_HTTP_LOW_SPEED_TIME=30")
 }
 
 // credentialEnv returns the extra environment Fetch adds to authenticate as

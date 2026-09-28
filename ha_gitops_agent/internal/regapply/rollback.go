@@ -250,13 +250,15 @@ var serverGeneratedFields = map[string]bool{"created_at": true, "modified_at": t
 
 // invertOne inverts one executed entry: create -> delete; update -> set
 // only entry.ForwardParams' fields back to their stashed prior values (nil
-// clears one absent there); delete -> recreate from the stashed prior
-// object minus its read-only fields, remapping managed to whatever id Home
-// Assistant assigns this time.
+// clears one absent there), or for a helper the whole prior item (see
+// helperBaseline); delete -> recreate from the stashed prior object minus
+// its read-only fields, remapping managed to whatever id Home Assistant
+// assigns this time; forget -> restore the mapping, with no WS call.
 //
 // Restoring only what the op changed, rather than the full snapshot, both
 // avoids resending fields the update schema rejects and keeps the inverse
-// from clobbering a field a concurrent process touched in between.
+// from clobbering a field a concurrent process touched in between. Helpers
+// cannot have that: their update has no partial form.
 func invertOne(
 	ctx context.Context, ws WSClient, entry stashEntry,
 	managed map[string]string, originals map[string]map[string]any, dashboardManaged map[string]string,
@@ -280,15 +282,24 @@ func invertOne(
 		return nil
 
 	case registries.KindUpdate:
-		restoreParams := make(map[string]any, len(entry.ForwardParams)+1)
-		restoreParams[reqIDField] = entry.LiveID
-		for fieldName := range entry.ForwardParams {
-			var val any
-			if entry.PriorObject != nil {
-				val = entry.PriorObject[fieldName]
+		var restoreParams map[string]any
+		if registries.IsRegistryRType(entry.RType) {
+			restoreParams = make(map[string]any, len(entry.ForwardParams)+1)
+			for fieldName := range entry.ForwardParams {
+				var val any
+				if entry.PriorObject != nil {
+					val = entry.PriorObject[fieldName]
+				}
+				restoreParams[fieldName] = val
 			}
-			restoreParams[fieldName] = val
+		} else {
+			// A helper update replaces the whole item (see executeOne), so
+			// the prior item IS the inverse. The per-field restore above
+			// would send "field: null" for one absent before, which every
+			// helper schema rejects.
+			restoreParams = helperBaseline(entry.RType, entry.PriorObject)
 		}
+		restoreParams[reqIDField] = entry.LiveID
 		if _, err := ws.Cmd(ctx, msgType(entry.RType, "update"), restoreParams); err != nil {
 			return err
 		}
@@ -311,6 +322,11 @@ func invertOne(
 			managed[fullKey] = newID
 		}
 		return nil
+
+	case registries.KindForget:
+		// The forward op only dropped the mapping, so this only restores it.
+		managed[fullKey] = entry.LiveID
+		return nil
 	}
 
 	return fmt.Errorf("unreachable: unknown op kind %q", entry.Kind)
@@ -330,6 +346,20 @@ func stripReadonlyFields(rtype string, obj map[string]any) map[string]any {
 			continue
 		}
 		out[k] = v
+	}
+	return out
+}
+
+// helperBaseline is a helper's live item as update params: its writable
+// fields, minus any holding null. A helper schema rejects an explicit null
+// (cv.icon, cv.string), and omitting the key instead gets the same stored
+// value back wherever null is the default (counter's minimum/maximum).
+func helperBaseline(rtype string, obj map[string]any) map[string]any {
+	out := stripReadonlyFields(rtype, obj)
+	for k, v := range out {
+		if v == nil {
+			delete(out, k)
+		}
 	}
 	return out
 }

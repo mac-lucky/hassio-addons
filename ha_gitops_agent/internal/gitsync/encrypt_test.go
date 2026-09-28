@@ -51,7 +51,16 @@ func (f *fakeSops) Run(_ context.Context, _ string, _ []string, args ...string) 
 		return sopscrypt.RunResult{Stderr: err.Error(), ExitCode: 1}, nil
 	}
 
-	switch args[1] {
+	// The subcommand is the first non-flag argument: a values-only file
+	// is encrypted with the global --mac-only-encrypted ahead of it.
+	sub := ""
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "-") {
+			sub = a
+			break
+		}
+	}
+	switch sub {
 	case "encrypt":
 		if sopscrypt.IsEncrypted(data) {
 			// The real binary refuses a file that already carries a
@@ -75,7 +84,7 @@ func (f *fakeSops) Run(_ context.Context, _ string, _ []string, args ...string) 
 		}
 		return sopscrypt.RunResult{Stdout: out}, nil
 	}
-	return sopscrypt.RunResult{Stderr: "unexpected subcommand " + args[1], ExitCode: 2}, nil
+	return sopscrypt.RunResult{Stderr: "unexpected subcommand " + sub, ExitCode: 2}, nil
 }
 
 // fakeEncrypt is fakeSops's transformation, for seeding a repository with

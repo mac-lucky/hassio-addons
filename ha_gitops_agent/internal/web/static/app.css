@@ -487,7 +487,7 @@ h1 {
 .badge-update { background: var(--tint-blue); color: var(--blue-fg); }
 .badge-delete { background: var(--tint-red); color: var(--red-fg); }
 .badge-error { background: var(--tint-orange); color: var(--orange-fg); }
-.badge-restore { background: var(--tint-gray); color: var(--gray-fg); }
+.badge-restore, .badge-forget { background: var(--tint-gray); color: var(--gray-fg); }
 
 /* Run-history kinds. A separate set from the change kinds above: they say
    what OPERATION ran, not what it did to one item. */

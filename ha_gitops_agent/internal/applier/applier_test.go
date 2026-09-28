@@ -1009,11 +1009,12 @@ func TestPruneStashDirsKeepsRecentAndNeverRemovesExcluded(t *testing.T) {
 		}
 	}
 
-	// oldest of all, but still referenced by a pending rollback: must
-	// survive.
-	excluded := names[0]
+	// The oldest two, one the current apply's stash and one the Roll Back
+	// target a self-undone failure left in place: both must survive. The
+	// empty entry is a caller with no rollback point.
+	excluded, target := names[0], names[1]
 
-	PruneStashDirs(cfg, 3, filepath.Join(cfg.BackupRoot, excluded))
+	PruneStashDirs(cfg, 3, filepath.Join(cfg.BackupRoot, excluded), "", filepath.Join(cfg.BackupRoot, target))
 
 	entries, err := os.ReadDir(cfg.BackupRoot)
 	if err != nil {
@@ -1023,7 +1024,7 @@ func TestPruneStashDirsKeepsRecentAndNeverRemovesExcluded(t *testing.T) {
 	for _, e := range entries {
 		remaining[e.Name()] = true
 	}
-	want := map[string]bool{excluded: true, "20260105T000000Z": true, "20260106T000000Z": true, "20260107T000000Z": true}
+	want := map[string]bool{excluded: true, target: true, "20260105T000000Z": true, "20260106T000000Z": true, "20260107T000000Z": true}
 	if len(remaining) != len(want) {
 		t.Fatalf("remaining = %+v, want %+v", remaining, want)
 	}

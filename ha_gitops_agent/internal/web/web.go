@@ -14,6 +14,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -67,8 +68,10 @@ type Agent interface {
 	Busy() bool
 	// ReconcileNow runs one fetch + diff cycle immediately.
 	ReconcileNow(ctx context.Context) []differ.Change
-	// ApplyNow applies the currently pending diff.
-	ApplyNow(ctx context.Context, force bool) applier.Result
+	// ApplyReviewed applies the currently pending diff if it is still the
+	// plan planID names (recon.Status.PlanID); "" applies whatever is
+	// pending.
+	ApplyReviewed(ctx context.Context, planID string) applier.Result
 	// Rollback restores the last known-good state.
 	Rollback(ctx context.Context) applier.Result
 	// CommitDriftBack commits the pending file drift to a new throwaway
@@ -114,8 +117,20 @@ var funcMap = template.FuncMap{
 	"inventoryGroup": inventoryGroupFunc,
 	"join":           strings.Join,
 	"printable":      escapeFormatChars,
+	"planVals":       planVals,
 	"retryVals":      retryVals,
 	"reverseEvents":  reverseEvents,
+}
+
+// planVals is the Apply button's hx-vals payload: the plan the page shows,
+// which /apply refuses to apply once it is no longer the plan. Marshalled
+// for retryVals' reason.
+func planVals(planID string) string {
+	encoded, err := json.Marshal(map[string]string{"plan": planID})
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 // retryVals is one Retry button's hx-vals payload, naming which recorded
@@ -538,14 +553,38 @@ func New(agent Agent) http.Handler {
 		return nil
 	}))
 
-	mux.HandleFunc("POST /apply", opRoute(agent, tracker, "apply", func(ctx context.Context) error {
-		agent.ApplyNow(ctx, true)
-		return nil
-	}))
+	mux.HandleFunc("POST /apply", func(w http.ResponseWriter, r *http.Request) {
+		// The plan the page was rendered with (see the Apply button's
+		// hx-vals). Bounded like /retry's key; a real one is 64 hex chars.
+		r.Body = http.MaxBytesReader(w, r.Body, maxRetryBodyBytes)
+		// Parsed explicitly: FormValue swallows a parse error and reads
+		// "", which would turn a bound request into an unbound one.
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "unreadable form", http.StatusBadRequest)
+			return
+		}
+		planID := r.FormValue("plan")
+		if len(planID) > maxPlanIDLen {
+			http.Error(w, "plan id too long", http.StatusBadRequest)
+			return
+		}
+		// Checked here as well as in ApplyReviewed, which decides under the
+		// operation lock: this copy answers with the new plan in the
+		// fragment and a header the page turns into a banner. A plan that
+		// changes after this check is still refused there, and that refusal
+		// reaches the activity feed and operation.error instead.
+		if planID != "" && !agent.Busy() && safeStatus(agent).PlanID != planID {
+			w.Header().Set(opRefusedHeader, opRefusedPlanChanged)
+			writeFragment(w, safeStatus(agent), "")
+			return
+		}
+		opRoute(agent, tracker, "apply", func(ctx context.Context) error {
+			return resultError(agent.ApplyReviewed(ctx, planID))
+		})(w, r)
+	})
 
 	mux.HandleFunc("POST /rollback", opRoute(agent, tracker, "rollback", func(ctx context.Context) error {
-		agent.Rollback(ctx)
-		return nil
+		return resultError(agent.Rollback(ctx))
 	}))
 
 	mux.HandleFunc("POST /commitback", opRoute(agent, tracker, "commit drift back", func(ctx context.Context) error {
@@ -645,7 +684,7 @@ func opRoute(agent Agent, tracker *opTracker, name string, op func(context.Conte
 				err := op(ctx)
 				tracker.finish(id, err)
 				if err != nil {
-					slog.Warn("web: operation did not run", "op", name, "error", err)
+					slog.Warn("web: operation failed or was refused", "op", name, "error", err)
 				}
 			}()
 			awaitBusy(agent, done)
@@ -663,11 +702,30 @@ const (
 	opRefusedHeader = "X-GitOps-Op-Refused"
 )
 
-// Bounds on POST /retry's one parameter - see the route.
+// Bounds on POST /retry's one parameter - see the route. /apply's plan id
+// shares the body cap.
 const (
 	maxRetryBodyBytes = 4096
 	maxRetryKeyLen    = 256
+	maxPlanIDLen      = 128
 )
+
+// opRefusedPlanChanged is the opRefusedHeader value /apply answers with
+// when the plan it was pressed on is no longer the plan.
+const opRefusedPlanChanged = "plan-changed"
+
+// resultError turns an operation's Result into what the tracker records:
+// every Apply and Roll Back used to report success to /status.json,
+// including the ones that failed or were refused.
+func resultError(res applier.Result) error {
+	if res.OK {
+		return nil
+	}
+	if res.Error == "" {
+		return errors.New("the operation did not succeed")
+	}
+	return errors.New(res.Error)
+}
 
 // opTracker is the most recent background operation a route started:
 // which one, whether it is still running, and what it returned. One slot,

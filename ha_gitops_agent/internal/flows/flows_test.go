@@ -686,3 +686,75 @@ func TestPlanNeverRendersAResolvedSecret(t *testing.T) {
 		}
 	}
 }
+
+// --- Plan(): renaming a manifest id ---------------------------------------
+
+// A renamed key used to be destructive: the old key still claimed the
+// entry, so the new key's create aborted already_configured (and was
+// recorded as a failure) while the old key's delete removed the original,
+// devices and entities included.
+func TestPlanRenamedKeyAdoptsTheEntryAndForgetsTheOldKey(t *testing.T) {
+	desired := Desired{Integrations: []map[string]any{item("workday_new", "workday", "Workday", nil)}}
+	live := []map[string]any{liveEntry("abc123", "workday", "Workday")}
+	managed := map[string]string{"integration:workday_old": "abc123"}
+
+	ops := Plan(desired, live, managed, nil, nil, nil)
+
+	if len(ops) != 2 {
+		t.Fatalf("ops = %+v, want 2", ops)
+	}
+	if op := ops[0]; op.Kind != KindUpdate || op.Key != "workday_new" || op.LiveID != "abc123" {
+		t.Errorf("ops[0] = %+v, want the adopt of workday_new", op)
+	}
+	if op := ops[1]; op.Kind != KindForget || op.Key != "workday_old" || op.LiveID != "abc123" || len(op.Params) != 0 {
+		t.Errorf("ops[1] = %+v, want a forget of workday_old", op)
+	}
+}
+
+// A declared key still claims its entry against a second key of the same
+// domain and title.
+func TestPlanDeclaredKeyStillClaimsItsEntry(t *testing.T) {
+	desired := Desired{Integrations: []map[string]any{
+		item("first", "workday", "Workday", nil),
+		item("second", "workday", "Workday", nil),
+	}}
+	live := []map[string]any{liveEntry("abc123", "workday", "Workday")}
+	managed := map[string]string{"integration:first": "abc123"}
+
+	ops := Plan(desired, live, managed, nil, nil, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindCreate || ops[0].Key != "second" {
+		t.Errorf("ops = %+v, want only a create of second", ops)
+	}
+}
+
+// When the renamed key cannot decide what to adopt, the old key's entry is
+// left alone rather than deleted: it may be the one the rename meant to keep.
+func TestPlanRenameIntoAmbiguousAdoptDeletesNothing(t *testing.T) {
+	desired := Desired{Integrations: []map[string]any{item("workday_new", "workday", "Workday", nil)}}
+	live := []map[string]any{
+		liveEntry("abc123", "workday", "Workday"),
+		liveEntry("def456", "workday", "Workday"),
+	}
+	managed := map[string]string{"integration:workday_old": "abc123"}
+
+	ops := Plan(desired, live, managed, nil, nil, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindError || ops[0].Key != "workday_new" {
+		t.Errorf("ops = %+v, want only the ambiguous-adopt error", ops)
+	}
+}
+
+func TestPlanRenameWithUnresolvableSecretDeletesNothing(t *testing.T) {
+	desired := Desired{Integrations: []map[string]any{
+		item("workday_new", "workday", "Workday", map[string]any{"user": map[string]any{"key": "secret://missing"}}),
+	}}
+	live := []map[string]any{liveEntry("abc123", "workday", "Workday")}
+	managed := map[string]string{"integration:workday_old": "abc123"}
+
+	ops := Plan(desired, live, managed, nil, nil, nil)
+
+	if len(ops) != 1 || ops[0].Kind != KindError || ops[0].Key != "workday_new" {
+		t.Errorf("ops = %+v, want only the unresolved-reference error", ops)
+	}
+}

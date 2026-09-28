@@ -107,7 +107,8 @@ func (g *GitSync) Import(ctx context.Context, configRoot string, limits ImportLi
 		// Nothing was ever checked out, so there is no commit to detach at
 		// and no branch deletable while HEAD is on it. Drop what was
 		// written; the next EnsureClone/Checkout puts the rest right.
-		if _, err := g.runGit(ctx, []string{"clean", "-fdx"}, "", nil); err != nil {
+		// Uncancelled for restoreDetachedCheckout's reason.
+		if _, err := g.runGit(context.WithoutCancel(ctx), []string{"clean", "-fdx"}, "", nil); err != nil {
 			slog.Debug("gitsync: import: could not clean workdir after a failed seed", "branch", tmpBranch, "error", err)
 		}
 	}()

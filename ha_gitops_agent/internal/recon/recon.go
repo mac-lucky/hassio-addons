@@ -24,6 +24,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/dashboards"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/entities"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/failmemory"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/hacs"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/history"
@@ -105,9 +106,27 @@ type Reconciler struct {
 	// at all, which ApplyNow refuses on. Not the same as StateError, where
 	// a partly-applied registry layer is worth pressing Apply again.
 	lastCycleFailed bool
-	lastSHA         string
-	lastApplyUTC    string
-	lastStashDir    string
+	// planID is planFingerprint of the plan held right now, "" when there
+	// is none. Recomputed wherever pending/pendingRegistry are replaced.
+	planID string
+	// heldPlan is the planID of the last plan an apply failed on, and
+	// heldPlanReason why. runCycle does not apply that plan again until
+	// heldPlanUntil: the Supervisor backup, check_config and rollback it
+	// costs would otherwise repeat every interval with the same result.
+	// The hold expires rather than standing, doubling per repeat failure
+	// (heldPlanFailures, see heldPlanRetryAfter), because a failure need
+	// not be the plan's fault - Home Assistant restarting mid-apply, or a
+	// fix made outside the planned files (a missing !secret) that moves no
+	// fingerprint. A different plan is not held; the Apply button is never
+	// held. heldPlanLogged keeps the refusal to one event per hold.
+	heldPlan         string
+	heldPlanReason   string
+	heldPlanUntil    time.Time
+	heldPlanFailures int
+	heldPlanLogged   bool
+	lastSHA          string
+	lastApplyUTC     string
+	lastStashDir     string
 	// lastStashSummary is the one sentence the Roll Back confirmation
 	// quotes about what lastStashDir restores, or "" when none was
 	// composed. Built at apply time; Status time would mean stat-ing it.
@@ -439,6 +458,86 @@ func regOpIdentity(op registries.RegOp) string {
 	return fmt.Sprintf("%s %s:%s", op.Kind, op.RType, op.Key)
 }
 
+// planFingerprint identifies one plan by the commit it was built from and
+// what the dashboard shows of every change and executable op in it, so two
+// plans that would render the same page hash the same. "" for a plan with
+// nothing to execute. Keyed like failmemory's hashes (the diff text can
+// quote live content), which is what lets it travel in /status.json.
+func planFingerprint(sha string, files []differ.Change, ops []registries.RegOp) string {
+	fileIDs := make([]string, 0, len(files))
+	for _, c := range files {
+		fileIDs = append(fileIDs, c.Kind+" "+c.Path+"\n"+c.DiffText)
+	}
+	opIDs := make([]string, 0, len(ops))
+	for _, op := range ops {
+		if op.Kind == registries.KindError {
+			continue
+		}
+		opIDs = append(opIDs, regOpIdentity(op)+"\n"+op.DiffText)
+	}
+	if len(fileIDs) == 0 && len(opIDs) == 0 {
+		return ""
+	}
+	sort.Strings(fileIDs)
+	sort.Strings(opIDs)
+	return failmemory.Hash(map[string]any{"sha": sha, "files": fileIDs, "ops": opIDs})
+}
+
+// planTouchesLive is whether applying this plan writes anything in Home
+// Assistant: a forget only edits the agent's own records, and an error op
+// never runs.
+func planTouchesLive(files []differ.Change, ops []registries.RegOp) bool {
+	if len(files) > 0 {
+		return true
+	}
+	for _, op := range ops {
+		if op.Kind != registries.KindError && op.Kind != registries.KindForget {
+			return true
+		}
+	}
+	return false
+}
+
+// holdPlan records that an apply of planID failed; see heldPlan.
+func (r *Reconciler) holdPlan(planID, reason string) {
+	r.withMu(func() { r.holdPlanLocked(planID, reason) })
+}
+
+func (r *Reconciler) holdPlanLocked(planID, reason string) {
+	if planID == "" {
+		return
+	}
+	if planID == r.heldPlan {
+		r.heldPlanFailures++
+	} else {
+		r.heldPlanFailures = 1
+	}
+	wait := heldPlanRetryAfter
+	for i := 1; i < r.heldPlanFailures && wait < heldPlanRetryMax; i++ {
+		wait *= 2
+	}
+	r.heldPlan, r.heldPlanReason = planID, reason
+	r.heldPlanUntil = time.Now().Add(min(wait, heldPlanRetryMax))
+	r.heldPlanLogged = false
+}
+
+// heldPlanRetryAfter is how long a failed plan is held before the timer
+// tries it again, doubling with each repeat failure up to heldPlanRetryMax.
+// Vars so tests can expire a hold.
+var (
+	heldPlanRetryAfter = time.Hour
+	heldPlanRetryMax   = 24 * time.Hour
+)
+
+// applyHeldLocked is heldPlanReason while the plan held right now is the
+// one that failed and its hold has not expired, else "".
+func (r *Reconciler) applyHeldLocked() string {
+	if r.planID == "" || r.planID != r.heldPlan || !time.Now().Before(r.heldPlanUntil) {
+		return ""
+	}
+	return r.heldPlanReason
+}
+
 // nullable returns nil for "" so a status attribute serializes as JSON
 // null. Only for the statusd.Push boundary, not Status()'s own "" convention.
 func nullable(s string) any {
@@ -491,6 +590,17 @@ const eventMaxLen = 2000
 // process log. Takes r.mu, so a caller must not hold it. Refusals log here
 // too - the web UI re-renders identically either way.
 func (r *Reconciler) logEvent(message string) {
+	r.logEventAt(slog.LevelInfo, message)
+}
+
+// logWarn and logError are logEvent for a degraded or failed outcome. The
+// dashboard feed shows every event alike; the level is for the add-on log,
+// where anything that ships it (the vector add-on, a journald reader) can
+// only tell a failed cycle from a routine one by it.
+func (r *Reconciler) logWarn(message string)  { r.logEventAt(slog.LevelWarn, message) }
+func (r *Reconciler) logError(message string) { r.logEventAt(slog.LevelError, message) }
+
+func (r *Reconciler) logEventAt(level slog.Level, message string) {
 	entry := Event{TS: utcNowISO(), Message: humanize.Truncate(message, eventMaxLen)}
 	r.mu.Lock()
 	r.events = append(r.events, entry)
@@ -498,7 +608,7 @@ func (r *Reconciler) logEvent(message string) {
 		r.events = r.events[len(r.events)-eventLogMaxLen:]
 	}
 	r.mu.Unlock()
-	slog.Info(message)
+	slog.Log(context.Background(), level, message)
 }
 
 // pushStatus pushes state/attrs to sensor.gitops_agent_status on every
@@ -518,8 +628,11 @@ func (r *Reconciler) pushStatus() {
 		"pending_subentry_ops":    countByRType(r.pendingRegistry, "subentry"),
 		"pending_hacs_ops":        countByRType(r.pendingRegistry, rtypeHacs),
 		"error":                   nullable(r.lastError),
-		"warnings":                nullable(r.lastWarnings),
-		"last_drift_branch":       nullable(r.lastDriftBranch),
+		// An automation's cue that the timer has stopped retrying a
+		// failing plan and is waiting for a person.
+		"apply_held":        nullable(r.applyHeldLocked()),
+		"warnings":          nullable(r.lastWarnings),
+		"last_drift_branch": nullable(r.lastDriftBranch),
 		// Conflicts are held out of pending_changes - they are in no plan -
 		// so without their own count the one thing that actually needs a
 		// person would publish drift_pending with pending_changes 0.
@@ -674,7 +787,7 @@ func (r *Reconciler) commitPaused(paused bool) (changed bool, err error) {
 		// the user can rely on: the button did what it says for now, and a
 		// restart would disagree - in whichever direction this press was
 		// going.
-		r.logEvent(fmt.Sprintf("%s: %v - %s", pauseWriteFailedPrefix(paused), err, pauseWriteFailedEffect(paused)))
+		r.logWarn(fmt.Sprintf("%s: %v - %s", pauseWriteFailedPrefix(paused), err, pauseWriteFailedEffect(paused)))
 	}
 
 	// Inside the lock, unlike the status push: the feed is a sequence, and
@@ -783,6 +896,8 @@ func (r *Reconciler) Status() Status {
 	lastImportError := r.lastImportError
 	lastImportPreview := r.lastImportPreview
 	lastBackupError := r.lastBackupError
+	planID := r.planID
+	applyHeld := r.applyHeldLocked()
 	lastVersionRecordUTC := r.lastVersionRecordUTC
 	nextTickUTC := r.nextTickUTC
 	// Read beside nextTickUTC, which SetPaused clears under the same lock:
@@ -847,6 +962,8 @@ func (r *Reconciler) Status() Status {
 		RollbackPreview:     lastStashSummary,
 		LastError:           lastError,
 		LastBackupError:     lastBackupError,
+		PlanID:              planID,
+		ApplyHeld:           applyHeld,
 		Warnings:            lastWarnings,
 		CommitBackEnabled:   r.opts.CommitBack,
 		LastDriftBranch:     lastDriftBranch,
@@ -1031,11 +1148,12 @@ func (r *Reconciler) failCycle(run *runRecorder, err error) []differ.Change {
 		r.state = StateError
 		r.pending = nil
 		r.pendingRegistry = nil
+		r.planID = ""
 		r.pendingAddonRestartOnChange = nil
 		r.pendingHacsRestartPending = nil
 		r.lastCycleFailed = true
 	})
-	r.logEvent("error: " + err.Error())
+	r.logError("error: " + err.Error())
 	run.finish(history.Record{Outcome: history.OutcomeError, Error: err.Error()})
 	r.pushStatus()
 	return nil
@@ -1059,6 +1177,7 @@ func (r *Reconciler) unseededCycle(run *runRecorder) []differ.Change {
 		r.lastError = ""
 		r.pending = nil
 		r.pendingRegistry = nil
+		r.planID = ""
 		r.pendingAddonRestartOnChange = nil
 		r.pendingHacsRestartPending = nil
 		r.lastCycleFailed = true
@@ -1142,20 +1261,28 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 	// phase is the one thing in this cycle that DOES write state.json, and
 	// it refreshes them again from what it wrote.
 	r.refreshStateMirrors(state)
-	changes, skippedContainment, decryptFailures := r.differ.Compute(r.git.Workdir(), ConfigRoot, tracked, state.Manifest)
-	if len(decryptFailures) > 0 {
-		// A file that could not be decrypted ends the cycle: writing
-		// ciphertext into the config or skipping the file silently are both
-		// worse than saying which file and why.
-		return r.failCycle(run, fmt.Errorf("refusing to sync: %s", strings.Join(decryptFailures, "; ")))
-	}
-	if len(skippedContainment) > 0 {
-		// Invisible otherwise - differ.Compute only slog.Warns per path. A
-		// path that is non-regular or escapes its root is plausible abuse
-		// of the containment guard rather than churn, so it gets a visible
-		// event regardless of dry_run. Informational; changes no state.
-		r.logEvent(fmt.Sprintf(
-			"skipped %d non-regular/escaping path(s): %s", len(skippedContainment), strings.Join(skippedContainment, ", ")))
+	// reconcile.yaml_files off: no file is planned, so none is written,
+	// deleted, captured or committed back. The gitops/ manifests the other
+	// layers read come from the checkout, not from this plan.
+	var changes []differ.Change
+	if r.opts.ReconcileYAMLFiles {
+		var skippedContainment, decryptFailures []string
+		changes, skippedContainment, decryptFailures = r.differ.Compute(r.git.Workdir(), ConfigRoot, tracked, state.Manifest)
+		if len(decryptFailures) > 0 {
+			// A file that could not be decrypted ends the cycle: writing
+			// ciphertext into the config or skipping the file silently are
+			// both worse than saying which file and why.
+			return r.failCycle(run, fmt.Errorf("refusing to sync: %s", strings.Join(decryptFailures, "; ")))
+		}
+		if len(skippedContainment) > 0 {
+			// Invisible otherwise - differ.Compute only slog.Warns per path.
+			// A path that is non-regular or escapes its root is plausible
+			// abuse of the containment guard rather than churn, so it gets a
+			// visible event regardless of dry_run. Informational; changes no
+			// state.
+			r.logWarn(fmt.Sprintf(
+				"skipped %d non-regular/escaping path(s): %s", len(skippedContainment), strings.Join(skippedContainment, ", ")))
+		}
 	}
 
 	var registryOps []registries.RegOp
@@ -1269,6 +1396,7 @@ func (r *Reconciler) reconcileNow(ctx context.Context) []differ.Change {
 		r.hacsRestartPending = hacsRestartPending
 	}
 	r.lastSHA = sha
+	r.planID = planFingerprint(sha, changes, registryOps)
 	r.lastError = ""
 	// This plan is against the tree checked out right now, so whatever the
 	// previous cycle left behind no longer applies.
@@ -1348,7 +1476,8 @@ func (r *Reconciler) planRegistryLayer(ctx context.Context, state applier.State)
 		// The entity list fetch is gated separately (a real registry can be
 		// large); floor/area/label/helper state is needed either way, for
 		// its own plan and for entities.NewRefResolver.
-		live, err := r.registryApplier.FetchLive(ctx, entityLayerHasWork)
+		live, err := r.registryApplier.FetchLive(ctx,
+			registries.HelperDomainsFor(desired, state.RegistryManaged), entityLayerHasWork)
 		if err != nil {
 			return nil, err
 		}
@@ -1473,7 +1602,7 @@ func (r *Reconciler) noteHacsUnavailable(err error) {
 	})
 	slog.Warn("recon: hacs layer skipped", "error", err)
 	if first {
-		r.logEvent("hacs layer skipped: " + err.Error())
+		r.logWarn("hacs layer skipped: " + err.Error())
 	}
 }
 
@@ -1631,6 +1760,35 @@ func (r *Reconciler) ApplyNow(ctx context.Context, force bool) applier.Result {
 	return r.applyNow(ctx)
 }
 
+// errPlanChanged is ApplyReviewed's refusal.
+var errPlanChanged = errors.New(
+	"the plan changed since the page was loaded (a new commit, a live edit, or a check in between) - review it and press Apply again")
+
+// ApplyReviewed is ApplyNow for a person who reviewed one particular plan:
+// planID is the Status.PlanID the page they pressed Apply on was rendered
+// with, and the apply is refused unless that is still the plan. Without it
+// a webhook or tick replacing the plan between render and press applied a
+// commit nobody had looked at, and restarted add-ons the confirm dialog
+// never named. "" skips the check, for a script that means "whatever is
+// pending". Always forces, like the button it serves.
+func (r *Reconciler) ApplyReviewed(ctx context.Context, planID string) applier.Result {
+	if !r.opLock.TryLock() {
+		r.logEvent("apply skipped: " + errBusy.Error())
+		return applier.Result{OK: false, Error: errBusy.Error()}
+	}
+	defer r.opLock.Unlock()
+
+	if planID != "" {
+		var current string
+		r.withMu(func() { current = r.planID })
+		if current != planID {
+			r.logWarn("apply skipped: " + errPlanChanged.Error())
+			return applier.Result{OK: false, Error: errPlanChanged.Error()}
+		}
+	}
+	return r.applyNow(ctx)
+}
+
 // applyNow is ApplyNow's body without the lock or the dry_run refusal, for
 // ReconcileNow/reconcileNow's reason: runCycle composes a cycle's capture
 // and its apply under ONE opLock hold, and an inner method that took the
@@ -1679,22 +1837,55 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// Read under the same lock as the plan, so the row names the commit
 	// whose plan this apply executes and lines up with its reconcile row.
 	run.sha = r.lastSHA
+	planID := r.planID
 	r.state = StateApplying
 	// Cleared per apply, then set below from this call's own result.
 	r.lastWarnings = ""
 	r.mu.Unlock()
 	r.pushStatus()
+
+	// The plan was built from run.sha's tree, and the applier reads the
+	// worktree. A capture or commit-back whose restore did not run (a
+	// SIGTERM mid-push, before restores ignored cancellation) leaves HEAD
+	// somewhere else, and applying from there would write a tree nobody
+	// reviewed.
+	if run.sha != "" {
+		if current := r.git.CurrentSHA(ctx); current != run.sha {
+			if err := r.git.Checkout(ctx, run.sha); err != nil {
+				msg := fmt.Sprintf("the worktree is at %s, not the planned %s, and checking the plan out failed: %v",
+					history.ShortSHA(current), history.ShortSHA(run.sha), err)
+				r.withMu(func() {
+					r.lastError = msg
+					r.state = StateError
+				})
+				r.logError("apply failed: " + msg)
+				run.finish(history.Record{Outcome: history.OutcomeError, Error: msg})
+				r.pushStatus()
+				return applier.Result{OK: false, Error: msg}
+			}
+		}
+	}
+
 	r.logEvent(fmt.Sprintf("applying %d change(s)", len(pending)))
+
+	// Every exit from here on prunes, like the stash prune below: a plan
+	// that fails every interval took one full backup per attempt, and a
+	// success-only prune let them pile up until /backup filled.
+	defer r.snapshot.Prune(pruneKeep)
 
 	// Best-effort: Rollback uses applier's per-file stash, taken below,
 	// whose failure IS fatal. Reported rather than swallowed - on a large
 	// install this can fail every apply (see snapshot.BackupTimeout), and
-	// the dashboard would stay green without the safety net.
-	if _, backupErr := r.snapshot.PreApplyBackup(ctx); backupErr != nil {
-		r.withMu(func() { r.lastBackupError = backupErr.Error() })
-		r.logEvent("pre-apply supervisor backup failed: " + backupErr.Error())
-	} else {
-		r.withMu(func() { r.lastBackupError = "" })
+	// the dashboard would stay green without the safety net. Skipped for a
+	// plan that changes nothing in Home Assistant (see planTouchesLive):
+	// a full backup to drop one stale ownership record is all cost.
+	if planTouchesLive(pending, registryOps) {
+		if _, backupErr := r.snapshot.PreApplyBackup(ctx); backupErr != nil {
+			r.withMu(func() { r.lastBackupError = backupErr.Error() })
+			r.logWarn("pre-apply supervisor backup failed: " + backupErr.Error())
+		} else {
+			r.withMu(func() { r.lastBackupError = "" })
+		}
 	}
 
 	result, failed := r.applyFileLayer(ctx, pending)
@@ -1704,7 +1895,13 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	// may still be replaced by the registry-only MakeStashDir below; the
 	// deferred read sees whatever it ends up as.
 	finalStashDir := result.StashDir
-	defer func() { r.applier.PruneStashDirs(pruneKeep, finalStashDir) }()
+	defer func() {
+		// The Roll Back target too, which a failed apply no longer moves:
+		// otherwise five failures in a row age it out from under the button.
+		var rollbackPoint string
+		r.withMu(func() { rollbackPoint = r.lastStashDir })
+		r.applier.PruneStashDirs(pruneKeep, finalStashDir, rollbackPoint)
+	}()
 	if failed {
 		// The single funnel for every file-layer failure, so one record
 		// covers both of applyFileLayer's exits. Only claim a rollback that
@@ -1719,10 +1916,15 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			Error:    result.Error,
 			StashDir: result.StashDir,
 		})
-		if result.StashDir != "" {
+		// Undone, live is where the plan found it and the next reconcile
+		// plans the same thing again; not undone, it usually plans
+		// something else, which the hold does not match.
+		r.holdPlan(planID, result.Error)
+		if result.StashDir != "" && !result.RolledBack {
 			// The stash must survive a restart even off a failed apply:
 			// Rollback is the manual retry when the automatic one was
-			// incomplete. The summary stays empty for applyFileLayer's reason.
+			// incomplete. Not when it was complete - see applyFileLayer.
+			// The summary stays empty for applyFileLayer's reason.
 			r.persistStashPointer(result.StashDir, "")
 		}
 		return result
@@ -1753,7 +1955,18 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			manifest[change.Path] = true
 		}
 	}
-	state.LastGoodSHA = r.git.CurrentSHA(ctx)
+	// The commit the plan came from, not whatever HEAD says now: see the
+	// worktree check at the top. Only when files are synced at all:
+	// LastGoodSHA is the capture classifier's merge base, and moving it over
+	// repository edits no apply wrote would, once yaml_files is turned back
+	// on, read those edits as "only live moved" and capture the stale live
+	// copy straight over them.
+	if r.opts.ReconcileYAMLFiles {
+		state.LastGoodSHA = run.sha
+		if state.LastGoodSHA == "" {
+			state.LastGoodSHA = r.git.CurrentSHA(ctx)
+		}
+	}
 	state.Manifest = sortedStringKeys(manifest)
 	state.LastApplyUTC = utcNowISO()
 	// A path this apply just wrote is the repository's again, so LastGoodSHA
@@ -1865,7 +2078,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			r.lastError = err.Error()
 			r.state = StateError
 		})
-		r.logEvent("error applying: " + err.Error())
+		r.logError("error applying: " + err.Error())
 		// OutcomePartial, not OutcomeError: the files landed and only the
 		// bookkeeping failed, which is exactly when someone needs to know
 		// what did land.
@@ -1907,7 +2120,13 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 	r.mu.Lock()
 	r.pending = nil
 	r.lastApplyUTC = state.LastApplyUTC
-	r.lastSHA = state.LastGoodSHA
+	// The commit this apply executed. Not state.LastGoodSHA, which stays
+	// behind when yaml_files is off.
+	if run.sha != "" {
+		r.lastSHA = run.sha
+	} else {
+		r.lastSHA = state.LastGoodSHA
+	}
 	if registryError == "" {
 		// Skipped error ops (a name conflict, say) stay pending and
 		// visible rather than clearing with the ops that ran.
@@ -1939,6 +2158,15 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 		r.state = StateError
 		r.lastError = registryError
 	}
+	r.planID = planFingerprint(r.lastSHA, r.pending, r.pendingRegistry)
+	if registryError == "" {
+		r.heldPlan, r.heldPlanReason, r.heldPlanFailures, r.heldPlanLogged = "", "", 0, false
+	} else {
+		// What is left is what failed and what never ran, which is exactly
+		// what the next reconcile plans again - the files and the ops that
+		// landed drop out of it.
+		r.holdPlanLocked(r.planID, registryError)
+	}
 	r.mu.Unlock()
 
 	switch {
@@ -1957,7 +2185,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			if registryAppliedCount > 0 {
 				applied = fmt.Sprintf("; %d registry change(s) stayed applied", registryAppliedCount)
 			}
-			r.logEvent(fmt.Sprintf(
+			r.logError(fmt.Sprintf(
 				"files applied (%d change(s)); %s: %s%s",
 				len(result.Changed), failedLayer, registryError, applied))
 
@@ -1965,7 +2193,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			// Nothing ran at all, so the default arm's "registries failed
 			// ... rolled back" would blame the wrong layer and report a
 			// rollback of ops that were never attempted.
-			r.logEvent(fmt.Sprintf(
+			r.logError(fmt.Sprintf(
 				"files applied (%d change(s)); could not allocate a stash directory for %d pending registry op(s): %s",
 				len(result.Changed), len(registryOps), registryError))
 
@@ -1989,7 +2217,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 			if registryAppliedCount > 0 {
 				applied = fmt.Sprintf("; %d earlier registry change(s) stayed applied", registryAppliedCount)
 			}
-			r.logEvent(fmt.Sprintf(
+			r.logError(fmt.Sprintf(
 				"files applied (%d change(s)); %s failed %s: %s%s",
 				len(result.Changed), layer, outcome, registryError, applied))
 		}
@@ -2022,10 +2250,6 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 		Error:    registryError,
 		StashDir: finalStashDir,
 	})
-
-	// Best-effort cleanup; the stash-directory prune is the deferred one
-	// above, shared with every failure exit.
-	r.snapshot.Prune(pruneKeep)
 
 	r.pushStatus()
 	return result
@@ -2063,17 +2287,21 @@ func (r *Reconciler) applyFileLayer(ctx context.Context, pending []differ.Change
 			r.lastError = err.Error()
 			r.state = StateError
 		})
-		r.logEvent("error applying: " + err.Error())
+		r.logError("error applying: " + err.Error())
 		r.pushStatus()
 		return applier.Result{OK: false, Error: err.Error()}, true
 	}
 
-	// Recorded regardless of ok/rolled_back: a failed apply leaves a stash
-	// too, and Rollback is the manual retry when its own rollback was
-	// incomplete. The preview is CLEARED rather than composed - Changed is
-	// unset on every failing return - and moves with the stash so the
-	// previous apply's summary cannot stand over this one.
-	if result.StashDir != "" {
+	// Recorded on success, and on a failure the applier could NOT undo: that
+	// stash is the manual retry for an incomplete rollback. A failure it
+	// did undo leaves live exactly as the previous apply left it, so the
+	// pointer stays on that apply's stash - moving it would make Roll Back
+	// "restore" a stash already restored and let a plan that fails every
+	// interval age the last good one out of PruneStashDirs' five. The
+	// preview is CLEARED rather than composed - Changed is unset on every
+	// failing return - and moves with the stash so the previous apply's
+	// summary cannot stand over this one.
+	if result.StashDir != "" && (result.OK || !result.RolledBack) {
 		r.withMu(func() {
 			r.lastStashDir = result.StashDir
 			r.lastStashSummary = ""
@@ -2084,14 +2312,14 @@ func (r *Reconciler) applyFileLayer(ctx context.Context, pending []differ.Change
 	// unconditionally, and a later registry failure does not clear them.
 	if result.Warnings != "" {
 		r.withMu(func() { r.lastWarnings = result.Warnings })
-		r.logEvent("config warnings after apply: " + result.Warnings)
+		r.logWarn("config warnings after apply: " + result.Warnings)
 	}
 
 	// A successful apply can still carry notes - path-guard skips, or the
 	// post-reload "did not confirm healthy" warning. The immediate HTTP
 	// response is their only other reader, and a tick apply has none.
 	if result.OK && result.Error != "" {
-		r.logEvent("warning: " + result.Error)
+		r.logWarn("warning: " + result.Error)
 	}
 
 	if !result.OK {
@@ -2099,7 +2327,7 @@ func (r *Reconciler) applyFileLayer(ctx context.Context, pending []differ.Change
 			r.lastError = result.Error
 			r.state = StateError
 		})
-		r.logEvent("apply failed: " + result.Error)
+		r.logError("apply failed: " + result.Error)
 		r.pushStatus()
 		return result, true
 	}
@@ -2432,7 +2660,7 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 	// "in sync" over a runtime matching neither side.
 	if result.OK && len(result.Changed) > 0 {
 		if warn := r.applier.ReloadAfterRollback(ctx, r.opts); warn != "" {
-			r.logEvent("warning: " + warn)
+			r.logWarn("warning: " + warn)
 		}
 	}
 
@@ -2517,12 +2745,23 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 			r.lastStashSummary = ""
 		})
 		r.logEvent("rollback complete")
+		// Nothing about the repository changed, so the next check would
+		// plan the rolled-back commit again and the timer would re-apply it
+		// (or, with capture on, push the restored files over it as live
+		// edits) within one interval. A rollback is a decision to stop; the
+		// pause keeps it until somebody resumes.
+		if !r.opts.DryRun || r.opts.CaptureLiveChanges {
+			r.logEvent("pausing automatic checks after the rollback, so the next check does not undo it - resume once the repository is fixed")
+			if err := r.SetPaused(true); err != nil {
+				r.logWarn("the rollback could not pause automatic checks: " + err.Error())
+			}
+		}
 	} else {
 		r.withMu(func() {
 			r.lastError = combined.Error
 			r.state = StateError
 		})
-		r.logEvent("rollback failed: " + combined.Error)
+		r.logError("rollback failed: " + combined.Error)
 	}
 
 	// The one kind that never carries a SHA: a rollback moves live AWAY
@@ -2618,10 +2857,32 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 		}
 	}
 
+	// A shutdown that arrived during the reconcile: the apply below would
+	// run detached and hold the process past its stop timeout.
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Re-read, not reused from the top: the fetch and plan take minutes,
 	// and a pause pressed in that window must stop the apply - which writes
 	// files and restarts add-ons - even though the reconcile finishes.
 	if (len(changes) > 0 || hasExecutableRegistryOps) && !r.opts.DryRun && !r.isPaused() {
+		var held string
+		var logIt bool
+		r.withMu(func() {
+			held = r.applyHeldLocked()
+			logIt = held != "" && !r.heldPlanLogged
+			if logIt {
+				r.heldPlanLogged = true
+			}
+		})
+		if held != "" {
+			if logIt {
+				r.logWarn("automatic apply held: this exact plan already failed (" + held +
+					"); it is retried later on its own, or push a fix or press Apply to try it now")
+			}
+			return
+		}
 		// Detached like web.opContext: RunLoop's ctx cancels on SIGTERM, and
 		// a restart mid-apply must not make applier.Apply read a validated
 		// change as a failed check_config, nor cut short regapply's redial.
@@ -2629,6 +2890,15 @@ func (r *Reconciler) runCycle(ctx context.Context) {
 		// which mutates live state, needs a clean stopping point.
 		r.applyNow(context.WithoutCancel(ctx))
 	}
+}
+
+// SyncNow runs one full cycle immediately - reconcile, then apply when
+// dry_run is off and nothing holds it back (a pause, a held plan) - exactly
+// what the timer runs. The webhook's entry point: a push should land as
+// soon as it is announced, not up to an interval later. Refused silently
+// while another operation runs, like the timer.
+func (r *Reconciler) SyncNow(ctx context.Context) {
+	r.runCycle(ctx)
 }
 
 // RunLoop runs tick every opts.IntervalMinutes until ctx is done. Ticks

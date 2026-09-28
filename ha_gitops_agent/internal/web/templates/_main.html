@@ -58,6 +58,7 @@
   <button
     class="btn btn-primary"
     hx-post="apply"
+    hx-vals="{{planVals .Status.PlanID}}"
     hx-disabled-elt="this"
     {{if or (eq .Status.ApplyableCount 0) .Status.Busy}}disabled{{end}}
     {{/* The restart sentence is in BOTH wordings: restarting an add-on is
@@ -216,6 +217,14 @@
 
 {{if and (eq .Status.State "error") .Status.LastError}}
 {{template "callout" (callout "error" "Last error" .Status.LastError "")}}
+{{end}}
+
+{{if .Status.ApplyHeld}}
+{{template "callout" (callout "warning" "Automatic apply held" .Status.ApplyHeld `Applying this exact plan failed last time, so the timer holds it rather
+than retrying at every check - each attempt costs a backup, a config check
+and a rollback. It tries again after an hour, then less and less often up
+to once a day; a different plan (a new commit, a change on this machine) is
+not held. Press Apply to retry it now.`)}}
 {{end}}
 
 {{if .Status.Warnings}}

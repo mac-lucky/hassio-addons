@@ -91,7 +91,7 @@ func (r *Reconciler) addonUpdateCycle(ctx context.Context) {
 		return
 	}
 
-	r.CheckAddonUpdates(ctx)
+	r.checkAddonUpdates(ctx, true)
 }
 
 // CheckAddonUpdates runs one check over every slug in auto_update_addons,
@@ -112,6 +112,14 @@ func (r *Reconciler) addonUpdateCycle(ctx context.Context) {
 // the repository, and an add-on version is not in the repository. Same
 // isolation lastBackupError has.
 func (r *Reconciler) CheckAddonUpdates(ctx context.Context) {
+	r.checkAddonUpdates(ctx, false)
+}
+
+// checkAddonUpdates is CheckAddonUpdates; unattended marks the timer's run,
+// which a pause pressed mid-batch must stop before the next install - one
+// add-on can take half an hour, so "checked once at the start" left the
+// rest of the batch updating under the paused banner.
+func (r *Reconciler) checkAddonUpdates(ctx context.Context, unattended bool) {
 	slugs := r.opts.AutoUpdateAddons
 	if len(slugs) == 0 {
 		// Logged rather than silent: the button re-renders the same page,
@@ -147,7 +155,7 @@ func (r *Reconciler) CheckAddonUpdates(ctx context.Context) {
 	previous := r.previousAddonUpdates()
 	results := make([]AddonUpdateStatus, 0, len(slugs))
 	for _, slug := range slugs {
-		results = append(results, r.checkOneAddon(ctx, slug, selfSlug, previous[slug]))
+		results = append(results, r.checkOneAddon(ctx, slug, selfSlug, previous[slug], unattended))
 	}
 
 	r.withMu(func() { r.addonUpdates = results })
@@ -175,7 +183,7 @@ func (r *Reconciler) reportSelfSlugFailure(err error) {
 		r.addonUpdateSelfSlugFailed = true
 	})
 	if first {
-		r.logEvent("add-on update check skipped: cannot confirm this agent's own slug: " + err.Error())
+		r.logWarn("add-on update check skipped: cannot confirm this agent's own slug: " + err.Error())
 	}
 }
 
@@ -218,7 +226,7 @@ func (r *Reconciler) previousAddonUpdates() map[string]AddonUpdateStatus {
 // checkOneAddon checks (and, when it may, updates) one add-on, returning
 // the row that describes what happened. prev is this slug's row from the
 // last cycle, or the zero value the first time it is seen.
-func (r *Reconciler) checkOneAddon(ctx context.Context, slug, selfSlug string, prev AddonUpdateStatus) AddonUpdateStatus {
+func (r *Reconciler) checkOneAddon(ctx context.Context, slug, selfSlug string, prev AddonUpdateStatus, unattended bool) AddonUpdateStatus {
 	res := AddonUpdateStatus{
 		Slug: slug,
 		// Only these two carry forward: LastUpdatedUTC records something
@@ -266,7 +274,7 @@ func (r *Reconciler) checkOneAddon(ctx context.Context, slug, selfSlug string, p
 		// Worth an event unlike the row-only cases: the agent has stopped
 		// being able to answer for that add-on at all.
 		if r.noteAddonCheckFailure(slug) {
-			r.logEvent(fmt.Sprintf("add-on update check failed: %s: %s", slug, err.Error()))
+			r.logError(fmt.Sprintf("add-on update check failed: %s: %s", slug, err.Error()))
 		}
 		// An inline sentence rather than a constant, since it carries the
 		// error text and nothing reads it back. AddonUpdateStatus.Actionable
@@ -301,6 +309,11 @@ func (r *Reconciler) checkOneAddon(ctx context.Context, slug, selfSlug string, p
 		return res
 	}
 
+	if unattended && r.isPaused() {
+		res.LastResult = "update available, not installed: automatic checks are paused"
+		return res
+	}
+
 	r.updateOneAddon(ctx, info, &res)
 	return res
 }
@@ -326,7 +339,7 @@ func (r *Reconciler) updateOneAddon(ctx context.Context, info regapply.AddonUpda
 	// re-fetch shares it so the confirmation cannot be what gets cut off.
 	updateCtx := context.WithoutCancel(ctx)
 	if err := r.registryApplier.UpdateAddon(updateCtx, info.Slug); err != nil {
-		r.logEvent(fmt.Sprintf("add-on update failed: %s: %s", info.Slug, err.Error()))
+		r.logError(fmt.Sprintf("add-on update failed: %s: %s", info.Slug, err.Error()))
 		res.LastResult = "update failed: " + err.Error()
 		return
 	}

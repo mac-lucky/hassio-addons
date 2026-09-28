@@ -207,7 +207,16 @@ func diffTrackedPath(
 	if encrypted && yamlSemanticallyEqual(repoPlain, configBytes) {
 		return Change{}, false, false, ""
 	}
-	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoPlain, p, encrypted)}, true, false, ""
+	// Masked when either side is secret-bearing, not only when the repo copy
+	// was encrypted: the "-" lines quote the LIVE file, and a secret typed
+	// into a plaintext-tracked file in the HA editor is still a secret. The
+	// same test diffDeletedPath applies to the live copy it quotes.
+	mask := encrypted || sopscrypt.IsSecretsFile(p)
+	if !mask {
+		need, refusal := sopscrypt.NeedsEncryption(p, configBytes)
+		mask = need || refusal != ""
+	}
+	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoPlain, p, mask)}, true, false, ""
 }
 
 // diffTextFor builds a Change's DiffText, routing an encrypted file's

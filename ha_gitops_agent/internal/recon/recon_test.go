@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -142,6 +143,9 @@ type fakeGit struct {
 	// workdir is what Workdir() returns: "/data/repo" for tests that only
 	// assert the path, a real temp dir for those driving a real layer.
 	workdir string
+	// headSHA, when set, is what CurrentSHA reports instead of sha: a
+	// worktree some earlier operation left elsewhere. Checkout moves it.
+	headSHA string
 }
 
 type recordFileCall struct {
@@ -175,10 +179,18 @@ func (f *fakeGit) Fetch(ctx context.Context) (string, error) {
 
 func (f *fakeGit) Checkout(ctx context.Context, sha string) error {
 	f.checkoutCalls = append(f.checkoutCalls, sha)
+	if f.checkoutErr == nil && f.headSHA != "" {
+		f.headSHA = sha
+	}
 	return f.checkoutErr
 }
 
-func (f *fakeGit) CurrentSHA(ctx context.Context) string { return f.sha }
+func (f *fakeGit) CurrentSHA(ctx context.Context) string {
+	if f.headSHA != "" {
+		return f.headSHA
+	}
+	return f.sha
+}
 
 func (f *fakeGit) TrackedFiles(ctx context.Context, sha string) ([]string, error) {
 	if f.trackedErr != nil {
@@ -273,7 +285,7 @@ func (f *fakeGit) RecordFile(_ context.Context, relPath string, content []byte, 
 	return true, nil
 }
 
-func (f *fakeGit) CaptureFiles(_ context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error) {
+func (f *fakeGit) CaptureFiles(_ context.Context, files []gitsync.DriftFile, configRoot, _ string) (gitsync.CaptureResult, error) {
 	f.captureCalls = append(f.captureCalls, captureCall{
 		files: append([]gitsync.DriftFile(nil), files...), configRoot: configRoot,
 	})
@@ -394,10 +406,13 @@ type fakeApplier struct {
 	rollbackCalls            []string
 	reloadAfterRollbackCalls int
 	reloadAfterRollbackWarn  string
-	pruneStashDirsCalls      []string
+	pruneStashDirsCalls      [][]string
 	makeStashDirCalls        int
 	makeStashDirResult       string
 	makeStashDirErr          error
+	// onApply runs at the start of Apply, for a test that needs something
+	// to happen mid-apply (a SIGTERM, say).
+	onApply func()
 }
 
 func newFakeApplier() *fakeApplier {
@@ -416,6 +431,9 @@ func (f *fakeApplier) Apply(
 ) (applier.Result, error) {
 	f.applyCalls = append(f.applyCalls, changes)
 	f.applyCtxs = append(f.applyCtxs, ctx)
+	if f.onApply != nil {
+		f.onApply()
+	}
 	if f.applyErr != nil {
 		return applier.Result{}, f.applyErr
 	}
@@ -452,7 +470,7 @@ func (f *fakeApplier) ReloadAfterRollback(_ context.Context, _ options.Options) 
 	return f.reloadAfterRollbackWarn
 }
 
-func (f *fakeApplier) PruneStashDirs(keep int, exclude string) {
+func (f *fakeApplier) PruneStashDirs(keep int, exclude ...string) {
 	f.pruneStashDirsCalls = append(f.pruneStashDirsCalls, exclude)
 }
 
@@ -653,6 +671,8 @@ type fakeRegistryApplier struct {
 	// onFetchAddonUpdateInfo runs at the top of every fetch, for tests that
 	// need the answer to change (or the call to panic) mid-cycle.
 	onFetchAddonUpdateInfo func(f *fakeRegistryApplier, slug string)
+	// fetchLiveHelperDomains is the helper domains each FetchLive asked for.
+	fetchLiveHelperDomains [][]string
 
 	updateAddonErr   map[string]error
 	updateAddonCalls []string
@@ -752,8 +772,9 @@ func newFakeRegistryApplier() *fakeRegistryApplier {
 	}
 }
 
-func (f *fakeRegistryApplier) FetchLive(ctx context.Context, includeEntities bool) (map[string][]map[string]any, error) {
+func (f *fakeRegistryApplier) FetchLive(ctx context.Context, helperDomains []string, includeEntities bool) (map[string][]map[string]any, error) {
 	f.fetchLiveCalls++
+	f.fetchLiveHelperDomains = append(f.fetchLiveHelperDomains, helperDomains)
 	f.fetchLiveIncEntity = append(f.fetchLiveIncEntity, includeEntities)
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
@@ -1259,6 +1280,12 @@ func newReconcilerFakes() *reconcilerFakes {
 }
 
 func (f *reconcilerFakes) reconciler(opts options.Options) *Reconciler {
+	// A rollback pauses, and the flag file outlives the test that wrote it:
+	// without this every later reconciler would start paused. A test that
+	// set its own path with usePauseFile manages that file itself.
+	if pausePath == packagePausePath {
+		_ = os.Remove(pausePath)
+	}
 	return New(opts, Deps{
 		Git:             f.git,
 		Differ:          f.differ,
@@ -1448,8 +1475,27 @@ func TestTickWithDryRunFalseCallsApplyOncePerChangeSet(t *testing.T) {
 	}
 }
 
+// A SIGTERM that lands before the apply step stops the cycle there: an
+// apply started now would run detached past the add-on's stop timeout.
+func TestTickStartsNoApplyAfterShutdown(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r.tick(ctx)
+
+	if n := len(fakes.applier.applyCalls); n != 0 {
+		t.Errorf("apply calls = %d after shutdown, want 0", n)
+	}
+}
+
 // applier.Apply reads the SIGTERM-cancelled ctx RunLoop passes down as a
-// failed check_config, so only the apply step detaches from it.
+// failed check_config, so an apply already running detaches from it.
 func TestTickApplySurvivesCanceledParentContext(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
@@ -1458,7 +1504,8 @@ func TestTickApplySurvivesCanceledParentContext(t *testing.T) {
 	r := fakes.reconciler(opts)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // as if SIGTERM had fired before tick reached its apply step
+	defer cancel()
+	fakes.applier.onApply = cancel // SIGTERM mid-apply
 
 	r.tick(ctx)
 
@@ -1983,10 +2030,12 @@ func TestSuccessfulPreApplyBackupClearsAnEarlierFailure(t *testing.T) {
 	}
 }
 
+// A failed apply the applier could not fully undo leaves its stash as the
+// Roll Back target: that is the manual retry for the incomplete rollback.
 func TestFailedApplyStillRecordsStashDirForManualRollback(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.applier.applyResult = applier.Result{
-		OK: false, Error: "check_config: invalid", RolledBack: true, StashDir: "/data/backup/failed-1",
+		OK: false, Error: "check_config: invalid; rollback incomplete", RolledBack: false, StashDir: "/data/backup/failed-1",
 	}
 	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
 	opts := baseOpts()
@@ -2001,10 +2050,40 @@ func TestFailedApplyStillRecordsStashDirForManualRollback(t *testing.T) {
 	}
 }
 
+// A failed apply that undid itself leaves live as the previous apply left
+// it, so Roll Back must keep pointing at that apply's stash - and the prune
+// must keep it however many failures follow.
+func TestSelfRolledBackApplyKeepsThePreviousRollbackPoint(t *testing.T) {
+	fakes := newReconcilerFakes()
+	good := t.TempDir()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: good}
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+
+	fakes.applier.applyResult = applier.Result{
+		OK: false, Error: "check_config: invalid", RolledBack: true, StashDir: "/data/backup/failed-1",
+	}
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+y"}}
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+
+	if got := r.Status().LastStashDir; got != good {
+		t.Errorf("last_stash_dir = %q, want the last good apply's %q", got, good)
+	}
+	last := fakes.applier.pruneStashDirsCalls[len(fakes.applier.pruneStashDirsCalls)-1]
+	if !slices.Contains(last, good) {
+		t.Errorf("prune excludes = %v, want the rollback point %q kept", last, good)
+	}
+}
+
 func TestRollbackAvailableAfterFailedApplyUsesItsStash(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.applier.applyResult = applier.Result{
-		OK: false, Error: "check_config: invalid", RolledBack: true, StashDir: "/data/backup/failed-1",
+		OK: false, Error: "check_config: invalid", RolledBack: false, StashDir: "/data/backup/failed-1",
 	}
 	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
 	opts := baseOpts()
@@ -2088,9 +2167,10 @@ func TestAFailedApplyClearsThePreviewWithTheStashItReplaces(t *testing.T) {
 		t.Fatal("the first apply composed no preview for the second to replace")
 	}
 
+	// Incomplete, so the failed apply's stash does become the target.
 	second := t.TempDir()
 	fakes.applier.applyResult = applier.Result{
-		OK: false, Error: "check_config: invalid", RolledBack: true, StashDir: second,
+		OK: false, Error: "check_config: invalid; rollback incomplete", RolledBack: false, StashDir: second,
 	}
 	r.ReconcileNow(context.Background())
 	r.ApplyNow(context.Background(), true)

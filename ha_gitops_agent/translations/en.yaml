@@ -25,10 +25,10 @@ configuration:
     description: While dry run is also on, automatically pushes detected live drift to a new gitops/drift-<timestamp> branch as soon as it is found, with no button click - it never touches the tracked branch, but git_token must have push rights or every push will fail. With dry run off, this only enables the manual "commit drift back" button instead.
   allow_import:
     name: Allow import
-    description: Enables the "Preview Import" and "Import from Home Assistant" buttons, which copy every non-excluded file under /homeassistant into the repository and push them as a single commit directly onto the tracked branch. This is the only thing the add-on ever writes to that branch - it never runs on its own, only on a button click, the push is fast-forward only and is never forced, and it never deletes anything from the repository. Secrets, databases, backups, .storage and anything the repository's .gitignore matches are skipped. git_token needs push rights. Leave this off unless you are seeding a repository.
+    description: Enables the "Preview Import" and "Import from Home Assistant" buttons, which copy every non-excluded file under /homeassistant into the repository and push them as a single commit directly onto the tracked branch. It is the one write to that branch that copies the whole config (track_addon_versions pushes only gitops/addon-versions.yaml, capture_live_changes only tracked files edited here) - it never runs on its own, only on a button click, the push is fast-forward only and is never forced, and it never deletes anything from the repository. Secrets, databases, backups, .storage and anything the repository's .gitignore matches are skipped. git_token needs push rights. Leave this off unless you are seeding a repository.
   webhook_secret:
     name: Webhook secret
-    description: Set to enable a POST /webhook trigger (on port 8098) that reconciles immediately, gated by this shared secret. Leave empty to disable. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
+    description: Set to enable a POST /webhook trigger (on port 8098) that runs a cycle immediately - a reconcile, then an apply unless dry run is on or checks are paused - gated by this shared secret. Enter the same value as the webhook secret on GitHub, Forgejo or Gitea so each delivery is signed with it, or send it as an X-Gitops-Token header or ?token= parameter. At least 16 characters. Leave empty to disable. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
   age_key:
     name: Age private key
     description: An age private key (AGE-SECRET-KEY-1...) used to encrypt secret values with SOPS before they are pushed to git, and to decrypt them when applying. secrets.yaml is encrypted whole; in every other YAML, JSON or dotenv file only the values of secret-shaped keys are encrypted, so the file stays readable and reviewable. Generate one with age-keygen and keep a copy somewhere safe - if you lose it, the encrypted values cannot be recovered. Leave empty to keep secrets out of git entirely, which is the previous behavior. Accepts a secret://<name> reference resolved from the live secrets.yaml at startup, so the value itself stays out of the API-readable add-on options.
@@ -50,10 +50,10 @@ configuration:
     fields:
       yaml_files:
         name: YAML files
-        description: Sync plain YAML config files such as automations, scripts, and packages.
+        description: Sync the repository's files, such as automations, scripts and packages, into /homeassistant. Off, no file is written, deleted, captured or committed back; the gitops/ manifests are still read.
       registries:
         name: Registries
-        description: Sync floors, areas, labels, and helper entities declared under gitops/ in the repository.
+        description: Sync floors, areas, labels, helper entities, and entity customizations declared under gitops/ in the repository.
       dashboards:
         name: Dashboards
         description: Sync Lovelace dashboards (metadata and view config) declared under gitops/ in the repository.

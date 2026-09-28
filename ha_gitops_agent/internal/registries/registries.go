@@ -49,6 +49,18 @@ var supportedHelperDomainSet = func() map[string]bool {
 	return m
 }()
 
+// helperBoolFields are the fields each helper domain's storage schema reads
+// with cv.boolean. yaml.v3 keeps an unquoted YAML 1.1 on/yes/off/no as a
+// string, which cv.boolean accepts and stores as a bool - so the manifest
+// value never equals the live one and the item is re-applied every cycle.
+// Rejected at load time instead (validateHelpers).
+var helperBoolFields = map[string][]string{
+	"input_boolean":  {"initial"},
+	"input_datetime": {"has_date", "has_time"},
+	"counter":        {"restore"},
+	"timer":          {"restore"},
+}
+
 // RegistryRTypes are the rtypes with their own config/<rtype>_registry/*
 // commands, whose responses key each item by "<rtype>_id". Helper domains
 // are DictStorageCollections: same "<domain>_id" in request params, but
@@ -105,11 +117,13 @@ type Desired struct {
 	Helpers map[string][]map[string]any
 }
 
-// RegOp kinds.
+// RegOp kinds. KindForget is bookkeeping only: it drops a managed mapping
+// and sends nothing to Home Assistant (see planDeletes for when).
 const (
 	KindCreate = "create"
 	KindUpdate = "update"
 	KindDelete = "delete"
+	KindForget = "forget"
 	KindError  = "error"
 )
 
@@ -356,8 +370,55 @@ func validateHelpers(raw map[string]any, errs *[]string) map[string][]map[string
 			continue
 		}
 		helpers[domain] = validateItems(raw, domain, domain, "helpers.yaml", errs)
+		validateHelperBools(domain, helpers[domain], errs)
+		validateHelperNulls(domain, helpers[domain], errs)
 	}
 	return helpers
+}
+
+// helperDefaultedFields are the fields each helper domain's storage schema
+// fills with a default when they are absent. A declared null removes a
+// field from the update (see regapply's helper baseline), so for these HA
+// stores the default instead, the next plan compares nil with it, and the
+// item is re-applied - backup and all - on every cycle.
+var helperDefaultedFields = map[string][]string{
+	"counter":        {"initial", "restore", "step"},
+	"timer":          {"duration", "restore"},
+	"input_datetime": {"has_date", "has_time"},
+	"input_number":   {"step", "mode"},
+	"input_text":     {"min", "max", "mode"},
+}
+
+// validateHelperNulls rejects null on a helperDefaultedFields field.
+func validateHelperNulls(domain string, items []map[string]any, errs *[]string) {
+	for _, item := range items {
+		itemID, _ := item["id"].(string)
+		for _, field := range helperDefaultedFields[domain] {
+			if v, ok := item[field]; ok && v == nil {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: %s '%s' field '%s' cannot be null - Home Assistant fills in a default for it; "+
+						"omit the field to keep the live value, or give it one", domain, itemID, field))
+			}
+		}
+	}
+}
+
+// validateHelperBools rejects a helperBoolFields value that is set but not
+// a real boolean. null stays allowed: it means "leave unset".
+func validateHelperBools(domain string, items []map[string]any, errs *[]string) {
+	for _, item := range items {
+		itemID, _ := item["id"].(string)
+		for _, field := range helperBoolFields[domain] {
+			v, ok := item[field]
+			if !ok || v == nil {
+				continue
+			}
+			if _, isBool := v.(bool); !isBool {
+				*errs = append(*errs, fmt.Sprintf(
+					"helpers.yaml: %s '%s' field '%s' must be true or false (unquoted on/yes read as text)", domain, itemID, field))
+			}
+		}
+	}
 }
 
 // Plan computes the ops that reconcile live state toward desired. live is
@@ -370,19 +431,26 @@ func validateHelpers(raw map[string]any, errs *[]string) map[string][]map[string
 //  2. managed but gone -> create, as if never managed.
 //  3. not managed -> adopt the one live object with the same name (always
 //     an update, so the applier records the mapping), error on more than
-//     one, create on none.
-//  4. managed but no longer declared -> delete, if it still exists.
+//     one, create on none. Only keys the manifest still declares hold a
+//     live object back from adoption, so a renamed key adopts the object
+//     its old key managed.
+//  4. managed but no longer declared -> delete, if it still exists. If it
+//     is gone, or a declared key now holds it (the rename in rule 3), the
+//     mapping is forgotten instead: nothing is sent to Home Assistant.
 //     Objects never in managed are never touched.
 //
 // Creates and updates come back floors, labels, areas (which reference
-// both), then helper domains alphabetically; deletes in reverse rtype
-// order, so an area goes before the floor it referenced.
+// both), then helper domains alphabetically; deletes and forgets after
+// them in reverse rtype order, so an area goes before the floor it
+// referenced and a rename's adopt runs before its old key is forgotten.
 func Plan(desired Desired, live map[string][]map[string]any, managed map[string]string) []RegOp {
 	if managed == nil {
 		managed = map[string]string{}
 	}
 	var ops []RegOp
 	resolved := map[string]string{}
+	// holds is, per rtype, what planDeletes must not delete: see planGroup.
+	holds := map[string]liveHolds{}
 
 	resolveRef := func(refType, key string) any {
 		if liveID := resolved[refType+":"+key]; liveID != "" {
@@ -391,13 +459,15 @@ func Plan(desired Desired, live map[string][]map[string]any, managed map[string]
 		return map[string]any{"$ref": refType + ":" + key}
 	}
 
-	floorOps, floorResolved := planGroup("floor", desired.Floors, live["floor"], managed, nil, nil)
+	floorOps, floorResolved, floorHolds := planGroup("floor", desired.Floors, live["floor"], managed, nil, nil)
 	ops = append(ops, floorOps...)
 	mergeInto(resolved, floorResolved)
+	holds["floor"] = floorHolds
 
-	labelOps, labelResolved := planGroup("label", desired.Labels, live["label"], managed, nil, nil)
+	labelOps, labelResolved, labelHolds := planGroup("label", desired.Labels, live["label"], managed, nil, nil)
 	ops = append(ops, labelOps...)
 	mergeInto(resolved, labelResolved)
+	holds["label"] = labelHolds
 
 	// A floor/label that came back as an error op can never resolve to a
 	// live id this cycle, so an area referencing it is demoted to an error
@@ -414,33 +484,60 @@ func Plan(desired Desired, live map[string][]map[string]any, managed map[string]
 		}
 	}
 
-	areaOps, areaResolved := planGroup("area", desired.Areas, live["area"], managed, resolveRef, brokenRefs)
+	areaOps, areaResolved, areaHolds := planGroup("area", desired.Areas, live["area"], managed, resolveRef, brokenRefs)
 	ops = append(ops, areaOps...)
 	mergeInto(resolved, areaResolved)
+	holds["area"] = areaHolds
 
 	helperDomains := helperDomainsFor(desired, managed)
 	for _, domain := range helperDomains {
-		domainOps, domainResolved := planGroup(domain, desired.Helpers[domain], live[domain], managed, nil, nil)
+		domainOps, domainResolved, domainHolds := planGroup(domain, desired.Helpers[domain], live[domain], managed, nil, nil)
 		ops = append(ops, domainOps...)
 		mergeInto(resolved, domainResolved)
+		holds[domain] = domainHolds
 	}
 
 	var deleteOps []RegOp
 	for _, domain := range helperDomains {
-		deleteOps = append(deleteOps, planDeletes(domain, desired.Helpers[domain], live[domain], managed)...)
+		deleteOps = append(deleteOps, planDeletes(domain, desired.Helpers[domain], live[domain], managed, holds[domain])...)
 	}
-	deleteOps = append(deleteOps, planDeletes("area", desired.Areas, live["area"], managed)...)
-	deleteOps = append(deleteOps, planDeletes("label", desired.Labels, live["label"], managed)...)
-	deleteOps = append(deleteOps, planDeletes("floor", desired.Floors, live["floor"], managed)...)
+	deleteOps = append(deleteOps, planDeletes("area", desired.Areas, live["area"], managed, holds["area"])...)
+	deleteOps = append(deleteOps, planDeletes("label", desired.Labels, live["label"], managed, holds["label"])...)
+	deleteOps = append(deleteOps, planDeletes("floor", desired.Floors, live["floor"], managed, holds["floor"])...)
 	ops = append(ops, deleteOps...)
 
 	return ops
+}
+
+// liveHolds is what one rtype's declared keys hold on live objects after
+// planGroup: owned maps a live id to the "<rtype>:<key>" that manages or is
+// adopting it this plan, and contested marks every live id a declared key
+// might have adopted but could not decide on (an ambiguous match, or an
+// area with a broken reference). planDeletes deletes neither: an undeclared
+// key on an owned id is a rename and is forgotten, and one on a contested
+// id is left alone until the error clears - it may well be the object the
+// rename was meant to keep.
+type liveHolds struct {
+	owned     map[string]string
+	contested map[string]bool
 }
 
 func mergeInto(dst, src map[string]string) {
 	for k, v := range src {
 		dst[k] = v
 	}
+}
+
+// HelperDomainsFor is the helper domains Plan looks at, for the caller that
+// fetches live state for it (regapply.FetchLive): nothing else is listed.
+func HelperDomainsFor(desired Desired, managed map[string]string) []string {
+	return helperDomainsFor(desired, managed)
+}
+
+// IsSupportedHelperDomain reports whether domain is a helper domain this
+// package manages.
+func IsSupportedHelperDomain(domain string) bool {
+	return supportedHelperDomainSet[domain]
 }
 
 // helperDomainsFor returns every helper domain needing planning: declared
@@ -479,9 +576,10 @@ func helperDomainsFor(desired Desired, managed map[string]string) []string {
 
 // planGroup plans create/update/error ops for one rtype's manifest items,
 // plus a "<rtype>:<id>" -> live id map ("" when not yet resolvable) for a
-// later rtype's cross-references. resolveRef and brokenRefs are non-nil
-// only for areas; an item pointing at a brokenRefs key becomes a KindError
-// naming it rather than a $ref that can never resolve.
+// later rtype's cross-references, and the liveHolds planDeletes needs.
+// resolveRef and brokenRefs are non-nil only for areas; an item pointing
+// at a brokenRefs key becomes a KindError naming it rather than a $ref
+// that can never resolve.
 func planGroup(
 	rtype string,
 	manifestItems []map[string]any,
@@ -489,7 +587,7 @@ func planGroup(
 	managed map[string]string,
 	resolveRef func(rtype, key string) any,
 	brokenRefs map[string]string,
-) ([]RegOp, map[string]string) {
+) ([]RegOp, map[string]string, liveHolds) {
 	liveByID := map[string]map[string]any{}
 	for _, obj := range liveItems {
 		if id := LiveIDOf(rtype, obj); id != "" {
@@ -497,23 +595,56 @@ func planGroup(
 		}
 	}
 	prefix := rtype + ":"
+	declared := map[string]bool{}
+	for _, item := range manifestItems {
+		if id, ok := item["id"].(string); ok {
+			declared[id] = true
+		}
+	}
+	// Only keys the manifest still declares claim their live object. A key
+	// being dropped this same plan is releasing it, which is exactly what
+	// renaming a manifest id looks like: claiming it for the old key hid it
+	// from the new one, whose create then collided with it by name (and a
+	// helper came back as <slug>_2) on every cycle.
 	claimed := map[string]bool{}
 	for k, v := range managed {
-		if strings.HasPrefix(k, prefix) {
+		if strings.HasPrefix(k, prefix) && declared[strings.TrimPrefix(k, prefix)] {
 			claimed[v] = true
 		}
 	}
 
 	var ops []RegOp
 	resolved := map[string]string{}
+	contested := map[string]bool{}
+	candidates := func(name string) []map[string]any {
+		var matches []map[string]any
+		for _, obj := range liveItems {
+			objName, _ := obj["name"].(string)
+			if nameMatches(rtype, objName, name) && !claimed[LiveIDOf(rtype, obj)] {
+				matches = append(matches, obj)
+			}
+		}
+		return matches
+	}
+	contest := func(matches []map[string]any) {
+		for _, obj := range matches {
+			if id := LiveIDOf(rtype, obj); id != "" {
+				contested[id] = true
+			}
+		}
+	}
 
 	for _, item := range manifestItems {
 		key, _ := item["id"].(string)
 		fullKey := rtype + ":" + key
+		name, _ := item["name"].(string)
 
 		if refProblem, has := brokenRefMessage(rtype, item, brokenRefs); has {
 			ops = append(ops, RegOp{Kind: KindError, RType: rtype, Key: key, Params: map[string]any{}, Error: refProblem})
 			resolved[fullKey] = ""
+			// Never got as far as adopting, so whatever it would have
+			// adopted is off limits to planDeletes this plan.
+			contest(candidates(name))
 			continue
 		}
 
@@ -531,23 +662,14 @@ func planGroup(
 				resolved[fullKey] = liveID
 			} else {
 				// Rule 2: managed but the live object is gone - recreate.
-				ops = append(ops, RegOp{
-					Kind: KindCreate, RType: rtype, Key: key, Params: params, DiffText: createDiffText(rtype, key, params),
-				})
+				ops = append(ops, createOp(rtype, key, params))
 				resolved[fullKey] = ""
 			}
 			continue
 		}
 
 		// Rule 3: not managed yet.
-		name, _ := item["name"].(string)
-		var matches []map[string]any
-		for _, obj := range liveItems {
-			objName, _ := obj["name"].(string)
-			if objName == name && !claimed[LiveIDOf(rtype, obj)] {
-				matches = append(matches, obj)
-			}
-		}
+		matches := candidates(name)
 
 		switch {
 		case len(matches) == 1:
@@ -576,15 +698,57 @@ func planGroup(
 				Error: fmt.Sprintf("ambiguous adopt: %d live %s objects named %s", len(matches), rtype, difftext.PyRepr(name)),
 			})
 			resolved[fullKey] = ""
+			contest(matches)
 		default:
-			ops = append(ops, RegOp{
-				Kind: KindCreate, RType: rtype, Key: key, Params: params, DiffText: createDiffText(rtype, key, params),
-			})
+			ops = append(ops, createOp(rtype, key, params))
 			resolved[fullKey] = ""
 		}
 	}
 
-	return ops, resolved
+	// Sorted so a (corrupt) state with two declared keys on one live id
+	// names the same owner in every plan.
+	owned := map[string]string{}
+	for _, fullKey := range difftext.SortedKeys(resolved) {
+		if liveID := resolved[fullKey]; liveID != "" {
+			if _, taken := owned[liveID]; !taken {
+				owned[liveID] = fullKey
+			}
+		}
+	}
+	return ops, resolved, liveHolds{owned: owned, contested: contested}
+}
+
+// createOp is the KindCreate op for params, minus any field declared null:
+// on a create, null can only mean "leave unset", which omitting it already
+// does, and the create schemas reject it for most fields (an area's
+// floor_id is a plain str there, unlike on update).
+func createOp(rtype, key string, params map[string]any) RegOp {
+	createParams := make(map[string]any, len(params))
+	for k, v := range params {
+		if v != nil {
+			createParams[k] = v
+		}
+	}
+	return RegOp{
+		Kind: KindCreate, RType: rtype, Key: key, Params: createParams, DiffText: createDiffText(rtype, key, createParams),
+	}
+}
+
+// nameMatches is the adopt-by-name comparison. Floors, areas and labels
+// match the way Home Assistant enforces their uniqueness, normalize_name's
+// casefold().replace(" ", ""), so a manifest "living room" adopts a live
+// "Living Room" instead of colliding with it on create; fieldDiff then
+// shows the spelling difference and the adopt writes the manifest's.
+// strings.EqualFold is Unicode simple folding, not Python's full casefold:
+// a name differing only where full folding expands a character (German
+// sharp s against "ss") is not adopted, and its create is refused as a
+// duplicate, exactly as before this matched case.
+// Helpers have no unique-name rule, so they match exactly.
+func nameMatches(rtype, live, declared string) bool {
+	if !IsRegistryRType(rtype) {
+		return live == declared
+	}
+	return strings.EqualFold(strings.ReplaceAll(live, " ", ""), strings.ReplaceAll(declared, " ", ""))
 }
 
 // brokenRefMessage names every one of an area's floor/labels references
@@ -618,9 +782,13 @@ func brokenRefMessage(rtype string, item map[string]any, brokenRefs map[string]s
 	return "references broken: " + strings.Join(problems, "; "), true
 }
 
-// planDeletes is rule 4: a managed entry no longer declared, whose live
-// object still exists, becomes a delete. Sorted by manifest id.
-func planDeletes(rtype string, manifestItems []map[string]any, liveItems []map[string]any, managed map[string]string) []RegOp {
+// planDeletes is rule 4: a managed entry no longer declared becomes a
+// delete if its live object still exists, or a forget when the object is
+// gone or holds.owned says a declared key has taken it over. An entry on a
+// holds.contested id plans nothing. Sorted by manifest id.
+func planDeletes(
+	rtype string, manifestItems []map[string]any, liveItems []map[string]any, managed map[string]string, holds liveHolds,
+) []RegOp {
 	liveByID := map[string]map[string]any{}
 	for _, obj := range liveItems {
 		if id := LiveIDOf(rtype, obj); id != "" {
@@ -652,22 +820,36 @@ func planDeletes(rtype string, manifestItems []map[string]any, liveItems []map[s
 		}
 		liveID := managed[fullKey]
 		liveObj, exists := liveByID[liveID]
-		if !exists {
-			// Already gone; the applier drops the stale mapping next time
-			// it writes state.
+		switch {
+		case !exists:
+			// Forgotten, not skipped: a floor/area/label/helper id is a slug
+			// of its name, so a stale mapping would claim - and delete - the
+			// next object anyone makes with that name.
+			ops = append(ops, RegOp{
+				Kind: KindForget, RType: rtype, Key: key, Params: map[string]any{}, LiveID: liveID,
+				DiffText: fmt.Sprintf("stop tracking %s: live object %s is gone", fullKey, liveID),
+			})
+		case holds.owned[liveID] != "":
+			ops = append(ops, RegOp{
+				Kind: KindForget, RType: rtype, Key: key, Params: map[string]any{}, LiveID: liveID,
+				DiffText: fmt.Sprintf("stop tracking %s: live object %s is now managed as %s", fullKey, liveID, holds.owned[liveID]),
+			})
+		case holds.contested[liveID]:
 			continue
+		default:
+			ops = append(ops, RegOp{
+				Kind: KindDelete, RType: rtype, Key: key, Params: map[string]any{}, LiveID: liveID,
+				DiffText: deleteDiffText(rtype, liveObj),
+			})
 		}
-		ops = append(ops, RegOp{
-			Kind: KindDelete, RType: rtype, Key: key, Params: map[string]any{}, LiveID: liveID,
-			DiffText: deleteDiffText(rtype, liveObj),
-		})
 	}
 	return ops
 }
 
 // paramsForItem translates one manifest item into WS params: every field
 // but id, untouched, except an area's floor/labels, which resolveRef
-// resolves and which are renamed to what the WS API expects.
+// resolves and which are renamed to what the WS API expects. A floor
+// declared null stays null, which clears it on update.
 func paramsForItem(rtype string, item map[string]any, resolveRef func(rtype, key string) any) map[string]any {
 	params := make(map[string]any, len(item))
 	for k, v := range item {
@@ -681,8 +863,14 @@ func paramsForItem(rtype string, item map[string]any, resolveRef func(rtype, key
 
 	if floorRaw, ok := params["floor"]; ok {
 		delete(params, "floor")
-		floorKey, _ := floorRaw.(string)
-		params["floor_id"] = resolveRef("floor", floorKey)
+		if floorRaw == nil {
+			// Resolving it would make a {"$ref": "floor:"} no plan can
+			// ever satisfy, failing the whole layer every cycle.
+			params["floor_id"] = nil
+		} else {
+			floorKey, _ := floorRaw.(string)
+			params["floor_id"] = resolveRef("floor", floorKey)
+		}
 	}
 	if labelsRaw, ok := params["labels"]; ok {
 		delete(params, "labels")

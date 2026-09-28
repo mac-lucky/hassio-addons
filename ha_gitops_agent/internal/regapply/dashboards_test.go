@@ -767,3 +767,36 @@ func TestRollbackRegistryInvertsCombinedStashIncludingDashboardAndEntity(t *test
 		t.Errorf("calls = %+v, want dashboard invert before entity invert", rollbackWS.calls)
 	}
 }
+
+// --- forget: bookkeeping only ------------------------------------------
+
+func TestApplyDashboardPlanForgetDropsTheMappingAndRollbackRestoresIt(t *testing.T) {
+	stashDir := t.TempDir()
+	ops := []registries.RegOp{dashboardOp(registries.KindForget, "home", nil, "abc123")}
+	managed := map[string]string{"dashboard:home": "abc123", "dashboard:other": "def456"}
+	ws := newFakeWS()
+
+	result := ApplyDashboardPlan(context.Background(), staticDialer(ws), ops, managed, stashDir)
+
+	if !result.OK || !reflect.DeepEqual(result.Applied, []string{"forget dashboard:home"}) {
+		t.Fatalf("result = %+v", result)
+	}
+	if calls := nonListCalls(ws); len(calls) != 0 {
+		t.Errorf("apply sent %+v, want nothing but the listing", calls)
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"dashboard:other": "def456"}) {
+		t.Errorf("managed after apply = %+v", managed)
+	}
+
+	rollbackWS := newFakeWS()
+	rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, map[string]string{}, nil, managed)
+	if !rb.OK {
+		t.Fatalf("rollback result = %+v", rb)
+	}
+	if len(rollbackWS.calls) != 0 {
+		t.Errorf("rollback sent %+v, want nothing", rollbackWS.calls)
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"dashboard:home": "abc123", "dashboard:other": "def456"}) {
+		t.Errorf("managed after rollback = %+v", managed)
+	}
+}

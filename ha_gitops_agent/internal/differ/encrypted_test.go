@@ -786,3 +786,21 @@ func TestLargeOrdinaryFileIsNotMistakenForCiphertext(t *testing.T) {
 		t.Errorf("changes = %+v, want none: identical files", changes)
 	}
 }
+
+// An update diff quotes the live file on its "-" lines. It was masked only
+// when the repo copy was encrypted, so a secret typed into a plaintext-
+// tracked file in the HA editor reached the dashboard and /status.json.
+func TestUpdateDiffMasksASecretOnlyTheLiveCopyHolds(t *testing.T) {
+	repoRoot, configRoot := dirs(t)
+	write(t, repoRoot, "configuration.yaml", []byte("weather:\n  name: Home\n"))
+	write(t, configRoot, "configuration.yaml", []byte("weather:\n  name: Home\n  api_key: hunter2\n"))
+
+	changes, _, _ := Compute(repoRoot, configRoot, []string{"configuration.yaml"}, nil, nil)
+
+	if len(changes) != 1 || changes[0].Kind != "update" {
+		t.Fatalf("changes = %+v, want one update", changes)
+	}
+	if strings.Contains(changes[0].DiffText, "hunter2") {
+		t.Errorf("update diff published the live secret:\n%s", changes[0].DiffText)
+	}
+}

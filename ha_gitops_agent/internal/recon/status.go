@@ -290,6 +290,13 @@ type Status struct {
 	// still works off the local stash. It says the second safety net
 	// DOCS.md promises was not taken.
 	LastBackupError string `json:"last_backup_error"`
+	// PlanID identifies the plan this Status shows (see planFingerprint),
+	// "" when there is none. The dashboard posts it back with Apply, which
+	// refuses when the plan changed since the page rendered.
+	PlanID string `json:"plan_id"`
+	// ApplyHeld is why an apply of this exact plan failed last time, when
+	// it did; the timer will not apply it again on its own. "" otherwise.
+	ApplyHeld string `json:"apply_held"`
 	// Warnings holds the last apply's check_config warnings verbatim,
 	// possibly multi-line. Unlike LastError, non-empty never implies
 	// StateError: check_config already treated the config as valid.

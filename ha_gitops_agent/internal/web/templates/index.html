@@ -59,13 +59,19 @@
 
   // role="alert" announces on CONTENT change, so the message is written in
   // rather than the box merely unhidden; hide() empties it again.
-  function showBanner(msg) {
+  // A sticky banner reports something the user did not see happen (an
+  // Apply that was refused) and stays until dismissed; the others clear on
+  // the next successful request, which the 5-second poll makes seconds.
+  var bannerSticky = false;
+  function showBanner(msg, sticky) {
     bannerText.textContent = msg;
     banner.hidden = false;
+    bannerSticky = !!sticky;
   }
   function hideBanner() {
     banner.hidden = true;
     bannerText.textContent = '';
+    bannerSticky = false;
   }
 
   // One message per failure mode: a send error is usually HA restarting, a
@@ -85,7 +91,13 @@
   // Any successful request clears the banner: a 204 from the poll proves
   // the page is current just as well as a swap does.
   document.body.addEventListener('htmx:afterRequest', function (e) {
-    if (e.detail && e.detail.successful) { hideBanner(); }
+    if (!e.detail || !e.detail.successful) { return; }
+    var xhr = e.detail.xhr;
+    if (xhr && xhr.getResponseHeader('X-GitOps-Op-Refused') === 'plan-changed') {
+      showBanner('Nothing was applied: the plan changed since this page was loaded. Review the new plan and press Apply again.', true);
+      return;
+    }
+    if (!bannerSticky) { hideBanner(); }
   });
 
   // Times are server-rendered in UTC (a reader-dependent one would break

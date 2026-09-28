@@ -623,11 +623,30 @@ func TestPlanDeletesManagedDashboardRemovedFromManifest(t *testing.T) {
 	}
 }
 
-func TestPlanDeleteNoOpWhenLiveAlreadyGone(t *testing.T) {
+// A stale mapping used to be kept forever, and the live id derives from
+// url_path: the next dashboard made at that url_path was deleted as
+// "managed but undeclared". It is forgotten instead.
+func TestPlanForgetWhenLiveAlreadyGone(t *testing.T) {
 	managed := map[string]string{"dashboard:home": "abc123"}
 	ops := Plan(Desired{}, nil, nil, managed)
 
-	if len(ops) != 0 {
+	if len(ops) != 1 {
+		t.Fatalf("ops = %+v, want one forget", ops)
+	}
+	op := ops[0]
+	if op.Kind != KindForget || op.RType != "dashboard" || op.Key != "home" || op.LiveID != "abc123" || len(op.Params) != 0 {
+		t.Errorf("op = %+v", op)
+	}
+	if want := "stop tracking dashboard:home: live dashboard abc123 is gone"; op.DiffText != want {
+		t.Errorf("diff_text = %q, want %q", op.DiffText, want)
+	}
+}
+
+// Once forgotten, a dashboard reappearing at the same url_path is left
+// alone like any other unmanaged one.
+func TestPlanSameURLPathAfterForgetIsNotDeleted(t *testing.T) {
+	live := []map[string]any{{"id": "abc123", "url_path": "home", "title": "Hand-made"}}
+	if ops := Plan(Desired{}, live, nil, map[string]string{}); len(ops) != 0 {
 		t.Errorf("ops = %+v, want none", ops)
 	}
 }

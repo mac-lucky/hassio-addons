@@ -48,7 +48,7 @@ func (r *Reconciler) PreviewImport(ctx context.Context) (ImportPreview, error) {
 	plan, err := r.git.ScanLive(ConfigRoot, gitsync.DefaultImportLimits())
 	if err != nil {
 		r.setImportError(err)
-		r.logEvent("import preview failed: " + err.Error())
+		r.logError("import preview failed: " + err.Error())
 		r.pushStatus()
 		return ImportPreview{}, err
 	}
@@ -57,7 +57,7 @@ func (r *Reconciler) PreviewImport(ctx context.Context) (ImportPreview, error) {
 	kept, keptBytes, err := r.git.PreviewIgnored(ctx, ConfigRoot, plan.Files)
 	if err != nil {
 		r.setImportError(err)
-		r.logEvent("import preview failed: " + err.Error())
+		r.logError("import preview failed: " + err.Error())
 		r.pushStatus()
 		return ImportPreview{}, err
 	}
@@ -140,7 +140,7 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 
 	if err := r.git.EnsureClone(ctx); err != nil {
 		r.setImportError(err)
-		r.logEvent("import failed: " + err.Error())
+		r.logError("import failed: " + err.Error())
 		run.finish(history.Record{Outcome: history.OutcomeError, Error: err.Error()})
 		r.pushStatus()
 		return ImportSummary{}, err
@@ -149,7 +149,7 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 	res, err := r.git.Import(ctx, ConfigRoot, gitsync.DefaultImportLimits(), time.Now())
 	if err != nil {
 		r.setImportError(err)
-		r.logEvent("import failed: " + err.Error())
+		r.logError("import failed: " + err.Error())
 		run.finish(history.Record{Outcome: history.OutcomeError, Error: err.Error()})
 		r.pushStatus()
 		return ImportSummary{}, err
@@ -253,7 +253,7 @@ func (r *Reconciler) noteImportRecordFailure(err error) {
 		// The record is also the merge base capture classifies against, so on
 		// an agent that has never applied, losing it leaves the file layer
 		// one-way with nothing else saying so.
-		r.logEvent("the import was pushed but its record could not be saved to /data: " + err.Error() +
+		r.logWarn("the import was pushed but its record could not be saved to /data: " + err.Error() +
 			" - after a restart the dashboard will show the previous import instead, and if" +
 			" capture live changes is on it stays one-way until an import or an apply records a base")
 	}

@@ -299,8 +299,13 @@ type captureRouting struct {
 // how much drifted rather than with the tracked-file count.
 // written is the previous manifest as a set: the paths the last apply put
 // live, and so the only ones whose absence live can mean a deletion.
-// standingConflicts is the conflict record from the previous cycle, consulted
-// only when this cycle cannot classify at all.
+// standingConflicts is the conflict record from the previous cycle. A path on
+// it stays a conflict for as long as it drifts at all: classifying it afresh
+// would compare against a base that has since moved (any apply of OTHER paths
+// advances LastGoodSHA to the tip), see "the repository did not move", and
+// capture the live side straight over the commit the record was protecting.
+// It leaves the record the way DOCS promise - the two sides agreeing, which
+// takes the path out of changes altogether.
 func (r *Reconciler) classifyChanges(
 	ctx context.Context, tip string, changes []differ.Change, bases captureBases, written, standingConflicts map[string]bool,
 ) captureRouting {
@@ -346,6 +351,10 @@ func (r *Reconciler) classifyChanges(
 	}
 
 	for _, change := range changes {
+		if standingConflicts[change.Path] {
+			routing.conflicts = append(routing.conflicts, change)
+			continue
+		}
 		base := bases.forPath(change.Path)
 		f := facts{
 			kind:         change.Kind,
@@ -406,6 +415,12 @@ func (r *Reconciler) captureLiveChanges(
 	// turning it off has to clear one too. Otherwise backing out of the
 	// feature would exclude those paths from every future apply forever,
 	// while the card kept promising they clear themselves.
+	// With yaml_files off nothing is diffed at all, so an empty changes
+	// says nothing about whether a conflict resolved: keep the record for
+	// when file sync comes back, rather than announcing it cleared.
+	if !r.opts.ReconcileYAMLFiles {
+		return changes, 0
+	}
 	if !r.opts.CaptureLiveChanges || len(changes) == 0 {
 		r.clearStandingConflicts(state)
 		return changes, 0
@@ -431,7 +446,14 @@ func (r *Reconciler) captureLiveChanges(
 	unresolved = len(routing.conflicts) + len(routing.deferred)
 
 	if len(routing.capture) > 0 {
-		result, err := r.git.CaptureFiles(ctx, driftFiles(routing.capture), ConfigRoot)
+		result, err := r.git.CaptureFiles(ctx, driftFiles(routing.capture), ConfigRoot, tip)
+		if len(result.Refused) > 0 {
+			// Out of the apply like every captured path, and not captured
+			// either: the next cycle sees both sides moved.
+			unresolved += len(result.Refused)
+			r.logWarn(fmt.Sprintf("not captured, the repository changed them meanwhile: %s",
+				strings.Join(result.Refused, ", ")))
+		}
 		switch {
 		case err != nil:
 			unresolved += len(routing.capture)
@@ -474,7 +496,7 @@ func (r *Reconciler) captureLiveChanges(
 			next.LastConflictBranch = branch
 			next.LastConflictUTC = utcNowISO()
 		}
-		r.logEvent(fmt.Sprintf("conflict on %d path(s), left untouched in both directions: %s",
+		r.logWarn(fmt.Sprintf("conflict on %d path(s), left untouched in both directions: %s",
 			len(routing.conflicts), strings.Join(next.ConflictedPaths, ", ")))
 	}
 
@@ -624,7 +646,7 @@ func (r *Reconciler) noteCaptureFailure(reason string) {
 		r.captureFailed = true
 	})
 	if first {
-		r.logEvent("warning: " + reason)
+		r.logWarn("warning: " + reason)
 	}
 }
 

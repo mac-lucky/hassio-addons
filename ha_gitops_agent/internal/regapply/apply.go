@@ -39,7 +39,7 @@ func applyPlanInner(
 	}
 	defer ws.Close()
 
-	live, err := FetchLive(ctx, ws, false)
+	live, err := FetchLive(ctx, ws, helperDomainsOf(executable), false)
 	if err != nil {
 		msg := fmt.Sprintf("unexpected failure: %v", err)
 		slog.Warn("regapply: apply_plan failed", "error", msg)
@@ -104,9 +104,9 @@ func appliedLabels(executed []stashEntry) []string {
 	return out
 }
 
-// executeOne executes a single create/update/delete op and returns a record
-// of it for the stash file and a later invertOne. A failure leaves earlier
-// ops' effects on managed unchanged.
+// executeOne executes a single create/update/delete/forget op and returns
+// a record of it for the stash file and a later invertOne. A failure
+// leaves earlier ops' effects on managed unchanged.
 func executeOne(
 	ctx context.Context, ws WSClient, op registries.RegOp,
 	liveIndex map[string]map[string]map[string]any, resolvedIDs map[string]string, managed map[string]string,
@@ -146,11 +146,29 @@ func executeOne(
 			return stashEntry{}, fmt.Errorf("live object %s no longer exists; re-check to plan against current state", op.LiveID)
 		}
 		_, wasManaged := managed[fullKey]
-		reqParams := make(map[string]any, len(params)+1)
-		reqParams[reqIDField] = op.LiveID
-		for k, v := range params {
-			reqParams[k] = v
+		var reqParams map[string]any
+		if registries.IsRegistryRType(op.RType) {
+			reqParams = make(map[string]any, len(params)+1)
+			for k, v := range params {
+				reqParams[k] = v
+			}
+		} else {
+			// A helper storage collection replaces the whole item on update
+			// ({id} | CREATE_UPDATE_SCHEMA(data)), so sending only the
+			// declared fields would strip every undeclared one - and an
+			// input_number without min/max is refused outright. The rest
+			// comes from the live object, with a declared null removing its
+			// field rather than being sent, which the schemas reject.
+			reqParams = helperBaseline(op.RType, prior)
+			for k, v := range params {
+				if v == nil {
+					delete(reqParams, k)
+				} else {
+					reqParams[k] = v
+				}
+			}
 		}
+		reqParams[reqIDField] = op.LiveID
 		if _, err := ws.Cmd(ctx, msgType(op.RType, "update"), reqParams); err != nil {
 			return stashEntry{}, err
 		}
@@ -171,6 +189,12 @@ func executeOne(
 		}
 		delete(managed, fullKey)
 		return stashEntry{Kind: registries.KindDelete, RType: op.RType, Key: op.Key, LiveID: op.LiveID, PriorObject: prior}, nil
+
+	case registries.KindForget:
+		// Bookkeeping only, nothing is sent: the live object is gone, or a
+		// renamed key adopted it earlier in this same plan.
+		delete(managed, fullKey)
+		return stashEntry{Kind: registries.KindForget, RType: op.RType, Key: op.Key, LiveID: op.LiveID}, nil
 	}
 
 	return stashEntry{}, fmt.Errorf("unreachable: unknown op kind %q", op.Kind)

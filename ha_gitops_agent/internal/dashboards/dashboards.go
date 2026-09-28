@@ -86,11 +86,13 @@ var reservedIDs = map[string]bool{"default": true, "lovelace": true}
 var allowedFields = map[string]bool{"title": true, "icon": true, "config": true, "show_in_sidebar": true}
 
 // Kind values dashboards.Plan's ops carry - no new kind, since this
-// layer's ownership model is registries.Plan's create/adopt/update/delete.
+// layer's ownership model is registries.Plan's create/adopt/update/delete
+// (and forget, for a managed dashboard that is already gone).
 const (
 	KindCreate = registries.KindCreate
 	KindUpdate = registries.KindUpdate
 	KindDelete = registries.KindDelete
+	KindForget = registries.KindForget
 	KindError  = registries.KindError
 )
 
@@ -376,8 +378,8 @@ func normalizeViaJSON(v any) (any, error) {
 //  3. key unmanaged: a live dashboard has this url_path -> adopt it (an
 //     update op is emitted even with no drift, so the applier has
 //     something to execute that records the mapping); none -> create.
-//  4. key managed but no longer declared -> delete the live dashboard, if
-//     it still exists.
+//  4. key managed but no longer declared -> delete the live dashboard, or
+//     forget the mapping (no WS call) if it is already gone.
 //
 // A dashboard whose config file failed to load is a KindError op instead
 // of any of the above, and never touches managed.
@@ -456,6 +458,13 @@ func Plan(desired Desired, liveDashboards []map[string]any, liveContent map[stri
 		liveID := managed[fullKey]
 		liveObj, exists := liveByLiveID[liveID]
 		if !exists {
+			// Forgotten, not skipped: the live id is derived from url_path,
+			// so a stale mapping would claim - and delete - the next
+			// dashboard anyone makes at that url_path.
+			ops = append(ops, registries.RegOp{
+				Kind: KindForget, RType: "dashboard", Key: id, Params: map[string]any{}, LiveID: liveID,
+				DiffText: fmt.Sprintf("stop tracking %s: live dashboard %s is gone", fullKey, liveID),
+			})
 			continue
 		}
 		ops = append(ops, registries.RegOp{

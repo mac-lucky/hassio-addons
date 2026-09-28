@@ -116,7 +116,7 @@ func (r *Reconciler) noteVersionRecordFailure(what string, err error) {
 	})
 	slog.Warn("recon: "+what, "error", err)
 	if first {
-		r.logEvent(fmt.Sprintf("warning: %s: %s", what, err.Error()))
+		r.logWarn(fmt.Sprintf("warning: %s: %s", what, err.Error()))
 	}
 }
 

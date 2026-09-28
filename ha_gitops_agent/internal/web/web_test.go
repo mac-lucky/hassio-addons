@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,8 +26,9 @@ import (
 // dispatched counts what the handlers asked the agent to do. Snapshotted
 // under fakeAgent's lock, since operations run in their own goroutine.
 type dispatched struct {
-	reconcile  int
-	apply      []bool
+	reconcile int
+	// apply carries the plan id each press posted, "" for none.
+	apply      []string
 	rollback   int
 	commitBack int
 	importLive int
@@ -49,7 +51,12 @@ type dispatched struct {
 // field is read and written under mu: the counters and the busy/state
 // pair are touched by the goroutines the action routes start.
 type fakeAgent struct {
-	mu                sync.Mutex
+	mu sync.Mutex
+	// planID is what Status reports as the current plan; applyResult and
+	// rollbackResult what the operations return (zero means OK).
+	planID            string
+	applyResult       *applier.Result
+	rollbackResult    *applier.Result
 	configured        bool
 	busy              bool
 	dryRun            bool
@@ -229,7 +236,7 @@ func (f *fakeAgent) dispatchedCalls() dispatched {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	snapshot := f.calls
-	snapshot.apply = append([]bool(nil), f.calls.apply...)
+	snapshot.apply = append([]string(nil), f.calls.apply...)
 	snapshot.retry = append([]string(nil), f.calls.retry...)
 	snapshot.setPaused = append([]bool(nil), f.calls.setPaused...)
 	return snapshot
@@ -315,6 +322,7 @@ func (f *fakeAgent) Status() recon.Status {
 		PendingCount:    len(pending) + len(f.pendingRegistry),
 		Pending:         pending,
 		PendingRegistry: f.pendingRegistry,
+		PlanID:          f.planID,
 		// Its own TS, not LastApplyUTC's: different parts of the template
 		// render them, and sharing would let one assertion pass on the other.
 		Events: []recon.Event{{TS: "2026-08-04T11:22:33+00:00", Message: "agent started"}},
@@ -348,22 +356,30 @@ func (f *fakeAgent) ReconcileNow(ctx context.Context) []differ.Change {
 	return nil
 }
 
-func (f *fakeAgent) ApplyNow(ctx context.Context, force bool) applier.Result {
+func (f *fakeAgent) ApplyReviewed(ctx context.Context, planID string) applier.Result {
 	f.mu.Lock()
-	f.calls.apply = append(f.calls.apply, force)
+	f.calls.apply = append(f.calls.apply, planID)
+	res := applier.Result{OK: true}
+	if f.applyResult != nil {
+		res = *f.applyResult
+	}
 	f.mu.Unlock()
 	f.begin("apply")
 	report(f.finished, "apply")
-	return applier.Result{}
+	return res
 }
 
 func (f *fakeAgent) Rollback(ctx context.Context) applier.Result {
 	f.mu.Lock()
 	f.calls.rollback++
+	res := applier.Result{OK: true}
+	if f.rollbackResult != nil {
+		res = *f.rollbackResult
+	}
 	f.mu.Unlock()
 	f.begin("rollback")
 	report(f.finished, "rollback")
-	return applier.Result{}
+	return res
 }
 
 func (f *fakeAgent) CommitDriftBack(ctx context.Context) (string, error) {
@@ -554,7 +570,8 @@ func TestReconcileRouteDispatchesTheAgentAndReturns200(t *testing.T) {
 	}
 }
 
-func TestApplyRouteDispatchesTheAgentWithForceTrueAndReturns200(t *testing.T) {
+// A script posting no plan applies whatever is pending, as before.
+func TestApplyRouteDispatchesTheAgentAndReturns200(t *testing.T) {
 	devEnv(t)
 	agent := newFakeAgent()
 	handler := New(agent)
@@ -565,8 +582,89 @@ func TestApplyRouteDispatchesTheAgentWithForceTrueAndReturns200(t *testing.T) {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
 	agent.awaitStart(t)
-	if got := agent.dispatchedCalls().apply; len(got) != 1 || !got[0] {
-		t.Errorf("apply calls = %v, want [true]", got)
+	if got := agent.dispatchedCalls().apply; !slices.Equal(got, []string{""}) {
+		t.Errorf("apply calls = %q, want one unbound apply", got)
+	}
+}
+
+func TestApplyRoutePassesOnThePlanThePageShowed(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.planID = "plan-1"
+	handler := New(agent)
+
+	doForm(t, handler, "/apply", url.Values{"plan": {"plan-1"}})
+
+	agent.awaitStart(t)
+	if got := agent.dispatchedCalls().apply; !slices.Equal(got, []string{"plan-1"}) {
+		t.Errorf("apply calls = %q, want [plan-1]", got)
+	}
+}
+
+// A webhook or tick that replaced the plan between render and press used
+// to get its unreviewed commit applied.
+func TestApplyRouteRefusesAPlanThatChangedSinceThePageRendered(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.planID = "plan-2"
+	handler := New(agent)
+
+	rec := doForm(t, handler, "/apply", url.Values{"plan": {"plan-1"}})
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 with the fresh fragment", rec.Code)
+	}
+	if got := rec.Header().Get("X-GitOps-Op-Refused"); got != "plan-changed" {
+		t.Errorf("X-GitOps-Op-Refused = %q, want plan-changed", got)
+	}
+	if got := agent.dispatchedCalls().apply; len(got) != 0 {
+		t.Errorf("apply calls = %q, want none", got)
+	}
+}
+
+func TestTheApplyButtonCarriesThePlanID(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.pendingCount = 1
+	agent.planID = "abc123"
+	handler := New(agent)
+
+	rec := doRequest(t, handler, http.MethodGet, "/", nil)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `hx-vals="{&#34;plan&#34;:&#34;abc123&#34;}"`) {
+		i := max(strings.Index(body, `hx-post="apply"`), 0)
+		t.Errorf("the Apply button does not post the plan it shows: %.200s", body[i:])
+	}
+}
+
+// Every Apply and Roll Back reported success to /status.json, failed or not.
+func TestAFailedApplyOrRollbackRecordsItsError(t *testing.T) {
+	for _, route := range []string{"/apply", "/rollback"} {
+		t.Run(route, func(t *testing.T) {
+			devEnv(t)
+			agent := newFakeAgent()
+			agent.lastStashDir = "/data/backup/x"
+			failed := applier.Result{OK: false, Error: "check_config: invalid config"}
+			agent.applyResult, agent.rollbackResult = &failed, &failed
+			handler := New(agent)
+
+			doRequest(t, handler, http.MethodPost, route, nil)
+			agent.awaitFinish(t)
+
+			var got opView
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				got = operationView(t, handler)
+				if !got.Running || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if !strings.Contains(got.Error, "check_config: invalid config") {
+				t.Errorf("operation.error = %q, want the failure", got.Error)
+			}
+		})
 	}
 }
 
@@ -659,7 +757,7 @@ type panickingAgent struct {
 	entered chan struct{}
 }
 
-func (p *panickingAgent) ApplyNow(ctx context.Context, force bool) applier.Result {
+func (p *panickingAgent) ApplyReviewed(ctx context.Context, planID string) applier.Result {
 	defer close(p.entered)
 	panic("applier exploded")
 }
@@ -1565,7 +1663,7 @@ func TestRollbackConfirmSaysSoWhenThereIsNothingToRestore(t *testing.T) {
 	}
 }
 
-// hangingAgent stands in for an agent mid-apply: ApplyNow blocks until it
+// hangingAgent stands in for an agent mid-apply: ApplyReviewed blocks until it
 // observes cancellation or a grace period elapses, recording which. Long
 // applies are normal - the health probe alone runs up to five minutes.
 type hangingAgent struct {
@@ -1582,7 +1680,7 @@ func newHangingAgent() *hangingAgent {
 	}
 }
 
-func (h *hangingAgent) ApplyNow(ctx context.Context, force bool) applier.Result {
+func (h *hangingAgent) ApplyReviewed(ctx context.Context, planID string) applier.Result {
 	close(h.started)
 	select {
 	case <-ctx.Done():
@@ -3715,7 +3813,7 @@ func (s *stateOnlyApplier) RollbackFrom(string, string) applier.Result {
 }
 
 func (s *stateOnlyApplier) ReloadAfterRollback(context.Context, options.Options) string { return "" }
-func (s *stateOnlyApplier) PruneStashDirs(int, string)                                  {}
+func (s *stateOnlyApplier) PruneStashDirs(int, ...string)                               {}
 func (s *stateOnlyApplier) MakeStashDir() (string, error)                               { return "", nil }
 
 // noHistory keeps the reconciler above off /data/history.jsonl, which the
@@ -4338,5 +4436,23 @@ func TestEscapeFormatCharsIsDistinguishableFromLiteralEscapes(t *testing.T) {
 	literal := escapeFormatChars(`a\u{202E}b`)
 	if real == literal {
 		t.Errorf("a real U+202E and the literal text of its escape render identically: %q", real)
+	}
+}
+
+// FormValue read an unparseable body as no plan at all, turning a bound
+// Apply into an unbound one.
+func TestApplyRouteRefusesAnUnreadableForm(t *testing.T) {
+	devEnv(t)
+	agent := newFakeAgent()
+	agent.planID = "plan-1"
+	handler := New(agent)
+
+	rec := doForm(t, handler, "/apply", url.Values{"plan": {"plan-1"}, "pad": {strings.Repeat("x", maxRetryBodyBytes)}})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if got := agent.dispatchedCalls().apply; len(got) != 0 {
+		t.Errorf("apply calls = %q, want none", got)
 	}
 }

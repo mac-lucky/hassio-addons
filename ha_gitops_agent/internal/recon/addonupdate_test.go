@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -888,5 +889,44 @@ func TestAddonCheckIntervalFallsBackToTheCompiledDefault(t *testing.T) {
 
 	if got := r.addonCheckInterval(); got != addonUpdateCheckInterval {
 		t.Errorf("addonCheckInterval = %v, want the package default %v", got, addonUpdateCheckInterval)
+	}
+}
+
+// Pause was checked once, before the batch: pressed while the first
+// add-on was updating, it let the rest install under the paused banner.
+func TestPauseMidBatchStopsTheUnattendedUpdates(t *testing.T) {
+	usePauseFile(t)
+	f := newAddonUpdateFakes()
+	installedAddon(f, "core_a", "A", "1.0", "1.1")
+	installedAddon(f, "core_b", "B", "1.0", "1.1")
+	r := f.reconciler(autoUpdateOpts("core_a", "core_b"))
+	f.registryApplier.onFetchAddonUpdateInfo = func(_ *fakeRegistryApplier, slug string) {
+		if slug == "core_b" {
+			_ = r.SetPaused(true) // pressed while core_a was installing
+		}
+	}
+
+	r.addonUpdateCycle(context.Background())
+
+	if got := f.registryApplier.updateAddonCalls; !slices.Equal(got, []string{"core_a"}) {
+		t.Errorf("updated = %v, want only core_a", got)
+	}
+	if row := addonUpdateRow(t, r.Status(), "core_b"); !strings.Contains(row.LastResult, "paused") {
+		t.Errorf("core_b result = %q, want it to say the pause stopped it", row.LastResult)
+	}
+}
+
+// The Check button is a person acting, so a pause does not stop it.
+func TestTheCheckButtonStillUpdatesWhilePaused(t *testing.T) {
+	usePauseFile(t)
+	f := newAddonUpdateFakes()
+	installedAddon(f, "core_a", "A", "1.0", "1.1")
+	r := f.reconciler(autoUpdateOpts("core_a"))
+	_ = r.SetPaused(true)
+
+	r.CheckAddonUpdates(context.Background())
+
+	if got := f.registryApplier.updateAddonCalls; !slices.Equal(got, []string{"core_a"}) {
+		t.Errorf("updated = %v, want core_a", got)
 	}
 }

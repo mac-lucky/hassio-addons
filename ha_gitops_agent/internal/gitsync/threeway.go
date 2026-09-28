@@ -74,9 +74,12 @@ func (g *GitSync) ChangedBetween(ctx context.Context, base, tip string) ([]strin
 
 	// -z for TrackedFilesRaw's reason: without it git C-quotes any non-ASCII
 	// path and the caller's intersection against differ's paths stops
-	// matching. The trailing "--" settles revision-versus-path ambiguity
-	// rather than trusting both arguments to look like SHAs.
-	result, err := g.runGit(ctx, []string{"diff", "--name-only", "-z", base, tip, "--"}, "", nil)
+	// matching. --no-renames because rename detection (on by default) lists
+	// only a renamed file's NEW name, so its old path would read as "the
+	// repository did not move" and a live copy of it get captured back
+	// beside the renamed one. The trailing "--" settles revision-versus-
+	// path ambiguity rather than trusting both arguments to look like SHAs.
+	result, err := g.runGit(ctx, []string{"diff", "--name-only", "--no-renames", "-z", base, tip, "--"}, "", nil)
 	if err != nil {
 		return nil, err
 	}

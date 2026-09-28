@@ -77,7 +77,8 @@ reconciles. Default 5.
 When `true` (default), the agent computes and surfaces diffs but never
 writes to `/homeassistant` on its own; you apply changes manually from the
 web UI. When `false`, changes that pass validation are applied
-automatically on every reconcile.
+automatically on every reconcile - except a plan whose apply already
+failed, which is held for a while (see "Safety model").
 
 **Start with `dry_run: true`.** Only turn it off once you trust the
 diff output for your setup.
@@ -102,11 +103,13 @@ config would capture without running a single git command, and
 **Import** (from Home Assistant), which pushes that snapshot as one
 commit directly onto the branch named in `branch`.
 
-This is the only thing the add-on ever writes to your tracked branch,
-so it is off by default, never runs on the interval, and only ever
-happens on a button click. **`git_token` must have push rights to that
-branch.** See "Importing an existing config" below for exactly what is
-and is not captured.
+It is the one write to your tracked branch that copies your whole
+config (`track_addon_versions` pushes only
+`gitops/addon-versions.yaml`, and `capture_live_changes` only tracked
+files edited here), so it is off by default, never runs on the
+interval, and only ever happens on a button click. **`git_token` must
+have push rights to that branch.** See "Importing an existing config"
+below for exactly what is and is not captured.
 
 Turn it on to seed a repository, run the import, then turn it back
 off - nothing about ordinary syncing needs it.
@@ -116,9 +119,13 @@ off - nothing about ordinary syncing needs it.
 Empty by default (the listener never starts). Set it to a shared
 secret of at least 16 characters to enable a small separate
 `POST /webhook` listener on port 8098 that triggers an immediate
-reconcile - useful for a git host's push webhook instead of waiting
-for the next `interval_minutes` tick. A shorter secret is refused at
-startup and the listener stays off. See "Webhook trigger" below.
+cycle (reconcile, then apply unless `dry_run` is on or checks are
+paused) - useful for a git host's push webhook instead of waiting for
+the next `interval_minutes` tick. Enter the same value as the
+webhook's secret on GitHub, Forgejo or Gitea and each delivery is
+signed with it, so the secret never has to go in the URL. A shorter
+secret is refused at startup and the listener stays off. See "Webhook
+trigger" below.
 
 ### `apply_after_pull`
 
@@ -264,7 +271,10 @@ manual **Commit Back** button is unaffected.
 
 Which categories of config the agent manages.
 
-- `yaml_files` (default `true`): sync plain YAML config files.
+- `yaml_files` (default `true`): sync the repository's files into
+  `/homeassistant`. Off, no file is written, deleted, captured or
+  committed back; the `gitops/` manifests the other categories read still
+  come from the repository.
 - `registries` (default `false`): sync floors, areas, labels, helper
   entities, and entity customizations declared under `gitops/` in the
   repository. See "Registry manifests" below.
@@ -324,7 +334,7 @@ floors:
 areas:
   - id: living_room
     name: Living room
-    floor: ground        # manifest floor id, optional
+    floor: ground        # manifest floor id, optional; null clears it
     labels: [gitops]     # manifest label ids, optional
     icon: mdi:sofa        # optional
     aliases: []           # optional
@@ -358,6 +368,30 @@ input_number:
 Any other field you add to an item is passed straight through to Home
 Assistant, so every option a domain's storage API accepts is
 available, not just what's shown above.
+
+A field you leave out keeps whatever value it has live. Home Assistant
+replaces a helper's whole configuration on every update, so the agent
+sends the undeclared fields back exactly as they are - adopting an
+`input_number` by its name alone keeps its `min`, `max`, `step`, icon,
+unit and mode. To remove an optional field such as `icon`, declare it
+as `null`. That only works for a field with no default: Home Assistant
+fills in `restore`, `step`, `mode`, `duration`, a counter's `initial`,
+`has_date`/`has_time` and an `input_text`'s `min`/`max` when they are
+missing, so `null` on one of those is refused - leave it out to keep the
+live value, or give it one.
+
+Because undeclared fields are sent back as they are, a leftover `initial`
+can make an update invalid: an `input_select` whose live `initial` is an
+option the commit removes, or an `input_number` whose `initial` falls
+outside new `min`/`max`, is refused by Home Assistant and the registry
+change is rolled back. Declare `initial: null` alongside such a change.
+
+The on/off fields - `initial` on `input_boolean`, `has_date` and
+`has_time` on `input_datetime`, `restore` on `counter` and `timer` -
+must be written `true` or `false`. An unquoted `on`, `yes`, `off` or
+`no` is read as text, which Home Assistant would store as a boolean
+and which would then never match the manifest, so the file is refused
+with an error naming the item and field.
 
 A `timer` helper's `duration` may be written as `"H:MM:SS"`, the
 shorter `"H:MM"` (hours and minutes), a plain number of seconds, or a
@@ -446,13 +480,31 @@ The agent only ever touches objects you have declared in `gitops/`:
   created or adopted are never edited or deleted, no matter what the
   manifest says.
 - Point the manifest at a live object you already created by hand
-  (same `name`, not yet managed) and the agent adopts it by that exact
-  name match instead of creating a duplicate. If more than one
-  existing object shares that name, adoption is ambiguous: the agent
-  skips that item and reports the conflict rather than guessing.
+  (same `name`, not yet managed) and the agent adopts it instead of
+  creating a duplicate. Floors, areas and labels match the way Home
+  Assistant itself compares their names, ignoring case and spaces, so
+  `living room` adopts a live `Living Room` - and the adopt then
+  renames it to the manifest's spelling. Helpers have no such rule in
+  Home Assistant and must match exactly. If more than one existing
+  object shares that name, adoption is ambiguous: the agent skips that
+  item and reports the conflict rather than guessing.
 - If a managed object is deleted out-of-band (say, by hand in the Home
   Assistant UI), the agent recreates it from the manifest on the next
-  reconcile.
+  reconcile. If it was also removed from the manifest, the agent just
+  stops tracking it: the plan shows a `forget` line, and nothing is sent
+  to Home Assistant. Live ids come from names, so without this an object
+  you made later under the same name would have been deleted as one the
+  agent still managed.
+- **Renaming an item's `id` while keeping its `name` moves ownership
+  to the new id**: the new id adopts the object by name and the old id
+  is forgotten, all in one apply, with nothing deleted or recreated.
+  Changing the `id` and the `name` in the same commit is a different
+  object as far as the agent can tell: the old one is deleted and a
+  new one created. For a helper that means a new entity_id, and
+  anything referring to the old one breaks - rename the `id` in one
+  commit and the `name` in the next. If the new id's adoption is
+  ambiguous, or an area's floor or label reference is broken, the old
+  id's object is left alone until that is fixed rather than deleted.
 
 Secrets and anything not declared in `gitops/` are never touched by
 this layer, exactly as with the file sync layer.
@@ -517,7 +569,11 @@ model as floors, areas, and labels - see "Ownership (floors, areas,
 labels, helpers)" above - matched by `id`/url_path instead of by name.
 Since Home Assistant itself guarantees a dashboard's url_path is
 unique, adopting one by matching url_path is never ambiguous the way
-adopting a floor/area/label by name can be.
+adopting a helper by name can be. The same goes for a dashboard deleted
+by hand and removed from the manifest: the agent forgets it rather than
+keeping a stale claim on its url_path. Because the `id` is the url_path,
+changing it is not a rename: the old dashboard is deleted and a new one
+created at the new url_path.
 
 Metadata (title, icon, sidebar visibility) and view content are
 compared and applied independently: editing only the title in the
@@ -874,6 +930,17 @@ why. It never leaves a half-finished setup behind.
   its setup flow fresh (see the "No match at all" bullet above) and
   produces a new entry with new entity IDs, not the ones that were
   deleted, so those references need updating by hand regardless.
+- **Renaming an integration's `id` while keeping its `domain` and
+  `title` moves ownership to the new id**: the new id adopts the entry
+  and the old id is forgotten, in one apply, with no flow run and
+  nothing deleted. As with any adopt, the new id's declared `data` is
+  recorded rather than applied, so change `data` in a separate commit,
+  after the rename has applied. Changing the `id` together with the
+  `domain` or `title` is a different integration as far as the agent can
+  tell: the old entry is deleted (devices and entities included, as
+  above) and a new one created. If the new id's adoption is ambiguous,
+  or one of its `secret://` references cannot be resolved, the old id's
+  entry is left alone until that is fixed rather than deleted.
 - If a managed entry is deleted out-of-band (say, by hand in the Home
   Assistant UI), the agent recreates it from the manifest on the next
   reconcile - unless another entry with the same domain and exact title
@@ -1359,8 +1426,10 @@ Every other file in the same cycle proceeds normally.
 
 Resolve one by making the two sides agree: merge the conflict branch,
 push the version you want, or edit this machine to match. The next check
-notices they agree and clears it. There is no button - clearing a
-conflict without resolving it would just move the problem.
+notices they agree and clears it. Nothing else clears it - not an apply
+of the other files in the cycle, not later commits to other paths. There
+is no button - clearing a conflict without resolving it would just move
+the problem.
 
 ### Why this cannot race
 
@@ -1374,9 +1443,13 @@ means "not saved yet" rather than "saved nowhere and then overwritten".
 
 Against someone else pushing to the branch, the fast-forward-only push is
 the guarantee - the same rule imports and add-on version records already
-follow. Against Home Assistant rewriting a file mid-capture, the commit
-re-reads live at the moment it stages, so the repository ends up holding
-whatever was actually there.
+follow. It covers the moment of the push; for the minutes between the
+check and the capture, the capture compares the branch it is about to
+write to with the one it checked against, and leaves out any file that
+was pushed to in between. That file is not captured and not applied, and
+the next check sees it changed on both sides. Against Home Assistant
+rewriting a file mid-capture, the commit re-reads live at the moment it
+stages, so the repository ends up holding whatever was actually there.
 
 ### What it does not cover
 
@@ -1554,35 +1627,82 @@ The import time is shown in the web UI and as `last_import_utc` on
 
 Empty `webhook_secret` (the default) means this listener never starts
 at all - no socket is bound on port 8098. Set it to enable `POST
-/webhook`, gated by that secret via either an `X-Gitops-Token: <secret>`
-header or a `?token=<secret>` query parameter (the header is checked
-first if both are present). A match triggers an immediate reconcile
-asynchronously and responds `202 Accepted`; a mismatch responds `403`.
-The secret must be at least 16 characters - a shorter one is refused
-at startup and the listener stays off. After 30 bad tokens within a
-minute the endpoint answers `429` for everything until the minute
-rolls over, so a guesser gets a real budget rather than a quieter log.
+/webhook`, which lets a request in when the git host signed its body
+with that secret, or when it carries the secret itself as a token. A
+match triggers an immediate cycle asynchronously and responds `202
+Accepted`; a mismatch responds `403`. The cycle is the one the timer
+runs: a reconcile, then, with `dry_run` off, the apply that follows it -
+so a push lands as soon as the git host announces it. While paused, or
+with `dry_run` on, it stops at the reconcile. The secret must be at least 16
+characters - a shorter one is refused at startup and the listener stays
+off. After 30 failed attempts within a minute, wrong tokens and bad
+signatures alike, the endpoint answers `429` for everything until the
+minute rolls over, so a guesser gets a real budget rather than a
+quieter log.
 
-**Prefer the `X-Gitops-Token` header over `?token=`.** A query
-parameter routinely ends up written to a reverse proxy's or client's
-access logs verbatim, which the header does not - if your git host or
-proxy setup lets you choose, configure the webhook to send the secret
-as a header, not as part of the URL.
+A signed delivery carries an HMAC-SHA256 of the request body, keyed by
+the secret, in `X-Hub-Signature-256: sha256=<hex>` (GitHub),
+`X-Forgejo-Signature: <hex>` (Forgejo) or `X-Gitea-Signature: <hex>`
+(Gitea). The agent computes the same HMAC over the exact bytes it
+received; when a delivery carries several of these headers, as
+Forgejo's do, every one of them must match. A signed body over 5 MiB is
+answered `413` and triggers nothing.
+
+The token goes in an `X-Gitops-Token: <secret>` header or a
+`?token=<secret>` query parameter (the header is checked first if both
+are present). A request that carries a token is judged on the token
+alone: a right one is accepted whatever signature comes with it, and a
+wrong one is refused even if the body is validly signed.
+
+**Prefer the signature.** Port 8098 is plain HTTP, so a token crosses
+the network readable by anything on the path, and `?token=` also puts
+the secret in the URL, which reverse proxies and clients routinely
+write to their access logs verbatim. A signature keeps the secret on
+the git host: what travels only proves the sender knows it. A captured
+signed request can still be replayed: each replay runs another cycle,
+which applies nothing the repository does not already ask for, but a
+stream of them keeps the agent busy and every apply takes a backup. Keep
+port 8098 off networks you do not trust. The token forms keep working for callers
+that cannot sign, such as a script or an automation; if you use one,
+send the `X-Gitops-Token` header rather than `?token=`.
 
 The trigger is fire-and-forget: `202` means the request was accepted,
-not that a fresh reconcile is guaranteed to have already run to
-completion, or even started, by the time the response is written. If
-the agent is already busy with another operation, the webhook's
-reconcile request is simply absorbed - nothing is queued, but the
+not that a fresh cycle is guaranteed to have already run to completion,
+or even started, by the time the response is written. If the agent is
+already busy with another operation, the webhook's request is simply
+absorbed - nothing is queued, but the
 in-progress operation (or the next regular poll tick) picks up any real
 change regardless.
 
 This listener is entirely separate from the ingress dashboard on port
 8099: Supervisor's ingress proxy is the dashboard's only route in, and
-the webhook port is never used for it. A flood of requests with the
-wrong token is rate-limited to about one log line per minute so it
-cannot spam the add-on's log; every individual request is still
-answered `403` regardless of the log line being suppressed or not.
+the webhook port is never used for it. A flood of rejected requests is
+rate-limited to about one log line per minute so it cannot spam the
+add-on's log; every individual request is still refused regardless of
+the log line being suppressed or not. That line gives the reason and
+the caller's address, never the token, the signature or the body.
+
+### Setting up the git host's webhook
+
+On GitHub, open the repository's Settings > Webhooks > Add webhook:
+
+1. Payload URL: `http://<home-assistant-host>:8098/webhook`, with no
+   `?token=`.
+2. Content type: `application/json`.
+3. Secret: the value of `webhook_secret`.
+4. Events: just the push event.
+
+On Forgejo or Gitea, open the repository's Settings > Webhooks > Add
+webhook and pick the Forgejo or Gitea type:
+
+1. Target URL: the same URL, with no `?token=`.
+2. HTTP method `POST`, POST content type `application/json`.
+3. Secret: the value of `webhook_secret`.
+4. Trigger on: push events.
+
+The host's test delivery or redeliver button should get a `202` back; a
+`403` there means the two secrets differ, or the host sent no signature
+because its secret field is empty.
 
 ## Add-on auto-update
 
@@ -1953,6 +2073,14 @@ mqtt:
   password: ENC[AES256_GCM,data:Uy4v...,type:str]
 ```
 
+The ordinary values can also be edited directly, in a pull request or
+any text editor, without going through `sops`: the file's integrity
+check (its MAC) covers only the encrypted values, so changing
+`broker:` leaves it decrypting fine. A file encrypted by an add-on
+version from before this was the case carries a check over every
+value, and keeps it until it is next encrypted from scratch; edit
+those through `sops` (see "Editing secrets by hand").
+
 `secrets.yaml` is the one exception, and it goes the other way: every
 value in it is encrypted, because every value in it is a secret by
 definition. It is also the file that stops being excluded when
@@ -2130,7 +2258,8 @@ want. To edit one by hand, name the format and the rules yourself:
 sops decrypt --input-type dotenv --output-type dotenv \
   wmbusmeters/etc/wmbusmeters.d/meter-0001
 
-sops encrypt --in-place --input-type dotenv --output-type dotenv \
+sops --mac-only-encrypted encrypt --in-place \
+  --input-type dotenv --output-type dotenv \
   --age age1... --encrypted-regex '(?i)^(password|...|api_?key|...)$' \
   wmbusmeters/etc/wmbusmeters.d/meter-0001
 ```
@@ -2139,6 +2268,9 @@ The recipient is the `age:` value in the managed `.sops.yaml`, and the
 regex is its `encrypted_regex`. Leaving out `--input-type dotenv` on
 either call is the mistake to avoid: on decrypt it fails loudly, but on
 encrypt it silently produces a whole-file binary blob.
+`--mac-only-encrypted` is what the agent uses too (see "Values, not
+whole files"); it is a global option, so it goes before `encrypt`, and
+it needs sops 3.9.0 or newer.
 
 Two things follow from it being managed:
 
@@ -2180,7 +2312,10 @@ must not rely on is the add-on's own options being the only copy.
 
 With the managed `.sops.yaml` in place and your private key available
 to `sops` (usually via `SOPS_AGE_KEY_FILE` pointing at the file
-`age-keygen` wrote), an ordinary clone edits like any other:
+`age-keygen` wrote), an ordinary clone edits like any other. Use sops
+3.9.0 or newer: the managed rules set `mac_only_encrypted`, and an older
+sops can neither honor that when encrypting nor verify a file written
+with it, so it refuses to decrypt one.
 
 ```
 sops secrets.yaml       # opens decrypted, re-encrypts on save
@@ -2309,7 +2444,34 @@ text is what reaches `GET /status.json` and the
   which is why the agent waits up to 15 minutes for it. If it fails
   anyway, the apply still completes and Rollback still works, but the
   dashboard says so in a "Pre-apply backup did not run" callout carrying
-  the reason, rather than leaving you to find it in the add-on log.
+  the reason, rather than leaving you to find it in the add-on log. The
+  agent keeps its five most recent pre-apply backups and removes older
+  ones after every apply, failed or not.
+- **A failed plan is not retried every interval.** When an apply fails -
+  `check_config` rejects the commit, or a registry operation is refused -
+  the timer holds that exact plan instead of applying it again at every
+  check: each attempt costs another Supervisor backup, config check and
+  rollback, usually for the same result. It tries again after an hour,
+  then after two, four and so on up to a day, since a failure is not
+  always the plan's fault (Home Assistant restarting mid-apply, or a fix
+  made outside the repository, such as a missing entry added to
+  `secrets.yaml`). The dashboard shows an "Automatic apply held" notice
+  with the reason, and `sensor.gitops_agent_status` carries it as
+  `apply_held`. A different plan (a new commit, a change on this machine)
+  is not held, a restart clears the hold, and pressing Apply tries the
+  held plan at once.
+- **A rollback stays rolled back.** Roll Back restores the files and
+  objects the last apply changed, but the repository still asks for them,
+  so with `dry_run` off the next check would simply apply the same commit
+  again (and with `capture_live_changes` on, would push the restored files
+  over it). A successful rollback therefore pauses automatic checks; fix
+  or revert the commit, then press Resume. See "Pausing automatic checks".
+  With `capture_live_changes` on, a check you press or a webhook delivery
+  still captures while paused, so fix or revert the commit before either.
+- **Apply means the plan you reviewed.** The dashboard's Apply button
+  sends along the plan the page showed. If a webhook or the timer replaced
+  that plan in the meantime, nothing is applied and the page says so, so a
+  commit nobody looked at cannot ride in on a click meant for another.
 - **Deletion is scoped.** The agent only deletes a file in
   `/homeassistant` if that exact file was previously applied by the
   agent itself
@@ -2324,7 +2486,8 @@ text is what reaches `GET /status.json` and the
   from `gitops/hacs.yaml` only stops the agent following it (see
   "Ownership (subentries)" and "Ownership (HACS)" above).
 - **Import is opt-in, manual and additive.** The one operation that
-  writes to your tracked branch is off by default (`allow_import`),
+  copies your whole config onto the tracked branch is off by default
+  (`allow_import`),
   never runs on the interval, only ever happens on a button click,
   pushes fast-forward only and never forced, never removes anything
   from the repository, and refuses outright rather than truncating when
@@ -2442,6 +2605,15 @@ can be true because of an unrelated interval tick.
 A POST refused because something else is already running returns
 `X-GitOps-Op-Refused: busy`, no id, and starts nothing.
 
+`POST /apply` takes an optional `plan` form value: the `plan_id` from
+`/status.json` for the plan you mean to apply. If the pending plan has
+changed since (a new commit, a live edit), the POST returns
+`X-GitOps-Op-Refused: plan-changed`, no id, and applies nothing; if the
+plan changes after the POST was accepted, the apply is still refused and
+`operation.error` says why. Without `plan`
+it applies whatever is pending when it runs. A failed or refused Apply
+or Roll Back reports its reason in `operation.error`.
+
 The panel does not appear in the sidebar automatically. After
 installing, open the add-on's page and turn on **Show in sidebar**
 (the toggle next to its icon) - this is a per-install preference set
@@ -2491,10 +2663,20 @@ restarting while the header says "paused" is a surprise worth spelling
 out rather than leaving to be discovered.
 
 **Webhook triggers keep working too**, and they are safe while paused
-for a reason worth stating: a webhook only ever asks for a *check* (see
-"Webhook trigger" above). It runs a reconcile and reports what it found;
-it never applies. Nothing reaches your Home Assistant configuration
-through it, paused or not.
+for a reason worth stating: while paused, a webhook only runs a *check*
+(see "Webhook trigger" above). It reconciles and reports what it found,
+but the apply that would follow with `dry_run` off is exactly what pause
+switches off. Nothing reaches your Home Assistant configuration through
+it while paused.
+
+**A successful Roll Back pauses for you** when `dry_run` is off or
+`capture_live_changes` is on. The repository still asks for what was
+just rolled back, so the next check would otherwise apply it again (or
+capture the restored files over it). The activity feed says why it
+paused; fix or revert the commit, then press **Resume**. With
+`capture_live_changes` on, the pause does not stop a check you press or a
+webhook delivery from capturing (see below), and the restored files read
+as edits made here - so fix or revert the commit before either.
 
 One thing pause does **not** cover: **a repository write from a check
 that something asked for.** With `commit_back` (plus `dry_run`),
@@ -2629,7 +2811,7 @@ of them may change:
   the same way it already does for add-ons, without ever installing one.
   A Core update restarts Home Assistant and an OS update reboots the
   host, and neither is something an unattended agent should decide.
-- **Configurable retention counts.** A successful apply already prunes
+- **Configurable retention counts.** Every apply, failed or not, already prunes
   both the per-apply stash directories under `/data/backup/` and the
   Supervisor backups it took, keeping the 5 newest of each (plus
   whichever stash the Rollback button still points at, which is never

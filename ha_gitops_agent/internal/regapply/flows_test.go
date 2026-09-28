@@ -1840,3 +1840,80 @@ func TestApplyFlowPlanWithOnlyErrorOpsDoesNoIOAndKeepsThemPending(t *testing.T) 
 		t.Errorf("skipped_errors = %+v, want the error op passed through to stay pending", result.SkippedErrors)
 	}
 }
+
+// --- rename: adopt plus forget, and its rollback -------------------------
+
+func TestApplyFlowPlanRenamedKeyThenRollbackRestoresBookkeeping(t *testing.T) {
+	setSupervisorToken(t)
+	client := newFakeIntegrationHTTP()
+	live := []map[string]any{{"entry_id": "abc123", "domain": "workday", "title": "Workday"}}
+	client.queueResponse("GET", "/core/api/config/config_entries/entry", 200, live)
+
+	oldData := map[string]any{"user": map[string]any{"country": "PL"}}
+	managed := map[string]string{"integration:workday_old": "abc123"}
+	hashes := map[string]string{"integration:workday_old": flows.HashData(oldData)}
+	dataSnaps := map[string]map[string]any{"integration:workday_old": oldData}
+	attempts := map[string]map[string]any{}
+	ops := flows.Plan(
+		flows.Desired{Integrations: []map[string]any{
+			{"id": "workday_new", "domain": "workday", "title": "Workday", "data": oldData},
+		}},
+		live, managed, hashes, attempts, nil,
+	)
+	stashDir := t.TempDir()
+
+	result := ApplyFlowPlan(context.Background(), client, nil, ops, managed, hashes, dataSnaps, attempts, stashDir)
+
+	if !result.OK || fmt.Sprint(result.Applied) != "[update integration:workday_new forget integration:workday_old]" {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, c := range client.calls {
+		if c.method != "GET" {
+			t.Errorf("unexpected call %+v: a rename must neither run a flow nor delete", c)
+		}
+	}
+	if fmt.Sprint(managed) != "map[integration:workday_new:abc123]" || len(hashes) != 1 || len(dataSnaps) != 1 {
+		t.Errorf("after apply: managed=%+v hashes=%+v data=%+v", managed, hashes, dataSnaps)
+	}
+	stash := readIntegrationStashFile(t, stashDir)
+	if len(stash.Ops) != 2 || stash.Ops[1].Kind != flows.KindForget || stash.Ops[1].Hash != flows.HashData(oldData) {
+		t.Errorf("stash = %+v, want the forget carrying the dropped hash", stash)
+	}
+
+	rollbackClient := newFakeIntegrationHTTP()
+	rb := RollbackFlowPlan(context.Background(), rollbackClient, nil, stashDir, managed, hashes, dataSnaps, secrettest.From(t, ""))
+	if !rb.OK {
+		t.Fatalf("rollback result = %+v", rb)
+	}
+	if len(rollbackClient.calls) != 0 {
+		t.Errorf("rollback made HTTP calls: %+v", rollbackClient.calls)
+	}
+	if fmt.Sprint(managed) != "map[integration:workday_old:abc123]" {
+		t.Errorf("managed after rollback = %+v", managed)
+	}
+	if fmt.Sprint(hashes) != fmt.Sprint(map[string]string{"integration:workday_old": flows.HashData(oldData)}) {
+		t.Errorf("hashes after rollback = %+v", hashes)
+	}
+	if fmt.Sprint(dataSnaps) != fmt.Sprint(map[string]map[string]any{"integration:workday_old": oldData}) {
+		t.Errorf("data after rollback = %+v", dataSnaps)
+	}
+}
+
+// A forget clears a stale failure record too; only the three maps it
+// read from come back on rollback.
+func TestApplyFlowPlanForgetClearsAttempts(t *testing.T) {
+	setSupervisorToken(t)
+	client := newFakeIntegrationHTTP()
+	client.queueResponse("GET", "/core/api/config/config_entries/entry", 200, []map[string]any{})
+
+	op := integrationOp(flows.KindForget, "workday_old", nil, "abc123")
+	managed := map[string]string{"integration:workday_old": "abc123"}
+	attempts := map[string]map[string]any{"integration:workday_old": {"hash": "h", "error": "boom"}}
+
+	result := ApplyFlowPlan(context.Background(), client, nil, []registries.RegOp{op}, managed,
+		map[string]string{}, map[string]map[string]any{}, attempts, t.TempDir())
+
+	if !result.OK || len(managed) != 0 || len(attempts) != 0 {
+		t.Errorf("result=%+v managed=%+v attempts=%+v", result, managed, attempts)
+	}
+}

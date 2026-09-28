@@ -113,7 +113,7 @@ func TestEncryptPassesRecipientAndRegexAndNoKeyMaterial(t *testing.T) {
 	call := fr.calls[0]
 
 	want := []string{
-		"sops", "encrypt", "--in-place",
+		"sops", "--mac-only-encrypted", "encrypt", "--in-place",
 		"--age", testRecipient,
 		"--encrypted-regex", SecretKeyRegex,
 		"--input-type", "yaml", "--output-type", "yaml",
@@ -187,8 +187,8 @@ func TestEncryptSecretsFileOmitsEncryptedRegex(t *testing.T) {
 		}
 		call := fr.calls[0]
 		for _, arg := range call.args {
-			if arg == "--encrypted-regex" {
-				t.Errorf("argv for %q = %q, want no --encrypted-regex", rel, call.args)
+			if arg == "--encrypted-regex" || arg == "--mac-only-encrypted" {
+				t.Errorf("argv for %q = %q, want neither --encrypted-regex nor --mac-only-encrypted", rel, call.args)
 			}
 		}
 		want := []string{
@@ -217,7 +217,7 @@ func TestEncryptTellsSopsTheStoreForDotenv(t *testing.T) {
 		t.Fatalf("EncryptFileInPlace: %v", err)
 	}
 	want := []string{
-		"sops", "encrypt", "--in-place",
+		"sops", "--mac-only-encrypted", "encrypt", "--in-place",
 		"--age", testRecipient,
 		"--encrypted-regex", SecretKeyRegex,
 		"--input-type", "dotenv", "--output-type", "dotenv",
@@ -267,7 +267,7 @@ func TestEncryptNamesTheStoreForEveryFormat(t *testing.T) {
 				t.Fatalf("EncryptFileInPlace: %v", err)
 			}
 			want := []string{
-				"sops", "encrypt", "--in-place",
+				"sops", "--mac-only-encrypted", "encrypt", "--in-place",
 				"--age", testRecipient,
 				"--encrypted-regex", SecretKeyRegex,
 				"--input-type", tc.store, "--output-type", tc.store,
@@ -1136,6 +1136,67 @@ func TestSopsConfigCarriesRecipientAndBothRules(t *testing.T) {
 	}
 }
 
+// Without mac_only_encrypted the MAC covers plaintext values too, so a
+// hand edit of broker: in a clone breaks decryption. Only the values-only
+// rules carry it; secrets.yaml has no plaintext to protect.
+func TestSopsConfigSetsMacOnlyEncryptedOnValuesOnlyRules(t *testing.T) {
+	c, err := New(testIdentity)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := string(c.SopsConfig())
+
+	rules := strings.Split(got, "  - path_regex: ")[1:]
+	if len(rules) != 3 {
+		t.Fatalf("SopsConfig() has %d rules, want 3:\n%s", len(rules), got)
+	}
+	if strings.Contains(rules[0], "mac_only_encrypted") {
+		t.Errorf("the secrets.yaml rule carries mac_only_encrypted:\n%s", rules[0])
+	}
+	for _, rule := range rules[1:] {
+		if !strings.Contains(rule, "\n    mac_only_encrypted: true\n") {
+			t.Errorf("rule lacks mac_only_encrypted: true:\n%s", rule)
+		}
+	}
+}
+
+func TestCheckSopsVersion(t *testing.T) {
+	cases := []struct {
+		output string
+		ok     bool
+	}{
+		{"sops 3.9.0", true},
+		{"sops 3.9.0 (latest)\n", true},
+		{"sops 3.10.2", true},
+		{"sops 4.0.0", true},
+		{"sops 3.12.0\n[info] sops 3.13.0 is available, update with `go get -u github.com/getsops/sops/v3/cmd/sops`\n", true},
+		{"sops 3.8.1", false},
+		{"sops 3.8.1 (latest)", false},
+		{"sops 2.99.99", false},
+		{"", false},
+		{"not sops at all", false},
+	}
+	for _, tc := range cases {
+		err := checkSopsVersion(tc.output)
+		if (err == nil) != tc.ok {
+			t.Errorf("checkSopsVersion(%q) = %v, want ok=%v", tc.output, err, tc.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "3.9.0 or newer") {
+			t.Errorf("checkSopsVersion(%q) = %q, want it to name the minimum", tc.output, err)
+		}
+	}
+}
+
+func TestProbeRefusesSopsOlderThan39(t *testing.T) {
+	c, fr := newTestCrypter(t)
+	fr.stdout = "sops 3.8.1 (latest)\n"
+
+	err := c.Probe(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "sops 3.8.1 is too old") {
+		t.Errorf("Probe() error = %v, want a too-old refusal", err)
+	}
+}
+
 // --- real sops, when the binary is available ------------------------------
 
 // A fake Runner agrees with flags sops does not have, and the failure would
@@ -1648,6 +1709,104 @@ func TestGitignoreIsNeverEncryptable(t *testing.T) {
 		need, refusal := NeedsEncryption(p, body)
 		if need || refusal != "" {
 			t.Errorf("NeedsEncryption(%q) = (%v, %q), want (false, \"\")", p, need, refusal)
+		}
+	}
+}
+
+// The point of --mac-only-encrypted: a reviewer can hand-edit an ordinary
+// value in a pull request and the file still decrypts.
+func TestEditingAPlaintextValueKeepsTheFileDecryptableWithRealSops(t *testing.T) {
+	c := realSopsCrypter(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "mqtt.yaml")
+	if err := os.WriteFile(abs, []byte("mqtt:\n  broker: 10.0.0.1\n  password: hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EncryptFileInPlace(ctx, abs, "packages/mqtt.yaml"); err != nil {
+		t.Fatalf("EncryptFileInPlace: %v", err)
+	}
+
+	encrypted, err := os.ReadFile(abs) // #nosec G304 -- t.TempDir() fixture path this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encrypted), "mac_only_encrypted: true") {
+		t.Errorf("encrypted file metadata lacks mac_only_encrypted:\n%s", encrypted)
+	}
+	edited := strings.Replace(string(encrypted), "broker: 10.0.0.1", "broker: 10.0.0.2", 1)
+	if edited == string(encrypted) {
+		t.Fatalf("broker line not found in:\n%s", encrypted)
+	}
+	if err := os.WriteFile(abs, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	decrypted, err := c.DecryptFile(ctx, abs)
+	if err != nil {
+		t.Fatalf("DecryptFile after a plaintext edit: %v", err)
+	}
+	if !strings.Contains(string(decrypted), "broker: 10.0.0.2") || !strings.Contains(string(decrypted), "password: hunter2") {
+		t.Errorf("decrypted = %q", decrypted)
+	}
+}
+
+// Files written before the flag carry a full MAC in their metadata, and
+// sops verifies each file the way its own metadata says: no rewrite needed.
+func TestFullMACFileStillDecryptsWithRealSops(t *testing.T) {
+	c := realSopsCrypter(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "mqtt.yaml")
+	if err := os.WriteFile(abs, []byte("broker: 10.0.0.1\npassword: hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDirPath, err := runDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.run(ctx, []string{
+		"sops", "encrypt", "--in-place", "--age", c.Recipient(), "--encrypted-regex", SecretKeyRegex,
+		"--input-type", "yaml", "--output-type", "yaml", abs,
+	}, runDirPath, nil)
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("encrypting the old way: err=%v result=%+v", err, result)
+	}
+
+	decrypted, err := c.DecryptFile(ctx, abs)
+	if err != nil {
+		t.Fatalf("DecryptFile: %v", err)
+	}
+	if !strings.Contains(string(decrypted), "password: hunter2") {
+		t.Errorf("decrypted = %q", decrypted)
+	}
+}
+
+// The managed .sops.yaml must be a config sops accepts, with the flag
+// taking effect for a hand-run "sops encrypt" in a clone.
+func TestSopsConfigIsAcceptedByRealSops(t *testing.T) {
+	c := realSopsCrypter(t)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, ".sops.yaml")
+	if err := os.WriteFile(cfg, c.SopsConfig(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(dir, "mqtt.yaml")
+	if err := os.WriteFile(abs, []byte("broker: 10.0.0.1\npassword: hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.run(context.Background(), []string{"sops", "--config", cfg, "encrypt", "--in-place", abs}, dir, nil)
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("sops with the managed config: err=%v result=%+v", err, result)
+	}
+	encrypted, err := os.ReadFile(abs) // #nosec G304 -- t.TempDir() fixture path this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mac_only_encrypted: true", "broker: 10.0.0.1", "password: ENC["} {
+		if !strings.Contains(string(encrypted), want) {
+			t.Errorf("encrypted file lacks %q:\n%s", want, encrypted)
 		}
 	}
 }

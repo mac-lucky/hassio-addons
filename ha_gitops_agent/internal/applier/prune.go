@@ -14,10 +14,12 @@ import (
 // chronologically (makeStashDir's timestamp format), so reverse sorting the
 // listing finds the newest.
 //
-// exclude is the stash a pending rollback still points to: never removed
-// even once aged out, so the Rollback button cannot point at a directory
-// that no longer exists. Best-effort - list and remove failures are logged.
-func PruneStashDirs(cfg Config, keep int, exclude string) {
+// exclude names the stashes a pending rollback may still point to (the
+// current apply's and the Roll Back target, which differ after a failed
+// apply that undid itself): never removed even once aged out, so the
+// Rollback button cannot point at a directory that no longer exists. Empty
+// entries are ignored. Best-effort - list and remove failures are logged.
+func PruneStashDirs(cfg Config, keep int, exclude ...string) {
 	info, err := os.Stat(cfg.BackupRoot)
 	if err != nil || !info.IsDir() {
 		return
@@ -43,8 +45,10 @@ func PruneStashDirs(cfg Config, keep int, exclude string) {
 			keepNames[n] = true
 		}
 	}
-	if exclude != "" {
-		keepNames[filepath.Base(filepath.Clean(exclude))] = true
+	for _, e := range exclude {
+		if e != "" {
+			keepNames[filepath.Base(filepath.Clean(e))] = true
+		}
 	}
 
 	for _, name := range names {

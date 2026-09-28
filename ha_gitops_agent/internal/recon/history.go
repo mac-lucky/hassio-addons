@@ -103,7 +103,7 @@ func (r *Reconciler) noteHistoryWriteFailure(err error) {
 	})
 
 	if first {
-		r.logEvent("could not record run history: " + err.Error())
+		r.logWarn("could not record run history: " + err.Error())
 	}
 }
 

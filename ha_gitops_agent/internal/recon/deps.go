@@ -63,7 +63,7 @@ type Git interface {
 	// these paths onto the tracked branch. A zero CommitSHA with a nil error
 	// means nothing was capturable. Used only by captureLiveChanges, always
 	// under opLock and always across the apply that follows it.
-	CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error)
+	CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot, classifiedTip string) (gitsync.CaptureResult, error)
 	// ParkConflicts is the gitsync.ParkConflicts seam, used only when the
 	// classifier refuses a path in both directions.
 	ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error)
@@ -121,8 +121,8 @@ func (r *realGit) RecordFile(ctx context.Context, relPath string, content []byte
 	return r.g.RecordFile(ctx, relPath, content, message)
 }
 
-func (r *realGit) CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot string) (gitsync.CaptureResult, error) {
-	return r.g.CaptureFiles(ctx, files, configRoot)
+func (r *realGit) CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot, classifiedTip string) (gitsync.CaptureResult, error) {
+	return r.g.CaptureFiles(ctx, files, configRoot, classifiedTip)
 }
 
 func (r *realGit) ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
@@ -178,7 +178,7 @@ type Applier interface {
 	// ReloadAfterRollback asks Home Assistant to re-read what RollbackFrom
 	// restored; "" or a warning to surface. See applier.ReloadAfterRollback.
 	ReloadAfterRollback(ctx context.Context, opts options.Options) string
-	PruneStashDirs(keep int, exclude string)
+	PruneStashDirs(keep int, exclude ...string)
 	MakeStashDir() (string, error)
 }
 
@@ -205,8 +205,8 @@ func (r *realApplier) ReloadAfterRollback(ctx context.Context, opts options.Opti
 	return applier.ReloadAfterRollback(ctx, r.cfg, opts, nil)
 }
 
-func (r *realApplier) PruneStashDirs(keep int, exclude string) {
-	applier.PruneStashDirs(r.cfg, keep, exclude)
+func (r *realApplier) PruneStashDirs(keep int, exclude ...string) {
+	applier.PruneStashDirs(r.cfg, keep, exclude...)
 }
 
 func (r *realApplier) MakeStashDir() (string, error) { return applier.MakeStashDir(r.cfg) }
@@ -457,10 +457,10 @@ var _ Hacs = realHacs{}
 // realRegistryApplier owns that Dialer; FetchLive needs no redial and
 // dials once.
 type RegistryApplier interface {
-	// FetchLive fetches every live registry/helper object, plus every live
-	// entity when includeEntities is set (gated separately - see
-	// regapply.FetchLive).
-	FetchLive(ctx context.Context, includeEntities bool) (map[string][]map[string]any, error)
+	// FetchLive fetches every live floor/area/label and the objects of the
+	// helper domains named, plus every live entity when includeEntities is
+	// set (gated separately - see regapply.FetchLive).
+	FetchLive(ctx context.Context, helperDomains []string, includeEntities bool) (map[string][]map[string]any, error)
 	ApplyPlan(ctx context.Context, plan []registries.RegOp, managed map[string]string, stashDir string) regapply.RegistryApplyResult
 	// ApplyEntityPlan is ApplyPlan's sibling for internal/entities' ops.
 	ApplyEntityPlan(
@@ -566,13 +566,13 @@ func newRealRegistryApplier(dialer regapply.Dialer) *realRegistryApplier {
 	return &realRegistryApplier{dialer: dialer}
 }
 
-func (r *realRegistryApplier) FetchLive(ctx context.Context, includeEntities bool) (map[string][]map[string]any, error) {
+func (r *realRegistryApplier) FetchLive(ctx context.Context, helperDomains []string, includeEntities bool) (map[string][]map[string]any, error) {
 	ws, err := r.dialer(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer ws.Close()
-	return regapply.FetchLive(ctx, ws, includeEntities)
+	return regapply.FetchLive(ctx, ws, helperDomains, includeEntities)
 }
 
 func (r *realRegistryApplier) ApplyPlan(

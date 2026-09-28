@@ -612,7 +612,7 @@ func driveFlow(
 // integrationStashEntry is the in-memory (and, via
 // toIntegrationStashOnDisk, on-disk) record of one executed integration
 // op, enough to invert it later. Kind is flows.KindCreate,
-// flows.KindUpdate (adopt) or registries.KindDelete.
+// flows.KindUpdate (adopt), registries.KindDelete or flows.KindForget.
 type integrationStashEntry struct {
 	Kind    string
 	Key     string
@@ -621,13 +621,17 @@ type integrationStashEntry struct {
 	EntryID string
 	// Data is the declared "data" mapping this op recorded against Key when
 	// it ran (see state.IntegrationData). For a create/adopt it is what the
-	// forward op used; for a delete it is whatever was snapshotted back
-	// when the key was created or adopted - the manifest no longer declares
-	// it - fed straight back into driveFlow if the delete is rolled back.
+	// forward op used; for a delete or forget it is whatever was
+	// snapshotted back when the key was created or adopted - the manifest
+	// no longer declares it - fed straight back into driveFlow if a delete
+	// is rolled back, or into state.IntegrationData if a forget is.
 	Data map[string]any
+	// Hash is state.IntegrationHashes' entry a forget dropped, so its
+	// inverse can put it back. Empty for every other kind.
+	Hash string
 }
 
-// executeFlowOp executes a single create/update(adopt)/delete op and
+// executeFlowOp executes a single create/update(adopt)/delete/forget op and
 // returns a record of it, for both the stash file and a later invertFlowOp
 // call.
 //
@@ -752,6 +756,19 @@ func executeFlowOp(
 		return integrationStashEntry{
 			Kind: registries.KindDelete, Key: op.Key, Domain: domain, Title: title, EntryID: entryID, Data: data,
 		}, "", nil
+
+	case flows.KindForget:
+		// Bookkeeping only, nothing is sent: a renamed manifest id adopted
+		// this entry earlier in the same plan, so the old key just lets go.
+		// attempts is not stashed - a managed key has none worth keeping.
+		entry := integrationStashEntry{
+			Kind: flows.KindForget, Key: op.Key, EntryID: op.LiveID, Data: dataSnapshots[key], Hash: hashes[key],
+		}
+		delete(managed, key)
+		delete(hashes, key)
+		delete(dataSnapshots, key)
+		delete(attempts, key)
+		return entry, "", nil
 	}
 
 	return integrationStashEntry{}, "", fmt.Errorf("unreachable: unknown op kind %q", op.Kind)
@@ -784,6 +801,7 @@ func declaredDataOf(op registries.RegOp) map[string]any {
 //     one), then re-record the bookkeeping under it and put the declared
 //     title back (applyDeclaredTitle - a re-created entry carries the same
 //     adopt-matching hazard as a fresh one).
+//   - forget -> no live call, just put back the bookkeeping it dropped.
 //
 // entry.Data is the declared data as WRITTEN, references and all (see
 // declaredDataOf), so the delete branch resolves it against the live
@@ -836,6 +854,16 @@ func invertFlowOp(
 				"re-created integration '%s' (domain %s) as entry %s after rolling back its deletion, "+
 					"but it is titled %q instead of %q: %w",
 				entry.Key, entry.Domain, newEntryID, liveTitle, entry.Title, renameErr)
+		}
+		return nil
+
+	case flows.KindForget:
+		managed[key] = entry.EntryID
+		if entry.Hash != "" {
+			hashes[key] = entry.Hash
+		}
+		if entry.Data != nil {
+			dataSnapshots[key] = entry.Data
 		}
 		return nil
 	}
@@ -1062,6 +1090,8 @@ type integrationStashOpOnDisk struct {
 	Title   string         `json:"title"`
 	EntryID string         `json:"entry_id"`
 	Data    map[string]any `json:"data"`
+	// Forget-only; omitted otherwise so an older stash reads identically.
+	Hash string `json:"hash,omitempty"`
 }
 
 type integrationStashFileOnDisk struct {

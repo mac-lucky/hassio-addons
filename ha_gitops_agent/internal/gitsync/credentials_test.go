@@ -3,6 +3,7 @@ package gitsync
 import (
 	"context"
 	"encoding/base64"
+	"os"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,13 @@ func (f *fakeRunner) Run(_ context.Context, dir string, env []string, args ...st
 	})
 	if len(args) >= 2 && args[1] == "rev-parse" {
 		return RunResult{Stdout: strings.Repeat("a", 40) + "\n"}, nil
+	}
+	if len(args) >= 2 && args[1] == "clone" {
+		// EnsureClone renames the finished clone into place, so the
+		// directory a real clone creates has to exist.
+		if err := os.MkdirAll(args[len(args)-1], 0o750); err != nil {
+			return RunResult{}, err
+		}
 	}
 	return RunResult{}, nil
 }

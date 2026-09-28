@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,8 +115,19 @@ func (c *Crypter) EncryptFileInPlace(ctx context.Context, absPath, relPath strin
 	if err != nil {
 		return err
 	}
-	args := []string{"sops", "encrypt", "--in-place", "--age", c.recipient}
-	if !IsSecretsFile(relPath) {
+	valuesOnly := !IsSecretsFile(relPath)
+	args := []string{"sops"}
+	if valuesOnly {
+		// --mac-only-encrypted keeps the plaintext values out of the MAC.
+		// Without it, hand-editing an ordinary value like broker: in a pull
+		// request fails MAC verification and stops every cycle, defeating
+		// the point of encrypting values rather than files. sops reads the
+		// mode back from each file's metadata, so a file written before
+		// this flag still decrypts. A global flag: "encrypt" rejects it.
+		args = append(args, "--mac-only-encrypted")
+	}
+	args = append(args, "encrypt", "--in-place", "--age", c.recipient)
+	if valuesOnly {
 		args = append(args, "--encrypted-regex", SecretKeyRegex)
 	}
 	args = append(args, storeFlags(format)...)
@@ -221,11 +234,12 @@ func storeFlags(format Format) []string {
 	return []string{"--input-type", store, "--output-type", store}
 }
 
-// Probe runs "sops --version" to check the binary is present and
-// executable. Called once at startup, so a missing sops or an AppArmor
-// denial surfaces there rather than mid-import with plaintext already in
-// the worktree. --disable-version-check stops sops querying GitHub for a
-// newer release, which would make this need outbound internet.
+// Probe runs "sops --version" to check the binary is present, executable
+// and at least minSopsVersion. Called once at startup, so a missing sops,
+// an AppArmor denial or a too-old sops surfaces there rather than
+// mid-import with plaintext already in the worktree.
+// --disable-version-check stops sops querying GitHub for a newer release,
+// which would make this need outbound internet.
 func (c *Crypter) Probe(ctx context.Context) error {
 	if !c.Enabled() {
 		return errors.New("sopscrypt: encryption is not enabled")
@@ -236,6 +250,37 @@ func (c *Crypter) Probe(ctx context.Context) error {
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("sopscrypt: sops --version failed (exit %d): %s", result.ExitCode, c.failureReason(result))
+	}
+	return checkSopsVersion(result.Stdout)
+}
+
+// minSopsVersion is the first sops with --mac-only-encrypted, which
+// EncryptFileInPlace passes on every values-only file.
+var minSopsVersion = [3]int{3, 9, 0}
+
+// sopsVersionRe finds the "sops 3.9.0" line of "sops --version", which may
+// carry a " (latest)" suffix or be followed by an update notice.
+var sopsVersionRe = regexp.MustCompile(`(?m)^sops (\d+)\.(\d+)\.(\d+)`)
+
+// checkSopsVersion refuses a "sops --version" output below minSopsVersion,
+// or one it cannot read a version out of at all.
+func checkSopsVersion(output string) error {
+	want := fmt.Sprintf("%d.%d.%d", minSopsVersion[0], minSopsVersion[1], minSopsVersion[2])
+	m := sopsVersionRe.FindStringSubmatch(output)
+	if m == nil {
+		return fmt.Errorf("sopscrypt: could not read a version from sops --version (%q); sops %s or newer is required",
+			strings.TrimSpace(output), want)
+	}
+	for i := range minSopsVersion {
+		n, err := strconv.Atoi(m[i+1])
+		if err != nil || n > minSopsVersion[i] {
+			// An overflowing component is no older release.
+			return nil
+		}
+		if n < minSopsVersion[i] {
+			return fmt.Errorf("sopscrypt: sops %s.%s.%s is too old; %s or newer is required for --mac-only-encrypted",
+				m[1], m[2], m[3], want)
+		}
 	}
 	return nil
 }
@@ -256,9 +301,11 @@ creation_rules:
     age: ` + c.Recipient() + `
   - path_regex: \.ya?ml$
     encrypted_regex: '` + SecretKeyRegex + `'
+    mac_only_encrypted: true
     age: ` + c.Recipient() + `
   - path_regex: \.json$
     encrypted_regex: '` + SecretKeyRegex + `'
+    mac_only_encrypted: true
     age: ` + c.Recipient() + `
 `)
 }
@@ -280,11 +327,23 @@ func (c *Crypter) run(ctx context.Context, args []string, dir string, extraEnv [
 	result, err := runner.Run(runCtx, dir, append(baseEnv(), extraEnv...), args...)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return RunResult{}, fmt.Errorf("sopscrypt: sops %s timed out after %s", args[1], timeout)
+			return RunResult{}, fmt.Errorf("sopscrypt: sops %s timed out after %s", commandName(args), timeout)
 		}
-		return RunResult{}, fmt.Errorf("sopscrypt: sops %s failed to run: %s", args[1], execx.Redact(err.Error(), c.identity))
+		return RunResult{}, fmt.Errorf("sopscrypt: sops %s failed to run: %s", commandName(args), execx.Redact(err.Error(), c.identity))
 	}
 	return result, nil
+}
+
+// commandName is what an error calls a sops invocation: its subcommand,
+// skipping global flags like --mac-only-encrypted, or its first flag when
+// it has none (--version).
+func commandName(args []string) string {
+	for _, arg := range args[1:] {
+		if !strings.HasPrefix(arg, "-") {
+			return arg
+		}
+	}
+	return args[1]
 }
 
 // failureReason strips the identity out of sops's output, preferring stderr

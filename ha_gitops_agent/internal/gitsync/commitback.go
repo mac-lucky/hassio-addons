@@ -478,7 +478,14 @@ func (g *GitSync) enterThrowawayBranch(ctx context.Context, branch, tip string) 
 // sha every other GitSync method assumes, and drops the throwaway branch
 // ref. Best-effort and logged, never returned: it runs from a defer, and
 // the next ReconcileNow's Checkout forces Workdir back into shape anyway.
+//
+// Detached from ctx's cancellation (runGit's own timeout still bounds it):
+// the caller's ctx is the cycle's, and SIGTERM cancels it mid-capture. A
+// cancelled ctx cannot start a process at all, so the restore used to be a
+// no-op exactly then, leaving Workdir on the throwaway branch for the apply
+// that runCycle deliberately lets finish.
 func (g *GitSync) restoreDetachedCheckout(ctx context.Context, sha, branch string) {
+	ctx = context.WithoutCancel(ctx)
 	if !g.restoreDetached(ctx, sha) {
 		return
 	}
@@ -494,6 +501,7 @@ func (g *GitSync) restoreDetachedCheckout(ctx context.Context, sha, branch strin
 // restoreDetachedCheckout because Import's empty-clone path needs the clean
 // with no sha to detach at.
 func (g *GitSync) restoreDetached(ctx context.Context, sha string) bool {
+	ctx = context.WithoutCancel(ctx) // see restoreDetachedCheckout
 	if _, err := g.runGit(ctx, []string{"checkout", "--detach", "--force", sha}, "", nil); err != nil {
 		slog.Warn("gitsync: could not restore detached checkout", "sha", sha, "error", err)
 		return false

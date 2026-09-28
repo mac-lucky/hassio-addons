@@ -45,11 +45,21 @@ type CaptureResult struct {
 	// out to be present-but-uncapturable stages nothing. A caller recording
 	// where a path's base now lives must use THIS list, not its request.
 	Paths []string
+	// Refused is the asked-for paths the remote changed after the caller
+	// classified them, which were therefore NOT captured: the caller's
+	// verdict that only live moved no longer holds, and capturing would
+	// silently revert that newer commit. Set with or without a commit; the
+	// caller keeps them out of its apply, and its next cycle classifies them
+	// against the new tip (typically as a conflict).
+	Refused []string
 }
 
 // CaptureFiles commits the CURRENT LIVE state of every path in files onto
 // the TRACKED branch as one commit and pushes it, reporting that commit and
-// the paths it carries. This is the write-back half of bidirectional sync:
+// the paths it carries. classifiedTip is the commit the caller classified
+// files against; a path the remote changed since then is refused, not
+// captured (see CaptureResult.Refused). "" skips that check. This is the
+// write-back half of bidirectional sync:
 // where CommitBack parks live drift on a throwaway branch for a human to
 // review, this one moves opts.Branch itself.
 //
@@ -87,7 +97,7 @@ type CaptureResult struct {
 // but the caller REMOVING them from its plan before publishing it - recon's
 // unattended cycle happens to hold one lock across both, its web and webhook
 // paths do not, and both are safe for that structural reason.
-func (g *GitSync) CaptureFiles(ctx context.Context, files []DriftFile, configRoot string) (CaptureResult, error) {
+func (g *GitSync) CaptureFiles(ctx context.Context, files []DriftFile, configRoot, classifiedTip string) (CaptureResult, error) {
 	if err := g.guardWriteBranch(ctx, "capture"); err != nil {
 		return CaptureResult{}, err
 	}
@@ -99,8 +109,22 @@ func (g *GitSync) CaptureFiles(ctx context.Context, files []DriftFile, configRoo
 	if err != nil {
 		return CaptureResult{}, err
 	}
+	// The fast-forward check below only covers the seconds between this
+	// fetch and the push; the caller classified against a fetch made
+	// minutes earlier, and a push to one of these paths in between would
+	// otherwise be undone by a perfectly ordinary fast-forward.
+	files, refused, err := g.dropMovedSince(ctx, classifiedTip, tip, files)
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	if len(files) == 0 {
+		return CaptureResult{BaseSHA: tip, Refused: refused}, nil
+	}
 	result, err := g.captureFilesAt(ctx, tip, files, configRoot)
 	if !errors.Is(err, errTrackedPushRejected) {
+		if err == nil {
+			result.Refused = refused
+		}
 		return result, err
 	}
 
@@ -115,13 +139,53 @@ func (g *GitSync) CaptureFiles(ctx context.Context, files []DriftFile, configRoo
 		return CaptureResult{}, err
 	}
 
+	// The race just lost was, by definition, a push to this branch - and
+	// possibly to one of these very paths.
+	files, more, err := g.dropMovedSince(ctx, tip, newTip, files)
+	if err != nil {
+		return CaptureResult{}, err
+	}
+	refused = append(refused, more...)
+	if len(files) == 0 {
+		return CaptureResult{BaseSHA: newTip, Refused: refused}, nil
+	}
+
 	result, err = g.captureFilesAt(ctx, newTip, files, configRoot)
 	if errors.Is(err, errTrackedPushRejected) {
 		return CaptureResult{}, fmt.Errorf(
 			"gitsync: capture: %s moved on the remote twice while capturing %d live change(s) - giving up rather than racing it again",
 			g.Opts.Branch, len(files))
 	}
+	if err == nil {
+		result.Refused = refused
+	}
 	return result, err
+}
+
+// dropMovedSince splits files into those the remote left alone between
+// from and to, and the paths it changed. An error means the comparison
+// could not be made, and the caller must capture nothing: "live is the
+// truth" is exactly the claim that cannot be checked then.
+func (g *GitSync) dropMovedSince(ctx context.Context, from, to string, files []DriftFile) (keep []DriftFile, moved []string, err error) {
+	if from == "" || from == to {
+		return files, nil, nil
+	}
+	changed, err := g.ChangedBetween(ctx, from, to)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gitsync: capture: cannot tell what %s changed since it was classified: %w", g.Opts.Branch, err)
+	}
+	movedSet := make(map[string]bool, len(changed))
+	for _, p := range changed {
+		movedSet[p] = true
+	}
+	for _, f := range files {
+		if movedSet[f.Path] {
+			moved = append(moved, f.Path)
+		} else {
+			keep = append(keep, f)
+		}
+	}
+	return keep, moved, nil
 }
 
 // captureFilesAt is one attempt at capturing files onto the commit tip.

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
 )
 
@@ -711,5 +712,51 @@ func awaitPaused(t *testing.T, r *Reconciler, want bool) {
 			t.Fatalf("paused did not become %v within 2s - a press is waiting on a lock it should not need", want)
 		case <-time.After(time.Millisecond):
 		}
+	}
+}
+
+// Without the pause the next tick planned the rolled-back commit again and
+// re-applied it within one interval.
+func TestASuccessfulRollbackPausesAutomaticChecks(t *testing.T) {
+	path := usePauseFile(t)
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = oneChange()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: t.TempDir()}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.runCycle(context.Background())
+
+	if res := r.Rollback(context.Background()); !res.OK {
+		t.Fatalf("rollback = %+v, want ok", res)
+	}
+
+	if !r.Status().Paused {
+		t.Error("not paused after a rollback with dry_run off")
+	}
+	if !pauseFileExists(t, path) {
+		t.Error("pause flag not written, so a restart would resume and re-apply")
+	}
+	r.runCycle(context.Background())
+	if got := len(fakes.applier.applyCalls); got != 1 {
+		t.Errorf("apply calls = %d after the rollback, want still 1", got)
+	}
+}
+
+// With dry_run on and capture off nothing would undo the rollback, so the
+// timer keeps running.
+func TestARollbackUnderDryRunDoesNotPause(t *testing.T) {
+	usePauseFile(t)
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = oneChange()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: t.TempDir()}
+	r := fakes.reconciler(baseOpts())
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+
+	r.Rollback(context.Background())
+
+	if r.Status().Paused {
+		t.Error("paused after a dry-run rollback")
 	}
 }

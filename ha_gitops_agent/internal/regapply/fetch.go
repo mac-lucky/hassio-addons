@@ -2,17 +2,25 @@ package regapply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/wsclient"
 )
 
-// FetchLive lists every live registry and helper object keyed by rtype for
-// registries.Plan. Lists all supported domains regardless of what the
-// manifest declares, so undeclared ones still get their stale entries
-// deleted; includeEntities adds the large entity registry.
-func FetchLive(ctx context.Context, ws WSClient, includeEntities bool) (map[string][]map[string]any, error) {
-	live := make(map[string][]map[string]any, len(registries.RegistryRTypes)+len(registries.SupportedHelperDomains)+1)
+// FetchLive lists every live floor, area and label, plus the helper
+// domains named in helperDomains (registries.HelperDomainsFor: the ones the
+// manifest declares or this agent manages, which covers every stale entry
+// that could need deleting), keyed by rtype for registries.Plan.
+// includeEntities adds the large entity registry.
+//
+// Only those domains, not every supported one: a helper integration that
+// is not loaded - an install without default_config - answers its list
+// command with unknown_command, and listing a domain nobody uses made every
+// cycle fail on it.
+func FetchLive(ctx context.Context, ws WSClient, helperDomains []string, includeEntities bool) (map[string][]map[string]any, error) {
+	live := make(map[string][]map[string]any, len(registries.RegistryRTypes)+len(helperDomains)+1)
 	for _, rtype := range registries.RegistryRTypes {
 		items, err := listCmd(ctx, ws, rtype)
 		if err != nil {
@@ -20,9 +28,16 @@ func FetchLive(ctx context.Context, ws WSClient, includeEntities bool) (map[stri
 		}
 		live[rtype] = items
 	}
-	for _, domain := range registries.SupportedHelperDomains {
+	for _, domain := range helperDomains {
 		items, err := listCmd(ctx, ws, domain)
 		if err != nil {
+			var wsErr *wsclient.Error
+			if errors.As(err, &wsErr) && wsErr.Code == wsCodeUnknownCommand {
+				return nil, fmt.Errorf(
+					"%s helpers are declared in helpers.yaml or still managed from an earlier one, but Home Assistant "+
+						"has not loaded that integration - add default_config: or %s: to configuration.yaml",
+					domain, domain)
+			}
 			return nil, err
 		}
 		live[domain] = items
@@ -88,4 +103,22 @@ func msgType(rtype, action string) string {
 		return fmt.Sprintf("config/%s_registry/%s", rtype, action)
 	}
 	return fmt.Sprintf("%s/%s", rtype, action)
+}
+
+// helperDomainsOf is the helper domains ops touch, for an apply that needs
+// only the live objects it is about to change.
+func helperDomainsOf(ops []registries.RegOp) []string {
+	seen := map[string]bool{}
+	var domains []string
+	for _, op := range ops {
+		if registries.IsRegistryRType(op.RType) || seen[op.RType] {
+			continue
+		}
+		if !registries.IsSupportedHelperDomain(op.RType) {
+			continue
+		}
+		seen[op.RType] = true
+		domains = append(domains, op.RType)
+	}
+	return domains
 }

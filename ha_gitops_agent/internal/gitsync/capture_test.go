@@ -29,7 +29,7 @@ func TestCaptureFilesCommitsOntoTheTrackedBranchAndRestoresTheCheckout(t *testin
 	result, err := gs.CaptureFiles(ctx, []DriftFile{
 		{Path: "automations.yaml", Kind: "update"},
 		{Path: "scripts.yaml", Kind: "update"},
-	}, configRoot)
+	}, configRoot, sha)
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestCaptureFilesCommitsOnlyTheStagedPaths(t *testing.T) {
 	}
 
 	writeLiveFile(t, configRoot, "scripts.yaml", "greet:\n  sequence: []\n")
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "update"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "update"}}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCaptureFilesStagesARemovalForAGenuinelyDeletedLiveFile(t *testing.T) {
 	// scripts.yaml never written live: differ reports that as "add".
 	writeLiveFile(t, configRoot, "automations.yaml", "- id: demo\n")
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "add"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "add"}}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestCaptureFilesDoesNotRemoveAnUnreadableLiveFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "locked/still-there.yaml", Kind: "add"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "locked/still-there.yaml", Kind: "add"}}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestCaptureFilesRetriesOnceWhenTheBranchMovedUnderIt(t *testing.T) {
 		commitFile(t, work, "packages/user.yaml", "user: 1\n", "user commit")
 	}}
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestCaptureFilesGivesUpAfterASecondRejection(t *testing.T) {
 		commitFile(t, work, "packages/user.yaml", strings.Repeat("user: 1\n", competing), "user commit")
 	}}
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, "")
 	if err == nil || !strings.Contains(err.Error(), "moved on the remote twice") {
 		t.Fatalf("error = %v, want it to report losing the race twice", err)
 	}
@@ -246,7 +246,7 @@ func TestCaptureFilesRetryRestagesFromLive(t *testing.T) {
 		writeLiveFile(t, configRoot, "automations.yaml", secondLive)
 	}}
 
-	if _, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot); err != nil {
+	if _, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, ""); err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestCaptureFilesRefusesExcludedAndSecretShapedPaths(t *testing.T) {
 			gs, bare, _, configRoot, _ := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
 			writeLiveFile(t, configRoot, "automations.yaml", "- id: live\n")
 
-			if _, err := gs.CaptureFiles(context.Background(), []DriftFile{{Path: tc.path, Kind: "update"}}, configRoot); err == nil {
+			if _, err := gs.CaptureFiles(context.Background(), []DriftFile{{Path: tc.path, Kind: "update"}}, configRoot, ""); err == nil {
 				t.Errorf("CaptureFiles(%q) error = nil, want a refusal", tc.path)
 			}
 			if got, _ := showAtRef(t, bare, "main", "automations.yaml"); got != "- id: demo\n" {
@@ -305,7 +305,7 @@ func TestCaptureFilesSkipsGitignoredPathsAndOmitsThemFromResultPaths(t *testing.
 	result, err := gs.CaptureFiles(ctx, []DriftFile{
 		{Path: "automations.yaml", Kind: "update"},
 		{Path: "www/community/card.js", Kind: "add"},
-	}, configRoot)
+	}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestCaptureFilesEncryptsSecretsOnTheWayIn(t *testing.T) {
 	const live = "http_password: rotated\n"
 	writeLiveFile(t, configRoot, "secrets.yaml", live)
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "secrets.yaml", Kind: "update"}}, configRoot)
+	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "secrets.yaml", Kind: "update"}}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
@@ -364,7 +364,80 @@ func TestCaptureFilesEncryptsSecretsOnTheWayIn(t *testing.T) {
 func TestCaptureFilesRefusesWithNothingToCapture(t *testing.T) {
 	gs, _, _, configRoot, _ := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
 
-	if _, err := gs.CaptureFiles(context.Background(), nil, configRoot); err == nil {
+	if _, err := gs.CaptureFiles(context.Background(), nil, configRoot, ""); err == nil {
 		t.Error("CaptureFiles(nil) error = nil, want a refusal")
+	}
+}
+
+// SIGTERM cancels the cycle's ctx mid-capture. The restore used to run on
+// that same ctx, which cannot start a process once cancelled, and left the
+// worktree on the capture branch for the apply that runs on regardless.
+func TestCaptureFilesRestoresTheCheckoutWhenCancelledMidway(t *testing.T) {
+	gs, _, _, configRoot, sha := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
+	writeLiveFile(t, configRoot, "automations.yaml", "- id: demo\n  alias: Edited\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gs.Runner = &racingRunner{inner: execx.CommandRunner{}, races: 1, onPush: cancel}
+
+	if _, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, ""); err == nil {
+		t.Fatal("CaptureFiles succeeded with its ctx cancelled before the push")
+	}
+
+	if got := gs.CurrentSHA(context.Background()); got != sha {
+		t.Errorf("CurrentSHA() = %q, want the detached checkout restored to %q", got, sha)
+	}
+}
+
+// A push to a captured path after the caller classified it: the capture's
+// own fetch sees a newer tip, and a fast-forward onto it would have
+// reverted that push without any rejection to notice.
+func TestCaptureFilesRefusesAPathTheRemoteChangedSinceClassification(t *testing.T) {
+	gs, bare, work, configRoot, sha := driftClone(t, map[string]string{
+		"automations.yaml": "- id: demo\n",
+		"scripts.yaml":     "greet: {}\n",
+	})
+	writeLiveFile(t, configRoot, "automations.yaml", "- id: demo\n  alias: Edited live\n")
+	writeLiveFile(t, configRoot, "scripts.yaml", "greet:\n  sequence: []\n")
+	const pushed = "- id: demo\n  alias: Pushed meanwhile\n"
+	commitFile(t, work, "automations.yaml", pushed, "user commit")
+
+	result, err := gs.CaptureFiles(context.Background(), []DriftFile{
+		{Path: "automations.yaml", Kind: "update"},
+		{Path: "scripts.yaml", Kind: "update"},
+	}, configRoot, sha)
+	if err != nil {
+		t.Fatalf("CaptureFiles: %v", err)
+	}
+
+	if !slices.Equal(result.Refused, []string{"automations.yaml"}) {
+		t.Errorf("Refused = %v, want [automations.yaml]", result.Refused)
+	}
+	if !slices.Equal(result.Paths, []string{"scripts.yaml"}) {
+		t.Errorf("Paths = %v, want only the untouched scripts.yaml captured", result.Paths)
+	}
+	if got, _ := showAtRef(t, bare, "main", "automations.yaml"); got != pushed {
+		t.Errorf("automations.yaml on main = %q, want the pushed commit kept", got)
+	}
+}
+
+// The same race, lost at the push and seen only by the retry's fetch.
+func TestCaptureFilesRetryRefusesAPathTheRacingPushChanged(t *testing.T) {
+	gs, bare, work, configRoot, sha := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
+	writeLiveFile(t, configRoot, "automations.yaml", "- id: demo\n  alias: Edited live\n")
+	const pushed = "- id: demo\n  alias: Pushed meanwhile\n"
+	gs.Runner = &racingRunner{inner: execx.CommandRunner{}, races: 1, onPush: func() {
+		commitFile(t, work, "automations.yaml", pushed, "user commit")
+	}}
+
+	result, err := gs.CaptureFiles(context.Background(), []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha)
+	if err != nil {
+		t.Fatalf("CaptureFiles: %v", err)
+	}
+
+	if result.CommitSHA != "" || !slices.Equal(result.Refused, []string{"automations.yaml"}) {
+		t.Errorf("result = %+v, want no commit and automations.yaml refused", result)
+	}
+	if got, _ := showAtRef(t, bare, "main", "automations.yaml"); got != pushed {
+		t.Errorf("automations.yaml on main = %q, want the pushed commit kept", got)
 	}
 }

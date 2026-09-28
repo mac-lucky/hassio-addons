@@ -252,6 +252,17 @@ func executeDashboardOp(
 		return executeDashboardUpdate(ctx, ws, op, liveByLiveID[op.LiveID], liveContent[op.Key], dashboardManaged, stashDir, preExisting, executed)
 	case registries.KindDelete:
 		return executeDashboardDelete(ctx, ws, op, liveByLiveID[op.LiveID], liveContent[op.Key], dashboardManaged, stashDir, preExisting, executed)
+	case registries.KindForget:
+		// Bookkeeping only: the managed dashboard is already gone, and
+		// nothing is sent to Home Assistant. Recorded before the mapping is
+		// dropped, since with no live effect there is nothing to lose by
+		// leaving an unrecordable forget for the next cycle.
+		entry := stashEntry{Kind: registries.KindForget, RType: "dashboard", Key: op.Key, LiveID: op.LiveID}
+		if err := appendDashboardStashEntry(stashDir, preExisting, executed, entry); err != nil {
+			return err
+		}
+		delete(dashboardManaged, "dashboard:"+op.Key)
+		return nil
 	}
 	return fmt.Errorf("unreachable: unknown op kind %q", op.Kind)
 }
@@ -428,7 +439,7 @@ func executeDashboardDelete(
 // invertDashboardOp inverts one executed "dashboard" stash entry: create ->
 // delete; update -> restore whichever of metadata/content ForwardParams
 // touched, from PriorObject; delete -> recreate from the stashed metadata,
-// then re-save any prior content.
+// then re-save any prior content; forget -> restore the mapping only.
 //
 // A nil prior content - this op saved the url_path's first content ever -
 // is left in place rather than deleted: lovelace/config/delete is
@@ -503,6 +514,10 @@ func invertDashboardOp(ctx context.Context, ws WSClient, entry stashEntry, dashb
 				return err
 			}
 		}
+		return nil
+
+	case registries.KindForget:
+		dashboardManaged[fullKey] = entry.LiveID
 		return nil
 	}
 

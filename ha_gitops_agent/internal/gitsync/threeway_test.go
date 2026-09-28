@@ -310,3 +310,33 @@ func TestBlobEquivalentFailsClosedWhenTheBaseBlobCannotBeDecrypted(t *testing.T)
 		t.Errorf("error = %v, want it to name the missing age key", err)
 	}
 }
+
+// Rename detection lists only the new name, so a renamed file's old path
+// read as untouched and a live copy of it was captured back beside the
+// renamed one.
+func TestChangedBetweenNamesBothSidesOfARename(t *testing.T) {
+	f := newRecordFixture(t)
+	ctx := context.Background()
+	commitFile(t, f.work, "automations.yaml", "- id: a\n  alias: long enough to be detected as a rename\n", "add")
+	base, err := f.gs.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	runGitHelper(t, f.work, "mv", "automations.yaml", "automations-renamed.yaml")
+	runGitHelper(t, f.work, "commit", "-m", "rename")
+	runGitHelper(t, f.work, "push", "origin", "main")
+	tip, err := f.gs.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	changed, err := f.gs.ChangedBetween(ctx, base, tip)
+	if err != nil {
+		t.Fatalf("ChangedBetween: %v", err)
+	}
+
+	sort.Strings(changed)
+	if want := []string{"automations-renamed.yaml", "automations.yaml"}; !slices.Equal(changed, want) {
+		t.Errorf("ChangedBetween() = %v, want %v", changed, want)
+	}
+}

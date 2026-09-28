@@ -351,7 +351,7 @@ func TestRollbackRegistryRestoreInverseReAddsOriginals(t *testing.T) {
 
 func TestFetchLiveOmitsEntitiesByDefault(t *testing.T) {
 	ws := newFakeWS()
-	live, err := FetchLive(context.Background(), ws, false)
+	live, err := FetchLive(context.Background(), ws, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestFetchLiveOmitsEntitiesByDefault(t *testing.T) {
 func TestFetchLiveIncludesEntitiesWhenRequested(t *testing.T) {
 	ws := newFakeWS()
 	ws.results["config/entity_registry/list"] = []any{[]any{map[string]any{"entity_id": "light.x", "name": "X"}}}
-	live, err := FetchLive(context.Background(), ws, true)
+	live, err := FetchLive(context.Background(), ws, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -399,5 +399,35 @@ func TestApplyEntityPlanGenericExceptionStillTriggersInverseReplay(t *testing.T)
 	}
 	if !strings.Contains(result.Error, "not a wsclient error") {
 		t.Errorf("error = %q", result.Error)
+	}
+}
+
+// An install without default_config has no input_boolean/list at all, and
+// listing every supported domain failed every cycle on the first one.
+func TestFetchLiveListsOnlyTheRequestedHelperDomains(t *testing.T) {
+	ws := newFakeWS()
+	for _, domain := range registries.SupportedHelperDomains {
+		ws.raiseOn[domain+"/list"] = []error{&wsclient.Error{Code: "unknown_command", Message: "Unknown command."}}
+	}
+	ws.raiseOn["counter/list"] = nil
+
+	if _, err := FetchLive(context.Background(), ws, []string{"counter"}, false); err != nil {
+		t.Fatalf("FetchLive: %v, want only counter listed", err)
+	}
+	for _, call := range ws.callTypes() {
+		if strings.HasSuffix(call, "/list") && strings.HasPrefix(call, "input_") {
+			t.Errorf("listed %s, which nothing uses", call)
+		}
+	}
+}
+
+func TestFetchLiveNamesAHelperDomainThatIsNotLoaded(t *testing.T) {
+	ws := newFakeWS()
+	ws.raiseOn["timer/list"] = []error{&wsclient.Error{Code: "unknown_command", Message: "Unknown command."}}
+
+	_, err := FetchLive(context.Background(), ws, []string{"timer"}, false)
+
+	if err == nil || !strings.Contains(err.Error(), "timer") || !strings.Contains(err.Error(), "default_config") {
+		t.Errorf("err = %v, want it to name timer and how to load it", err)
 	}
 }

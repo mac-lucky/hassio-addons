@@ -869,3 +869,48 @@ func countCaptureEvents(events []Event, sub string) int {
 	}
 	return n
 }
+
+// An apply of other paths moves LastGoodSHA to the tip. Classified afresh
+// against that base, a conflicted path read as "only live moved" and was
+// captured over the repository's commit on the next cycle.
+func TestAStandingConflictSurvivesTheBaseMovingToTheTip(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "tip1"
+	fakes.applier.state = applier.State{
+		Manifest: []string{"a.yaml"}, LastGoodSHA: "tip1", ConflictedPaths: []string{"a.yaml"},
+	}
+	fakes.differ.changes = []differ.Change{{Path: "a.yaml", Kind: "update"}}
+	fakes.git.liveFacts = map[string]gitsync.LiveFacts{"a.yaml": {BaseTracks: true, MatchesBase: false}}
+
+	r := fakes.reconciler(captureOpts())
+	r.runCycle(context.Background())
+
+	if n := len(fakes.git.captureCalls); n != 0 {
+		t.Errorf("CaptureFiles called %d time(s), want 0 - the path is a standing conflict", n)
+	}
+	if got := r.Status().Conflicts; !slices.Equal(got, []string{"a.yaml"}) {
+		t.Errorf("conflicts = %v, want a.yaml still standing", got)
+	}
+	if got := appliedPaths(fakes.applier); len(got) != 0 {
+		t.Errorf("applied = %v, want the conflicted path refused", got)
+	}
+}
+
+// yaml_files off diffs nothing, which read as "every conflict resolved"
+// and wiped the record, to be re-parked once file sync came back.
+func TestYAMLFilesOffKeepsTheConflictRecord(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.applier.state = applier.State{Manifest: []string{"a.yaml"}, LastGoodSHA: "base1", ConflictedPaths: []string{"a.yaml"}}
+	opts := captureOpts()
+	opts.ReconcileYAMLFiles = false
+	r := fakes.reconciler(opts)
+
+	r.runCycle(context.Background())
+
+	if got := r.Status().Conflicts; !slices.Equal(got, []string{"a.yaml"}) {
+		t.Errorf("conflicts = %v, want a.yaml kept while file sync is off", got)
+	}
+	if n := countCaptureEvents(r.Status().Events, "conflict cleared"); n != 0 {
+		t.Errorf("logged %d conflict-cleared event(s), want none", n)
+	}
+}

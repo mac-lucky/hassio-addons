@@ -160,14 +160,14 @@ func stashOpKinds(t *testing.T, stash map[string]any) []string {
 
 // --- FetchLive ---------------------------------------------------------
 
-func TestFetchLiveCoversRegistriesAndEveryHelperDomain(t *testing.T) {
+func TestFetchLiveCoversRegistriesAndTheRequestedHelperDomains(t *testing.T) {
 	ws := newFakeWS()
 	ws.results["config/floor_registry/list"] = []any{[]any{realisticFloor}}
 	ws.results["config/area_registry/list"] = []any{[]any{realisticArea}}
 	ws.results["config/label_registry/list"] = []any{[]any{realisticLabel}}
 	ws.results["input_boolean/list"] = []any{[]any{map[string]any{"id": "IB1", "name": "Flag"}}}
 
-	live, err := FetchLive(context.Background(), ws, false)
+	live, err := FetchLive(context.Background(), ws, registries.SupportedHelperDomains, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1273,5 +1273,192 @@ func TestApplyPlanRefusesAnUpdateOfAVanishedObject(t *testing.T) {
 		if call.msgType == "config/floor_registry/update" {
 			t.Errorf("update was sent despite the missing prior: %+v", call)
 		}
+	}
+}
+
+// --- forget: bookkeeping only ------------------------------------------
+
+func nonListCalls(ws *fakeWS) []wsCall {
+	var out []wsCall
+	for _, c := range ws.calls {
+		if !strings.HasSuffix(c.msgType, "/list") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestApplyPlanForgetDropsTheMappingAndRollbackRestoresIt(t *testing.T) {
+	stashDir := t.TempDir()
+	plan := []registries.RegOp{regOp(registries.KindForget, "floor", "old", nil, "F-GONE")}
+	managed := map[string]string{"floor:old": "F-GONE", "floor:other": "F2"}
+	applyWS := newFakeWS()
+
+	result := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir)
+
+	if !result.OK || !reflect.DeepEqual(result.Applied, []string{"forget floor:old"}) {
+		t.Fatalf("result = %+v", result)
+	}
+	if calls := nonListCalls(applyWS); len(calls) != 0 {
+		t.Errorf("apply sent %+v, want nothing but the listings", calls)
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"floor:other": "F2"}) {
+		t.Errorf("managed after apply = %+v", managed)
+	}
+	if kinds := stashOpKinds(t, readStash(t, stashDir)); !reflect.DeepEqual(kinds, []string{"forget"}) {
+		t.Errorf("stash kinds = %+v", kinds)
+	}
+
+	rollbackWS := newFakeWS()
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+		t.Fatalf("rollback result = %+v", rb)
+	}
+	if len(rollbackWS.calls) != 0 {
+		t.Errorf("rollback sent %+v, want nothing", rollbackWS.calls)
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"floor:old": "F-GONE", "floor:other": "F2"}) {
+		t.Errorf("managed after rollback = %+v", managed)
+	}
+}
+
+// A renamed key's plan end to end: the adopt moves ownership, the forget
+// drops the old key, and a rollback puts state.json back exactly.
+func TestApplyPlanRenamedKeyThenRollbackRestoresManaged(t *testing.T) {
+	stashDir := t.TempDir()
+	liveFloor := map[string]any{"floor_id": "ground", "name": "Ground", "level": 0, "created_at": 1.0, "modified_at": 2.0}
+	managed := map[string]string{"floor:old": "ground"}
+	plan := registries.Plan(
+		registries.Desired{Floors: []map[string]any{{"id": "new", "name": "Ground"}}},
+		map[string][]map[string]any{"floor": {liveFloor}},
+		managed,
+	)
+	applyWS := newFakeWS()
+	applyWS.results["config/floor_registry/list"] = []any{[]any{liveFloor}}
+
+	result := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir)
+
+	if !result.OK || !reflect.DeepEqual(result.Applied, []string{"update floor:new", "forget floor:old"}) {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, c := range nonListCalls(applyWS) {
+		if c.msgType != "config/floor_registry/update" {
+			t.Errorf("unexpected call %+v: a rename must neither create nor delete", c)
+		}
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"floor:new": "ground"}) {
+		t.Errorf("managed after apply = %+v", managed)
+	}
+
+	rollbackWS := newFakeWS()
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+		t.Fatalf("rollback result = %+v", rb)
+	}
+	if !reflect.DeepEqual(managed, map[string]string{"floor:old": "ground"}) {
+		t.Errorf("managed after rollback = %+v, want exactly the pre-apply mapping", managed)
+	}
+}
+
+// --- helper updates replace the whole item -------------------------------
+
+var liveInputNumber = map[string]any{
+	"id": "level", "name": "Level", "min": 0.0, "max": 100.0, "step": 5.0,
+	"icon": "mdi:gauge", "unit_of_measurement": "%", "mode": "box", "initial": nil,
+}
+
+// HA's helper update is {id} | CREATE_UPDATE_SCHEMA(data): sending only
+// the declared fields stripped the rest, and without min/max an
+// input_number update is refused outright.
+func TestApplyPlanHelperAdoptSendsTheWholeItem(t *testing.T) {
+	stashDir := t.TempDir()
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "input_number", "level",
+		map[string]any{"name": "Level", "icon": "mdi:speedometer"}, "level")}
+	managed := map[string]string{}
+	ws := newFakeWS()
+	ws.results["input_number/list"] = []any{[]any{liveInputNumber}}
+
+	if result := ApplyPlan(context.Background(), staticDialer(ws), plan, managed, stashDir); !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+
+	calls := ws.callsFor("input_number/update")
+	want := map[string]any{
+		"input_number_id": "level", "name": "Level", "min": 0.0, "max": 100.0, "step": 5.0,
+		"icon": "mdi:speedometer", "unit_of_measurement": "%", "mode": "box",
+	}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0].params, want) {
+		t.Fatalf("update calls = %+v, want one with %+v", calls, want)
+	}
+	// The forward record stays the declared fields only.
+	ops, _ := readStash(t, stashDir)["ops"].([]any)
+	entry, _ := ops[0].(map[string]any)
+	if fp, _ := entry["forward_params"].(map[string]any); !reflect.DeepEqual(fp, map[string]any{"name": "Level", "icon": "mdi:speedometer"}) {
+		t.Errorf("forward_params = %+v", fp)
+	}
+}
+
+func TestApplyPlanHelperDeclaredNullRemovesTheField(t *testing.T) {
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "input_number", "level",
+		map[string]any{"name": "Level", "icon": nil}, "level")}
+	managed := map[string]string{"input_number:level": "level"}
+	ws := newFakeWS()
+	ws.results["input_number/list"] = []any{[]any{liveInputNumber}}
+
+	if result := ApplyPlan(context.Background(), staticDialer(ws), plan, managed, t.TempDir()); !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+
+	calls := ws.callsFor("input_number/update")
+	if len(calls) != 1 {
+		t.Fatalf("update calls = %+v", calls)
+	}
+	if _, has := calls[0].params["icon"]; has {
+		t.Errorf("params = %+v, want icon left out", calls[0].params)
+	}
+	if calls[0].params["unit_of_measurement"] != "%" {
+		t.Errorf("params = %+v, want the undeclared fields kept", calls[0].params)
+	}
+}
+
+// Floors, areas and labels keep their partial update.
+func TestApplyPlanRegistryUpdateStaysPartial(t *testing.T) {
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "floor", "old", map[string]any{"name": "New name"}, "F-OLD")}
+	managed := map[string]string{"floor:old": "F-OLD"}
+	ws := newFakeWS()
+	ws.results["config/floor_registry/list"] = []any{[]any{realisticFloor}}
+
+	if result := ApplyPlan(context.Background(), staticDialer(ws), plan, managed, t.TempDir()); !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	calls := ws.callsFor("config/floor_registry/update")
+	if want := map[string]any{"floor_id": "F-OLD", "name": "New name"}; len(calls) != 1 || !reflect.DeepEqual(calls[0].params, want) {
+		t.Errorf("update calls = %+v, want %+v", calls, want)
+	}
+}
+
+// The inverse of a helper update is the prior item, whole: a per-field
+// restore sent "unit_of_measurement: null" for a field absent before,
+// which the helper schema rejects, jamming the rollback.
+func TestRollbackRegistryHelperUpdateSendsThePriorItemWithoutNulls(t *testing.T) {
+	stashDir := t.TempDir()
+	prior := map[string]any{"id": "level", "name": "Level", "min": 0.0, "max": 100.0, "mode": "slider", "initial": nil}
+	plan := []registries.RegOp{regOp(registries.KindUpdate, "input_number", "level",
+		map[string]any{"name": "Level", "unit_of_measurement": "%"}, "level")}
+	managed := map[string]string{"input_number:level": "level"}
+	applyWS := newFakeWS()
+	applyWS.results["input_number/list"] = []any{[]any{prior}}
+
+	if result := ApplyPlan(context.Background(), staticDialer(applyWS), plan, managed, stashDir); !result.OK {
+		t.Fatalf("apply result = %+v", result)
+	}
+
+	rollbackWS := newFakeWS()
+	if rb := RollbackRegistry(context.Background(), staticDialer(rollbackWS), stashDir, managed, nil, nil); !rb.OK {
+		t.Fatalf("rollback result = %+v", rb)
+	}
+	want := []wsCall{{msgType: "input_number/update", params: map[string]any{
+		"input_number_id": "level", "name": "Level", "min": 0.0, "max": 100.0, "mode": "slider",
+	}}}
+	if !reflect.DeepEqual(rollbackWS.calls, want) {
+		t.Errorf("rollback calls = %+v, want %+v", rollbackWS.calls, want)
 	}
 }
