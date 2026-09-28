@@ -347,19 +347,25 @@ func TestRunLoopRunsACycleOnResumeWithoutWaitingOutTheInterval(t *testing.T) {
 	awaitCycles(t, r, 2)
 }
 
+// awaitCyclesTimeout only has to beat the hour-long interval the callers
+// set, so it is generous: CI runs every package at once under -race, and a
+// 5s budget once saw the loop goroutine get no cycle in at all.
+const awaitCyclesTimeout = 30 * time.Second
+
 // awaitCycles blocks until n reconcile cycles have completed, or fails.
 func awaitCycles(t *testing.T, r *Reconciler, n int) {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(awaitCyclesTimeout)
 	for {
 		if countEventsContaining(r.Status().Events, "in sync: no changes detected") >= n {
 			return
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("only %d cycle(s) completed within 5s, want %d",
-				countEventsContaining(r.Status().Events, "in sync: no changes detected"), n)
-		case <-time.After(time.Millisecond):
+			events := r.Status().Events
+			t.Fatalf("only %d cycle(s) completed within %s, want %d; events = %+v",
+				countEventsContaining(events, "in sync: no changes detected"), awaitCyclesTimeout, n, events)
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
