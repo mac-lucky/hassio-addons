@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.1] - 2026-09-28
+
 ### Added
 
 - A warning in the activity feed and the add-on log when a commit removes
