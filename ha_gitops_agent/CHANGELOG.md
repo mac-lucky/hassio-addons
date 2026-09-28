@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] - 2026-09-28
+
 Fixes from a review of the sync engine and the registry layers, plus
 signed webhook deliveries. No new options, but three behaviour changes
 to know about (see Changed): with `dry_run` off a webhook delivery now
