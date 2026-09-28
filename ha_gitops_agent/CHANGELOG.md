@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- A warning in the activity feed and the add-on log when a commit removes
+  or renames a file the agent never wrote, so the old copy stays live:
+  "left in place: N file(s) removed from the repository stay live because
+  this agent never wrote them - delete by hand if unwanted: <paths>".
+  Deletion scope is unchanged - the agent still only deletes files it
+  applied itself - but a rename of an imported file no longer leaves the
+  old one running without a word. Files are found against both the last
+  applied and the last imported commit. Each set of such files is
+  reported once (an add-on restart can report it again); the feed names
+  at most 20 paths and the add-on log has the full list.
 
 ## [0.8.0] - 2026-09-28
 

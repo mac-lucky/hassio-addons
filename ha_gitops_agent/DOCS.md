@@ -1849,7 +1849,8 @@ complete would be worse than no snapshot at all.
   agent only ever deletes a file in `/homeassistant` that it previously
   wrote there itself, and copying a file *into* the repository does not
   count. Reorganizing your repo after an import can never delete live
-  config the agent did not place.
+  config the agent did not place; a file that stays behind that way is
+  named in the activity feed (see "Deletion is scoped").
 - **It never force-pushes.** If the tracked branch moved on the remote
   between the import's fetch and its push, git refuses the update and
   the import reports "push rejected: the tracked branch moved on the
@@ -2770,8 +2771,16 @@ text is what reaches `GET /status.json` and the
   `/homeassistant` if that exact file was previously applied by the
   agent itself
   (tracked in `/data/state.json`). It never deletes a file it did not
-  create. The same scoping applies to registry objects, dashboards and
-  integrations - see "Ownership (floors, areas, labels, helpers)",
+  create. So removing or renaming a file that came in by Import, or that
+  already matched live and was never rewritten, leaves the old copy
+  running live, and the file is yours to delete by hand. The activity
+  feed and the add-on log name it ("left in place: ...") when the file
+  was part of the last applied or the last imported commit - once per
+  set of such files (an add-on restart can report a set again). A file
+  committed by hand that already matched live and was removed again
+  before any apply is not reported. The same scoping applies to
+  registry objects, dashboards and integrations - see "Ownership
+  (floors, areas, labels, helpers)",
   "Ownership (dashboards)" and "Ownership (integrations)" above - and, in
   its own update-only way, to devices, entities and add-on options - see
   "Ownership (devices)", "Ownership" under `gitops/entities.yaml` and

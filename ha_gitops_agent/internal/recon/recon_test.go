@@ -73,8 +73,12 @@ type importCall struct {
 }
 
 type fakeGit struct {
-	sha               string
-	tracked           []string
+	sha     string
+	tracked []string
+	// trackedAt and trackedAtErr answer TrackedFiles for one sha each
+	// (another commit's tree, say LastGoodSHA's); any other sha gets tracked.
+	trackedAt         map[string][]string
+	trackedAtErr      map[string]error
 	trackedRaw        []string
 	secretsErr        error
 	ensureCloneErr    error
@@ -196,6 +200,12 @@ func (f *fakeGit) CurrentSHA(ctx context.Context) string {
 func (f *fakeGit) TrackedFiles(ctx context.Context, sha string) ([]string, error) {
 	if f.trackedErr != nil {
 		return nil, f.trackedErr
+	}
+	if err := f.trackedAtErr[sha]; err != nil {
+		return nil, err
+	}
+	if files, ok := f.trackedAt[sha]; ok {
+		return files, nil
 	}
 	return f.tracked, nil
 }
