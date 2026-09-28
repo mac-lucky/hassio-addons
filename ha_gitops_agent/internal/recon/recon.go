@@ -286,10 +286,10 @@ type Reconciler struct {
 	// UI hang - it just reports "busy".
 	opLock sync.Mutex
 
-	// leftBehindWarned is the last set warnLeftBehind put on the feed,
-	// NUL-joined. Read and written only by reconcile cycles, under opLock
-	// rather than mu.
-	leftBehindWarned string
+	// leftBehindWarned is the last set warnLeftBehind put on the feed.
+	// Read and written only by reconcile cycles, under opLock rather than
+	// mu.
+	leftBehindWarned []string
 
 	// checkLock is opLock's equivalent for CheckAddonUpdates alone - see
 	// that method for why the check needs a lock of its own.

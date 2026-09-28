@@ -7,8 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
 )
 
 // stubLive makes liveRegularFile answer from live for the rest of the test.
@@ -19,27 +17,32 @@ func stubLive(t *testing.T, live map[string]bool) {
 	t.Cleanup(func() { liveRegularFile = orig })
 }
 
-func leftBehindState(lastGood, lastImport string, manifest ...string) applier.State {
-	if manifest == nil {
-		manifest = []string{}
-	}
-	return applier.State{
-		LastGoodSHA: lastGood, LastImportSHA: lastImport,
-		Manifest: manifest, RegistryManaged: map[string]string{},
-	}
+// leftBehindFakes is the fixture the reconcile tests here share: the tip
+// "new" tracks tracked, and the applier state names lastGood and
+// lastImport. What moved since each base goes in changedBetweenByBase.
+func leftBehindFakes(lastGood, lastImport string, tracked ...string) *reconcilerFakes {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "new"
+	fakes.git.tracked = tracked
+	fakes.applier.state.LastGoodSHA = lastGood
+	fakes.applier.state.LastImportSHA = lastImport
+	return fakes
 }
 
 func TestLeftBehindPaths(t *testing.T) {
-	// "a/old.py" twice: two bases can both track it.
-	prev := []string{"z.yaml", "kept.yaml", "owned.yaml", "gone.yaml", "a/old.py", "a/old.py"}
+	changed := []string{".storage/core.config_entries", "a/new.py", "a/old.py", "gone.yaml", "kept.yaml", "owned.yaml", "z.yaml"}
 	tracked := []string{"kept.yaml", "a/new.py"}
 	manifest := []string{"owned.yaml"}
-	live := map[string]bool{"z.yaml": true, "kept.yaml": true, "owned.yaml": true, "a/old.py": true}
+	stubLive(t, map[string]bool{
+		".storage/core.config_entries": true, "a/new.py": true, "a/old.py": true,
+		"kept.yaml": true, "owned.yaml": true, "z.yaml": true,
+	})
 
-	got := leftBehindPaths(prev, tracked, manifest, func(p string) bool { return live[p] })
+	got := leftBehindPaths(changed, tracked, manifest)
 
-	// kept.yaml is still tracked, owned.yaml gets a planned delete, gone.yaml
-	// is not live: none of them is left behind.
+	// a/new.py and kept.yaml are still tracked, owned.yaml gets a planned
+	// delete, gone.yaml is not live, and .storage/ is excluded, so never
+	// tracked to begin with: none of them is left behind.
 	want := []string{"a/old.py", "z.yaml"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("leftBehindPaths = %v, want %v", got, want)
@@ -47,13 +50,10 @@ func TestLeftBehindPaths(t *testing.T) {
 }
 
 func TestReconcileNowWarnsOnceAboutUnownedFileLeftLive(t *testing.T) {
-	fakes := newReconcilerFakes()
-	fakes.git.sha = "new"
-	fakes.git.tracked = []string{"automations.yaml", "pyscript/intrusion.py"}
-	fakes.git.trackedAt = map[string][]string{
-		"old": {"automations.yaml", "pyscript/intrusion_and_leaks.py"},
+	fakes := leftBehindFakes("old", "", "automations.yaml", "pyscript/intrusion.py")
+	fakes.git.changedBetweenByBase = map[string][]string{
+		"old": {"pyscript/intrusion.py", "pyscript/intrusion_and_leaks.py"},
 	}
-	fakes.applier.state = leftBehindState("old", "")
 	live := map[string]bool{"automations.yaml": true, "pyscript/intrusion_and_leaks.py": true}
 	stubLive(t, live)
 	r := fakes.reconciler(baseOpts())
@@ -71,9 +71,9 @@ func TestReconcileNowWarnsOnceAboutUnownedFileLeftLive(t *testing.T) {
 
 	// A base that cannot be read keeps the remembered set, so recovering
 	// from it is not a new set.
-	fakes.git.trackedAtErr = map[string]error{"old": errors.New("fatal: not a tree object")}
+	fakes.git.changedBetweenErr = errors.New("fatal: bad object old")
 	r.ReconcileNow(context.Background())
-	fakes.git.trackedAtErr = nil
+	fakes.git.changedBetweenErr = nil
 	r.ReconcileNow(context.Background())
 	if got := countEventsContaining(r.Status().Events, "left in place:"); got != 1 {
 		t.Fatalf("%d left-in-place events after a failed read, want still 1", got)
@@ -92,10 +92,8 @@ func TestReconcileNowWarnsOnceAboutUnownedFileLeftLive(t *testing.T) {
 }
 
 func TestReconcileNowWarnsAgainWhenLeftBehindSetGrows(t *testing.T) {
-	fakes := newReconcilerFakes()
-	fakes.git.sha = "new"
-	fakes.git.trackedAt = map[string][]string{"old": {"automations.yaml", "a.yaml", "b.yaml"}}
-	fakes.applier.state = leftBehindState("old", "")
+	fakes := leftBehindFakes("old", "", "automations.yaml")
+	fakes.git.changedBetweenByBase = map[string][]string{"old": {"a.yaml", "b.yaml"}}
 	live := map[string]bool{"a.yaml": true}
 	stubLive(t, live)
 	r := fakes.reconciler(baseOpts())
@@ -111,7 +109,7 @@ func TestReconcileNowWarnsAgainWhenLeftBehindSetGrows(t *testing.T) {
 }
 
 // An import never moves LastGoodSHA and usually plans nothing, so the files
-// it brought in are only visible in LastImportSHA's tree.
+// it brought in are only visible against LastImportSHA.
 func TestReconcileNowWarnsAboutImportedFileLeftLive(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -122,14 +120,11 @@ func TestReconcileNowWarnsAboutImportedFileLeftLive(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fakes := newReconcilerFakes()
-			fakes.git.sha = "new"
-			fakes.git.tracked = []string{"automations.yaml", "scripts/renamed.yaml"}
-			fakes.git.trackedAt = map[string][]string{
-				"applied": {"automations.yaml"},
-				"imp":     {"automations.yaml", "scripts/imported.yaml"},
+			fakes := leftBehindFakes(tc.lastGood, "imp", "automations.yaml", "scripts/renamed.yaml")
+			fakes.git.changedBetweenByBase = map[string][]string{
+				"applied": {"scripts/renamed.yaml"},
+				"imp":     {"scripts/imported.yaml", "scripts/renamed.yaml"},
 			}
-			fakes.applier.state = leftBehindState(tc.lastGood, "imp")
 			stubLive(t, map[string]bool{"automations.yaml": true, "scripts/imported.yaml": true})
 			r := fakes.reconciler(baseOpts())
 
@@ -145,37 +140,37 @@ func TestReconcileNowWarnsAboutImportedFileLeftLive(t *testing.T) {
 
 func TestReconcileNowNoLeftBehindWarning(t *testing.T) {
 	cases := []struct {
-		name       string
-		lastGood   string
-		manifest   []string
-		trackedErr error
-		reachable  map[string]bool
-		ancestorOf map[string]bool
+		name         string
+		lastGood     string
+		manifest     []string
+		changedErr   error
+		reachable    map[string]bool
+		ancestorOf   map[string]bool
+		yamlFilesOff bool
 	}{
-		// trackedAt[""] holds old.yaml, so this fails if the empty SHA is read.
+		// changedBetweenByBase[""] names old.yaml, so this fails if the
+		// empty SHA is read.
 		{name: "no apply or import yet", lastGood: ""},
 		{name: "agent owns the file, so the apply deletes it", lastGood: "old", manifest: []string{"old.yaml"}},
-		{name: "base unreadable", lastGood: "old", trackedErr: errors.New("fatal: not a tree object")},
+		{name: "base unreadable", lastGood: "old", changedErr: errors.New("fatal: bad object old")},
 		{name: "base gone from the clone", lastGood: "old", reachable: map[string]bool{"new": true}},
 		{name: "base off this branch (force-push)", lastGood: "old", ancestorOf: map[string]bool{"new->new": true}},
+		{name: "yaml_files off, which never deletes a file anyway", lastGood: "old", yamlFilesOff: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fakes := newReconcilerFakes()
-			fakes.git.sha = "new"
-			fakes.git.tracked = []string{"automations.yaml"}
-			fakes.git.trackedAt = map[string][]string{
-				"old": {"automations.yaml", "old.yaml"},
-				"":    {"automations.yaml", "old.yaml"},
-			}
-			if tc.trackedErr != nil {
-				fakes.git.trackedAtErr = map[string]error{"old": tc.trackedErr}
-			}
+			fakes := leftBehindFakes(tc.lastGood, "", "automations.yaml")
+			fakes.git.changedBetweenByBase = map[string][]string{"old": {"old.yaml"}, "": {"old.yaml"}}
+			fakes.git.changedBetweenErr = tc.changedErr
 			fakes.git.commitReachable = tc.reachable
 			fakes.git.ancestorOf = tc.ancestorOf
-			fakes.applier.state = leftBehindState(tc.lastGood, "", tc.manifest...)
+			if tc.manifest != nil {
+				fakes.applier.state.Manifest = tc.manifest
+			}
 			stubLive(t, map[string]bool{"automations.yaml": true, "old.yaml": true})
-			r := fakes.reconciler(baseOpts())
+			opts := baseOpts()
+			opts.ReconcileYAMLFiles = !tc.yamlFilesOff
+			r := fakes.reconciler(opts)
 
 			r.ReconcileNow(context.Background())
 
@@ -190,51 +185,23 @@ func TestReconcileNowNoLeftBehindWarning(t *testing.T) {
 }
 
 func TestReconcileNowLeftBehindEventListsAtMost20Paths(t *testing.T) {
-	fakes := newReconcilerFakes()
-	fakes.git.sha = "new"
-	old := []string{"automations.yaml"}
+	fakes := leftBehindFakes("old", "", "automations.yaml")
+	var removed []string
 	live := map[string]bool{}
 	for i := range 25 {
 		p := fmt.Sprintf("www/community/card%02d.js", i)
-		old = append(old, p)
+		removed = append(removed, p)
 		live[p] = true
 	}
-	fakes.git.trackedAt = map[string][]string{"old": old}
-	fakes.applier.state = leftBehindState("old", "")
+	fakes.git.changedBetweenByBase = map[string][]string{"old": removed}
 	stubLive(t, live)
 	r := fakes.reconciler(baseOpts())
 
 	r.ReconcileNow(context.Background())
 
-	const want = "left in place: 25 file(s)"
-	var msg string
-	for _, e := range r.Status().Events {
-		if strings.Contains(e.Message, want) {
-			msg = e.Message
-		}
-	}
-	if msg == "" {
-		t.Fatalf("no %q event; events = %+v", want, r.Status().Events)
-	}
+	msg := eventContaining(t, r.Status().Events, "left in place: 25 file(s)")
 	if !strings.HasSuffix(msg, "www/community/card19.js and 5 more (full list in the add-on log)") ||
 		strings.Contains(msg, "card20.js") {
 		t.Errorf("event = %q, want the first 20 paths and \"and 5 more\"", msg)
-	}
-}
-
-func TestReconcileNowSkipsLeftBehindCheckWithYAMLFilesOff(t *testing.T) {
-	fakes := newReconcilerFakes()
-	fakes.git.sha = "new"
-	fakes.git.trackedAt = map[string][]string{"old": {"automations.yaml", "old.yaml"}}
-	fakes.applier.state = leftBehindState("old", "")
-	stubLive(t, map[string]bool{"old.yaml": true})
-	opts := baseOpts()
-	opts.ReconcileYAMLFiles = false
-	r := fakes.reconciler(opts)
-
-	r.ReconcileNow(context.Background())
-
-	if hasEventContaining(r.Status().Events, "left in place:") {
-		t.Errorf("left-in-place event with yaml_files off, which never deletes a file anyway; events = %+v", r.Status().Events)
 	}
 }

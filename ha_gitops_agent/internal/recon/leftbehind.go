@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/applier"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 )
 
 // leftBehindEventPaths caps how many paths warnLeftBehind names in the feed
@@ -24,29 +25,22 @@ var liveRegularFile = func(p string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// leftBehindPaths returns, sorted, the paths prevTracked (files of a commit
-// that described live - the last apply or the last import) has and tracked
-// (the new commit's) does not, that are absent from manifest and still
-// regular files live. Those are the removals an apply will NOT carry out:
-// differ.Compute only ever plans a delete for a manifest path, and a file
-// that arrived by Import or already matched live was never written by this
-// agent, so it never entered the manifest.
-func leftBehindPaths(prevTracked, tracked, manifest []string, live func(string) bool) []string {
-	keep := make(map[string]bool, len(tracked)+len(manifest))
-	for _, p := range tracked {
-		keep[p] = true
-	}
-	for _, p := range manifest {
-		keep[p] = true
-	}
+// leftBehindPaths returns the paths of changed (what moved between a commit
+// that described live - the last apply or the last import - and the new
+// one) that the new commit no longer tracks, that are absent from manifest
+// and still regular files live. Those are the removals an apply will NOT
+// carry out: differ.Compute only ever plans a delete for a manifest path,
+// and a file that arrived by Import or already matched live was never
+// written by this agent, so it never entered the manifest. Excluded paths
+// never reach tracked, so they are dropped here rather than read as removed.
+func leftBehindPaths(changed, tracked, manifest []string) []string {
+	keep := pathSet(slices.Concat(tracked, manifest))
 	var paths []string
-	for _, p := range prevTracked {
-		if !keep[p] && live(p) {
-			keep[p] = true // a path both bases track is reported once
+	for _, p := range changed {
+		if !keep[p] && !gitsync.Excluded(p) && liveRegularFile(p) {
 			paths = append(paths, p)
 		}
 	}
-	slices.Sort(paths)
 	return paths
 }
 
@@ -64,29 +58,26 @@ func leftBehindPaths(prevTracked, tracked, manifest []string, live func(string) 
 // only, so an add-on restart reports a standing set once more.
 // Informational; never fails the cycle.
 func (r *Reconciler) warnLeftBehind(ctx context.Context, state applier.State, sha string, tracked []string) {
-	var prev []string
-	var bases []string
-	for _, base := range []string{state.LastGoodSHA, state.LastImportSHA} {
+	var changed []string
+	for _, base := range slices.Compact([]string{state.LastGoodSHA, state.LastImportSHA}) {
 		// The tip's own tree has nothing removed from it.
-		if base == sha || slices.Contains(bases, base) || !r.usableBase(ctx, base, sha) {
+		if base == sha || !r.usableBase(ctx, base, sha) {
 			continue
 		}
-		bases = append(bases, base)
-		files, err := r.git.TrackedFiles(ctx, base)
+		moved, err := r.git.ChangedBetween(ctx, base, sha)
 		if err != nil {
 			// Keep the remembered set: a partial read would shrink it and
 			// the next good read would report the same files again.
 			slog.Debug("recon: left-behind check skipped", "base", base, "error", err)
 			return
 		}
-		prev = append(prev, files...)
+		changed = unionPaths(changed, moved)
 	}
-	paths := leftBehindPaths(prev, tracked, state.Manifest, liveRegularFile)
-	key := strings.Join(paths, "\x00")
-	if key == r.leftBehindWarned {
+	paths := leftBehindPaths(changed, tracked, state.Manifest)
+	if slices.Equal(paths, r.leftBehindWarned) {
 		return
 	}
-	r.leftBehindWarned = key
+	r.leftBehindWarned = paths
 	if len(paths) == 0 {
 		return
 	}
