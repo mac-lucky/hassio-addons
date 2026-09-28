@@ -138,7 +138,8 @@ below is reached.
 
 `homeassistant` and `hassio_supervisor` are on the list by default. Other
 Python-based add-ons such as `music_assistant`, `appdaemon` or `esphome`
-usually benefit too. Set the option to `[]` to turn joining off. Because a
+usually benefit too, and so do `aircast` and `airsonos`, whose AirPlay
+metadata dumps span several lines. Set the option to `[]` to turn joining off. Because a
 merged entry is only complete once the next log line arrives, an isolated
 error from these containers can reach VictoriaLogs up to about three seconds
 later. A merged entry is capped at 200 lines or ten seconds, whichever comes
@@ -164,8 +165,16 @@ line of up to 96 KB arrives as one entry; a longer one arrives as several.
 
   The level is one of `debug`, `info`, `notice`, `warn` and `error`; critical
   and fatal count as `error`. An entry with no priority at all (the audit log)
-  is `info`, or `warn` for an AppArmor denial.
-- **Colour codes** are removed from the message.
+  is `info`, or `warn` for an AppArmor denial. Two programs print no level
+  word and write everything to stderr, so some of their lines are `info`
+  rather than `error`:
+  - AirConnect (the AirCast and AirSonos add-ons), recognised by its
+    `[08:10:05.030] AddCastDevice:673 ...` format in any container. A line
+    that says something like `cannot`, `unable`, `failed` or `error` stays
+    `error`, since its real errors look the same as the rest.
+  - sshd in the SSH add-on, for its connection and login lines.
+- **Colour codes** and trailing whitespace, such as the carriage return sshd
+  ends its lines with, are removed from the message.
 - **Blank lines** are dropped.
 - **Very long messages** over 200 KB are cut to 50,000 characters. VictoriaLogs
   silently drops entries over 256 KB.

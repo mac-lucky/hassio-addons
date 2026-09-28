@@ -543,6 +543,8 @@ del(.timestamp_end)
 # of its colour codes as the literal text \033[...m, so those go too.
 msg = replace(msg, r'\x1b\[[0-9;?]*[ -/]*[@-~]', "")
 msg = replace(msg, r'\\033\[[0-9;]*m', "")
+# Trailing whitespace, mostly the \r that sshd in the SSH add-on ends lines with
+msg = replace(msg, r'\s+$', "")
 
 # A blank line carries nothing, and VictoriaLogs stores it as "missing _msg field"
 if strip_whitespace(msg) == "" { abort "vector-addon-drop: blank message" }
@@ -587,6 +589,14 @@ if lvl == "" {
   m = parse_regex(msg, r'(?:^|\s)level=(?P<level>[A-Za-z]+)') ?? {}
   lvl = string(get(level_words, [downcase(string(m.level) ?? "")]) ?? null) ?? ""
 }
+# AirConnect (the AirCast and AirSonos add-ons) prints no level at all and
+# writes everything to stderr: [08:10:05.030] AddCastDevice:673 [0x...]: ...
+# Its default output is routine device traffic, so it is not left to PRIORITY,
+# except for lines whose wording says something went wrong: its errors look
+# exactly like the rest.
+if lvl == "" && match(msg, r'^\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+[A-Za-z_]\w*:\d+(?:\s|$)') && !match(msg, r'(?i)\b(?:cannot|unable|error|failed|too many|unsupported|unknown)\b') {
+  lvl = "info"
+}
 if lvl == "" && exists(.PRIORITY) {
   p = to_int(.PRIORITY) ?? 6
   lvl = if p <= 3 { "error" } else if p == 4 { "warn" } else if p == 5 { "notice" } else if p == 6 { "info" } else { "debug" }
@@ -600,7 +610,7 @@ if lvl == "" {
 # sshd in the SSH add-on writes its routine connection traffic to stderr.
 # Downgraded for ssh containers only: a "Connection reset by" line from
 # anything else is a real failure.
-if .level == "error" && contains(container, "ssh") && match(msg, r'^(Connection from|Connection closed by|Connection reset by|Close session|Starting session|Received disconnect|Disconnected from|Accepted publickey|Server listening on)') {
+if .level == "error" && contains(container, "ssh") && match(msg, r'^(Connection from|Connection closed by|Connection reset by|Close session|Starting session|Received disconnect|Disconnected from|Accepted publickey|Accepted key|Postponed publickey|User child is on pid|Server listening on)') {
   .level = "info"
 }
 
