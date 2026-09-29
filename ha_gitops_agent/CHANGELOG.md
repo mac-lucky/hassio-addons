@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.8.2] - 2026-09-29
+
+### Changed
+
+- The left-behind check reads only the files that changed since the last
+  applied and the last imported commit, instead of listing both full
+  trees on every sync. The warning it raises is unchanged.
+
 ## [0.8.1] - 2026-09-28
 
 ### Added
