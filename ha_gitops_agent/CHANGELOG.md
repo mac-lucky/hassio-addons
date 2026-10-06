@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.8.3] - 2026-10-06
+
+Rebuild only, no functional change.
+
+### Changed
+
+- Base image updated to hassio-addons/base 21.0.7 (from 21.0.6).
+
+### Security
+
+- Picks up Alpine's pcre2 10.49-r0 (CVE-2026-103111), published after 0.8.2
+  was built.
+
 ## [0.8.2] - 2026-09-29
 
 ### Changed
