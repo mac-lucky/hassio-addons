@@ -5,6 +5,16 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.2] - 2026-10-06
+
+Rebuild only, no functional change.
+
+### Security
+
+- Picks up Debian's OpenSSL 3.5.7-1~deb13u3 (CVE-2026-54873, CVE-2026-72897,
+  CVE-2026-84782, CVE-2026-84784) and libpcre2 10.46-1~deb13u3
+  (CVE-2026-103111), published after 1.10.1 was built.
+
 ## [1.10.1] - 2026-09-28
 
 ### Fixed
