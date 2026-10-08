@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.8.4] - 2026-10-08
+
+Rebuild only, no functional change.
+
+### Changed
+
+- Base image updated to hassio-addons/base 21.0.8 (from 21.0.7).
+
+### Security
+
+- Picks up Alpine's zlib 1.3.2-r1 (CVE-2026-85091), published after 0.8.3
+  was built.
+
 ## [0.8.3] - 2026-10-06
 
 Rebuild only, no functional change.
