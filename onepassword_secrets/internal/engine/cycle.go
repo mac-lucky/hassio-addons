@@ -67,6 +67,10 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 
 	health, err := e.connect.Health(ctx)
 	if err != nil {
+		if e.connectCrashLooping() {
+			e.fail(ctx, next, connectStoppingHeadline, err, connectStoppingFix)
+			return
+		}
 		e.fail(ctx, next, "Connect is not answering", err, "The embedded server may still be starting; its log lines are in the add-on log.")
 		return
 	}
@@ -87,6 +91,12 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 	next.Connect.Dependencies = health.Dependencies
 	next.Connect.Synced = health.Synced()
 	if !next.Connect.Synced {
+		// Once its database exists, connect-api answers /health with
+		// connect-sync down, so a sync crash loop shows up here.
+		if e.connectCrashLooping() {
+			e.fail(ctx, next, connectStoppingHeadline, errors.New("a Connect process keeps exiting"), connectStoppingFix)
+			return
+		}
 		dep := health.Dependency("account_data")
 		next.State = StateStarting
 		next.Headline = "Waiting for Connect's first sync"
@@ -154,6 +164,28 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 		next.Problems = append([]Problem{{Severity: "error", Title: next.Headline, Detail: next.Detail, Fix: "The previous values are back in place. Fix the cause, then press Sync now."}}, next.Problems...)
 	}
 	e.publish(ctx, next)
+}
+
+const (
+	connectStoppingHeadline = "Connect keeps stopping"
+	connectStoppingFix      = "Its processes exit soon after they start. The add-on log has the reason, on the lines marked component=connect-api or component=connect-sync."
+)
+
+// connectCrashLooping reports an embedded Connect process that exited
+// several times without staying up in between, the last time within the
+// longest restart backoff, so the headline can tell a crash loop from a
+// slow start.
+func (e *Engine) connectCrashLooping() bool {
+	if e.procs == nil {
+		return false
+	}
+	now := e.cfg.Now()
+	for _, p := range e.procs.Status() {
+		if p.QuickExits >= 3 && now.Sub(p.LastExitAt) < 2*time.Minute {
+			return true
+		}
+	}
+	return false
 }
 
 // baseStatus is the part of Status that does not depend on a cycle.

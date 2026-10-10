@@ -79,11 +79,15 @@ func (c Config) URL() string { return "http://127.0.0.1:" + strconv.Itoa(c.APIPo
 
 // ProcState is one process's supervision state.
 type ProcState struct {
-	Name       string
-	Running    bool
-	PID        int
-	StartedAt  time.Time
-	Restarts   int
+	Name      string
+	Running   bool
+	PID       int
+	StartedAt time.Time
+	Restarts  int
+	// QuickExits counts the exits since the process last stayed up for
+	// stableAfter: a crash loop, where Restarts also counts one-off
+	// crashes weeks apart.
+	QuickExits int
 	LastExit   string
 	LastExitAt time.Time
 	// LastError is the newest error-level line the process logged.
@@ -174,14 +178,19 @@ func (s *Server) supervise(ctx context.Context, name, bin string, port, bus, pee
 		if err != nil {
 			exit = humanize.Truncate(err.Error(), 300)
 		}
+		stable := time.Since(started) > stableAfter
 		s.update(name, func(p *ProcState) {
 			p.Running = false
 			p.PID = 0
 			p.Restarts++
+			if stable {
+				p.QuickExits = 0
+			}
+			p.QuickExits++
 			p.LastExit = exit
 			p.LastExitAt = time.Now()
 		})
-		if time.Since(started) > stableAfter {
+		if stable {
 			backoff = minBackoff
 		}
 		slog.Warn("connect process stopped, restarting", "component", name, "exit", exit, "in", backoff)

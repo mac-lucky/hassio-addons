@@ -232,6 +232,9 @@ op connect token delete <old token id> --server homeassistant
 - **"Waiting for Connect's first sync"** stays: the credentials do not belong
   to a Connect server, or the server was deleted. The add-on log shows the
   Connect processes' own messages.
+- **"Connect keeps stopping"**: the Connect processes exit soon after they
+  start. The add-on log shows why, on the lines marked
+  `component=connect-api` or `component=connect-sync`.
 - **"Connect refused the access token"**: the token expired, was revoked, or
   belongs to another Connect server.
 - **"Vault is not readable"**: the server or the token was not given that

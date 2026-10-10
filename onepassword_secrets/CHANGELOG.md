@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.1] - 2026-10-11
+
+### Fixed
+
+- The built-in Connect server did not start on Home Assistant OS: the
+  add-on's AppArmor profile kept Connect from reading `/etc/passwd`, which it
+  needs to check who owns its data directory, so both processes exited
+  straight away and the panel showed "Connect is not answering".
+
+### Changed
+
+- When the Connect processes keep exiting, the panel and sensor now say
+  "Connect keeps stopping" and point to the add-on log, instead of
+  "Connect is not answering".
+
 ## [0.1.0] - 2026-10-10
 
 First release.

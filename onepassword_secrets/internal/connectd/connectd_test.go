@@ -139,7 +139,7 @@ func TestServerRestartsCrashedProcess(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		st := srv.Status()
-		return st[0].Restarts >= 2 && strings.Contains(st[0].LastExit, "exit status 3")
+		return st[0].Restarts >= 2 && st[0].QuickExits == st[0].Restarts && strings.Contains(st[0].LastExit, "exit status 3")
 	})
 }
 

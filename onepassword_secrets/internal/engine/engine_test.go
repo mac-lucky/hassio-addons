@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/connectd"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/ha"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/opconnect"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/options"
@@ -39,6 +41,7 @@ type fakeConnect struct {
 	mu      sync.Mutex
 	items   map[string]opconnect.Item
 	healthy bool
+	down    bool
 	fetches int
 	// needsKick is a real Connect's fresh start: not synced until a
 	// request with a token arrives.
@@ -66,6 +69,9 @@ func (f *fakeConnect) set(id, title string, version int, fields map[string]strin
 func (f *fakeConnect) Health(context.Context) (opconnect.Health, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.down {
+		return opconnect.Health{}, errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")
+	}
 	status := "ACTIVE"
 	if !f.healthy || f.needsKick {
 		status = "NOT_SYNCED"
@@ -613,6 +619,49 @@ func TestUnconfiguredAndNotSynced(t *testing.T) {
 	h2 := newHarness(t, nil)
 	h2.connect.healthy = false
 	if st := h2.sync(); st.State != StateStarting {
+		t.Fatalf("not synced = %s", st.State)
+	}
+}
+
+type fakeProcs []connectd.ProcState
+
+func (f fakeProcs) Status() []connectd.ProcState { return f }
+
+func TestConnectDownAndCrashLooping(t *testing.T) {
+	h := newHarness(t, nil)
+	h.connect.down = true
+	if st := h.sync(); st.State != StateError || st.Headline != "Connect is not answering" {
+		t.Fatalf("down = %s %q", st.State, st.Headline)
+	}
+	looping := fakeProcs{
+		{Name: "connect-api", Restarts: 1, QuickExits: 1, LastExitAt: time.Now()},
+		{Name: "connect-sync", Restarts: 5, QuickExits: 3, LastExitAt: time.Now().Add(-10 * time.Second)},
+	}
+	h.engine.procs = looping
+	if st := h.sync(); st.State != StateError || st.Headline != "Connect keeps stopping" {
+		t.Fatalf("crash loop = %s %q", st.State, st.Headline)
+	}
+	for _, procs := range []fakeProcs{
+		{{Name: "connect-sync", Restarts: 2, QuickExits: 2, LastExitAt: time.Now()}},
+		{{Name: "connect-sync", Restarts: 9, QuickExits: 1, LastExitAt: time.Now()}},
+		{{Name: "connect-sync", Restarts: 5, QuickExits: 5, LastExitAt: time.Now().Add(-time.Hour)}},
+	} {
+		h.engine.procs = procs
+		if st := h.sync(); st.Headline != "Connect is not answering" {
+			t.Fatalf("%+v: headline = %q", procs, st.Headline)
+		}
+	}
+
+	// connect-api answers /health with connect-sync down once its
+	// database exists: the loop must still be named, not "waiting".
+	h.connect.down = false
+	h.connect.healthy = false
+	h.engine.procs = looping
+	if st := h.sync(); st.State != StateError || st.Headline != "Connect keeps stopping" {
+		t.Fatalf("sync crash loop = %s %q", st.State, st.Headline)
+	}
+	h.engine.procs = nil
+	if st := h.sync(); st.State != StateStarting {
 		t.Fatalf("not synced = %s", st.State)
 	}
 }

@@ -16,6 +16,14 @@ profile onepassword_secrets flags=(attach_disconnected,mediate_deleted) {
   /{,usr/}lib{,64}/** mr,
   /etc/ld.so.cache r,
 
+  # Connect looks up the current user (glibc getpwuid) to check that its
+  # config directory is owned by it, and exits when the lookup fails.
+  /etc/passwd r,
+  # Connect's embedded WebAssembly runtime (wazero) lists the huge page
+  # sizes at startup and ignores a failure; this only keeps the denial out
+  # of the audit log.
+  /sys/kernel/mm/hugepages{,/**} r,
+
   # Name resolution and the TLS trust store: connect-sync talks to
   # 1Password over HTTPS.
   /etc/hosts r,

@@ -7,7 +7,7 @@ ARG BUILD_FROM
 ARG CONNECT_VERSION
 
 # Keep in sync with config.yaml's version - stamped into the binary below.
-ARG BUILD_VERSION=0.1.0
+ARG BUILD_VERSION=0.1.1
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG BUILD_VERSION
