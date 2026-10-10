@@ -54,7 +54,7 @@ func devStatus(name string) engine.Status {
 			Reachable: true, Synced: true, ServerVersion: "1.8.3",
 			Dependencies: []opconnect.Dependency{
 				{Service: "sqlite", Status: "ACTIVE", Message: "Connected to /data/connect/.op/data/1password.sqlite"},
-				{Service: "account_data", Status: "ACTIVE"},
+				{Service: "account_data", Status: "AVAILABLE", Message: "Account data is available"},
 				{Service: "sync", Status: "ACTIVE"},
 			},
 			Processes: []connectd.ProcState{

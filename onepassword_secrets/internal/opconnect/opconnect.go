@@ -94,9 +94,15 @@ func (h Health) Dependency(service string) Dependency {
 }
 
 // Synced reports whether the account data is available, which is what
-// every vault and item call needs.
+// every vault and item call needs. Connect 1.8.3 reports it as AVAILABLE
+// ("Account data is available") once the first sync is through; ACTIVE,
+// the status of its other dependencies, is accepted too.
 func (h Health) Synced() bool {
-	return strings.EqualFold(h.Dependency("account_data").Status, "ACTIVE")
+	switch strings.ToUpper(h.Dependency("account_data").Status) {
+	case "AVAILABLE", "ACTIVE":
+		return true
+	}
+	return false
 }
 
 // Vault is one entry of GET /v1/vaults.

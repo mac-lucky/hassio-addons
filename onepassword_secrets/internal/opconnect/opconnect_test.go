@@ -17,7 +17,7 @@ func fakeServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"name":"1Password Connect API","version":"1.8.3","dependencies":[{"service":"account_data","status":"ACTIVE"}]}`))
+		_, _ = w.Write([]byte(`{"name":"1Password Connect API","version":"1.8.3","dependencies":[{"service":"sqlite","status":"ACTIVE"},{"service":"account_data","status":"AVAILABLE","message":"Account data is available"}]}`))
 	})
 	auth := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -120,5 +120,17 @@ func TestTokenExpiry(t *testing.T) {
 		if _, ok := TokenExpiry(tok); ok {
 			t.Fatalf("TokenExpiry(%q) should fail", tok)
 		}
+	}
+}
+
+func TestHealthSynced(t *testing.T) {
+	for status, want := range map[string]bool{"AVAILABLE": true, "ACTIVE": true, "available": true, "NOT_SYNCED": false, "": false} {
+		h := Health{Dependencies: []Dependency{{Service: "account_data", Status: status}}}
+		if h.Synced() != want {
+			t.Errorf("account_data %q: Synced = %v, want %v", status, !want, want)
+		}
+	}
+	if (Health{Dependencies: []Dependency{{Service: "sync", Status: "ACTIVE"}}}).Synced() {
+		t.Error("synced without an account_data dependency")
 	}
 }

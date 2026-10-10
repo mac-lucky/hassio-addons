@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.2] - 2026-10-11
+
+### Fixed
+
+- The add-on stayed on "Waiting for Connect's first sync" after Connect had
+  synced: Connect 1.8.3 reports its account data as `AVAILABLE`, and only
+  `ACTIVE` was taken as synced.
+
 ## [0.1.1] - 2026-10-11
 
 ### Fixed

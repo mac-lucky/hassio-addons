@@ -72,7 +72,7 @@ func (f *fakeConnect) Health(context.Context) (opconnect.Health, error) {
 	if f.down {
 		return opconnect.Health{}, errors.New("dial tcp 127.0.0.1:8080: connect: connection refused")
 	}
-	status := "ACTIVE"
+	status := "AVAILABLE"
 	if !f.healthy || f.needsKick {
 		status = "NOT_SYNCED"
 	}
