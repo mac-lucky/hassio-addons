@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.4] - 2026-10-11
+
+### Fixed
+
+- 0.1.3 still raised "Connect is not answering" on start: the first check
+  ran before the Connect processes had a start time, so it did not count as
+  starting.
+
 ## [0.1.3] - 2026-10-11
 
 ### Fixed

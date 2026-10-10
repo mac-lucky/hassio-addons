@@ -135,6 +135,15 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := fsx.WriteFileAtomic(s.CredentialsPath(), s.cfg.Credentials, 0o600); err != nil {
 		return fmt.Errorf("connectd: writing the credentials file: %w", err)
 	}
+	// Stamp both as starting now, before their goroutines run: the
+	// engine's first cycle follows Start at once, and reads StartedAt to
+	// tell a server that is still starting from one that is down.
+	now := time.Now()
+	s.mu.Lock()
+	for _, p := range s.st {
+		p.StartedAt = now
+	}
+	s.mu.Unlock()
 	s.wg.Add(2)
 	go s.supervise(ctx, Sync, s.cfg.SyncBin, s.cfg.SyncPort, s.cfg.SyncBusPort, s.cfg.APIBusPort)
 	go s.supervise(ctx, API, s.cfg.APIBin, s.cfg.APIPort, s.cfg.APIBusPort, s.cfg.SyncBusPort)

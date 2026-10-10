@@ -137,6 +137,11 @@ func TestServerRestartsCrashedProcess(t *testing.T) {
 	if err := srv.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	for _, p := range srv.Status() {
+		if p.StartedAt.IsZero() {
+			t.Fatalf("%s has no StartedAt right after Start", p.Name)
+		}
+	}
 	waitFor(t, func() bool {
 		st := srv.Status()
 		return st[0].Restarts >= 2 && st[0].QuickExits == st[0].Restarts && strings.Contains(st[0].LastExit, "exit status 3")
