@@ -33,7 +33,7 @@ func devKeyHistory(key string) []state.Entry {
 	now := time.Now().UTC()
 	return []state.Entry{
 		{Time: now.Add(-3 * time.Hour), Kind: state.KindRefresh, Title: "Reloaded template", Keys: []string{key}},
-		{Time: now.Add(-3*time.Hour - time.Minute), Kind: state.KindChange, Title: "Updated 1 key", Detail: "in secrets.yaml", Keys: []string{key}},
+		{Time: now.Add(-3*time.Hour - time.Minute), Kind: state.KindChange, Title: "Changed 1 key", Detail: "in secrets.yaml", Keys: []string{key}},
 	}
 }
 
@@ -106,7 +106,7 @@ func devStatus(name string) engine.Status {
 	}
 	s.Activity = []state.Entry{
 		{Time: now.Add(-3 * time.Hour), Kind: state.KindRefresh, Title: "Reloaded template", Keys: []string{"xiaomi_fan_token"}},
-		{Time: now.Add(-3*time.Hour - time.Minute), Kind: state.KindChange, Title: "Updated 1 key", Detail: "in secrets.yaml", Keys: []string{"xiaomi_fan_token"}},
+		{Time: now.Add(-3*time.Hour - time.Minute), Kind: state.KindChange, Title: "Changed 1 key", Detail: "in secrets.yaml", Keys: []string{"xiaomi_fan_token"}},
 		{Time: now.Add(-26 * time.Hour), Kind: state.KindRefresh, Title: "Restarted Mosquitto broker", Keys: []string{"mqtt_password"}},
 		{Time: now.Add(-26*time.Hour - 2*time.Minute), Kind: state.KindChange, Title: "Updated 1 key", Detail: "in secrets.yaml, zigbee2mqtt/secret.yaml", Keys: []string{"mqtt_password"}},
 	}

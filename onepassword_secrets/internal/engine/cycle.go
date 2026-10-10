@@ -675,8 +675,47 @@ func (e *Engine) write(ctx context.Context, c *cycle) error {
 		e.dropPrevious(written)
 		return nil
 	}
-	e.record(state.KindChange, fmt.Sprintf("Updated %s", plural(len(all), "key", "keys")), "in "+strings.Join(files, ", "), all)
+	e.record(state.KindChange, changeTitle(todo), "in "+strings.Join(files, ", "), all)
 	return e.refresh(ctx, c, pending)
+}
+
+// changeTitle names what a write did to the keys, "Added 2 keys, removed
+// 1 key". A key counts once, as changed when any file changed its value,
+// else as added or removed.
+func changeTitle(jobs []*fileJob) string {
+	added, changed, removed := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, j := range jobs {
+		for _, k := range j.plan.Changed {
+			changed[k] = true
+		}
+		for _, k := range j.plan.Added {
+			added[k] = true
+		}
+		for _, k := range j.plan.Removed {
+			removed[k] = true
+		}
+	}
+	for k := range changed {
+		delete(added, k)
+		delete(removed, k)
+	}
+	for k := range added {
+		delete(removed, k)
+	}
+	var parts []string
+	for _, p := range []struct {
+		verb string
+		n    int
+	}{{"added", len(added)}, {"changed", len(changed)}, {"removed", len(removed)}} {
+		if p.n > 0 {
+			parts = append(parts, p.verb+" "+plural(p.n, "key", "keys"))
+		}
+	}
+	if len(parts) == 0 {
+		return "Updated the secrets files"
+	}
+	t := strings.Join(parts, ", ")
+	return strings.ToUpper(t[:1]) + t[1:]
 }
 
 // touchedKeys are the keys a plan adds, changes or removes.

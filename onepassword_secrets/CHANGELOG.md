@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.7] - 2026-10-11
+
+### Changed
+
+- The activity list says what a write did to the keys ("Added 23 keys",
+  "Removed 1 key") instead of "Updated" for every change.
+
 ## [0.1.6] - 2026-10-11
 
 ### Fixed

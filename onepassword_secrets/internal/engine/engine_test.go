@@ -20,6 +20,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/ha"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/opconnect"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/options"
+	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/render"
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/secret"
 )
 
@@ -818,5 +819,25 @@ func TestStartDismissesAnEarlierErrorNotice(t *testing.T) {
 	h.ha.mu.Unlock()
 	if n := strings.Count(calls, "dismiss "+notifyError); n != 1 {
 		t.Fatalf("error notice dismissed %d times on a healthy start, want 1:\n%s", n, calls)
+	}
+}
+
+func TestChangeTitle(t *testing.T) {
+	job := func(added, changed, removed []string) *fileJob {
+		return &fileJob{plan: render.Plan{Added: added, Changed: changed, Removed: removed}}
+	}
+	for _, tc := range []struct {
+		jobs []*fileJob
+		want string
+	}{
+		{[]*fileJob{job([]string{"a", "b"}, nil, nil)}, "Added 2 keys"},
+		{[]*fileJob{job(nil, nil, []string{"a"}), job(nil, nil, []string{"a"})}, "Removed 1 key"},
+		{[]*fileJob{job([]string{"a"}, nil, nil), job(nil, []string{"a"}, nil), job(nil, nil, []string{"b"})}, "Changed 1 key, removed 1 key"},
+		{[]*fileJob{job([]string{"a"}, nil, nil), job(nil, nil, []string{"a"})}, "Added 1 key"},
+		{[]*fileJob{job(nil, nil, nil)}, "Updated the secrets files"},
+	} {
+		if got := changeTitle(tc.jobs); got != tc.want {
+			t.Errorf("changeTitle = %q, want %q", got, tc.want)
+		}
 	}
 }
