@@ -2,8 +2,9 @@ name: CI
 
 # Runs on every push and pull request, so each one reports the same "All
 # checks passed" check and branch protection can require it. The add-on
-# pipelines themselves live in ci-vector.yaml and ci-gitops-agent.yaml and
-# run only when their add-on changes; a skipped add-on counts as passing.
+# pipelines themselves live in ci-vector.yaml, ci-gitops-agent.yaml and
+# ci-onepassword-secrets.yaml and run only when their add-on changes; a
+# skipped add-on counts as passing.
 
 on:
   push:
@@ -26,6 +27,7 @@ jobs:
     outputs:
       vector: ${{ steps.diff.outputs.vector }}
       gitops_agent: ${{ steps.diff.outputs.gitops_agent }}
+      onepassword_secrets: ${{ steps.diff.outputs.onepassword_secrets }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -72,9 +74,13 @@ jobs:
           changed '^(ha_gitops_agent/|\.github/workflows/(ci|ci-gitops-agent)\.yaml$)' && gitops_agent=true
           echo "gitops_agent=${gitops_agent}" >> "${GITHUB_OUTPUT}"
 
+          onepassword_secrets=false
+          changed '^(onepassword_secrets/|\.github/workflows/(ci|ci-onepassword-secrets)\.yaml$)' && onepassword_secrets=true
+          echo "onepassword_secrets=${onepassword_secrets}" >> "${GITHUB_OUTPUT}"
+
           cat "${GITHUB_OUTPUT}"
 
-  # The build jobs inside both pipelines declare packages: write (they push on
+  # The build jobs inside every pipeline declare packages: write (they push on
   # a release), and a called workflow cannot be granted more than its caller.
   vector:
     name: Vector
@@ -94,6 +100,15 @@ jobs:
       packages: write
     uses: ./.github/workflows/ci-gitops-agent.yaml
 
+  onepassword-secrets:
+    name: 1Password Secrets
+    needs: changes
+    if: needs.changes.outputs.onepassword_secrets == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/ci-onepassword-secrets.yaml
+
   # Branch protection requires this one name. The add-on jobs are named per
   # architecture and per tool, so no rule could list them.
   all-checks:
@@ -103,10 +118,11 @@ jobs:
       - changes
       - vector
       - gitops-agent
+      - onepassword-secrets
     if: ${{ always() }}
     steps:
       # skipped counts as a pass: most pull requests touch one add-on or
-      # neither, and the other pipeline does not run.
+      # none, and the other pipelines do not run.
       - name: Fail if any job did not succeed
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |

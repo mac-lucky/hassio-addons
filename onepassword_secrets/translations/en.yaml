@@ -1,0 +1,35 @@
+---
+configuration:
+  connect_credentials:
+    name: Connect credentials
+    description: The content of the 1password-credentials.json file that `op connect server create` wrote for this Home Assistant's Connect server, pasted as is or base64-encoded. The add-on runs that Connect server itself. Leave empty when connect_url points at a Connect server you run elsewhere.
+  connect_token:
+    name: Connect access token
+    description: An access token for that Connect server with read access to the vaults below (`op connect token create ... --vault homeassistant,r --expires-in 365d`). The add-on only ever reads.
+  connect_url:
+    name: External Connect server
+    description: Optional. The URL of a Connect server you already run (for example http://op-connect:8080). When set, the built-in server is not started and connect_credentials is not needed.
+  vaults:
+    name: Vaults
+    description: The vaults, by name or ID, whose fields become secrets. Every field whose label is a valid key (lowercase letters, digits, underscores, like wifi_password) is written to secrets.yaml under that key. A label ending in _json holds a JSON object or list, written as YAML structure.
+  references:
+    name: Extra references
+    description: Keys whose value lives somewhere else, as key plus an op://vault/item/field reference (op://vault/item/section/field with a section). The token must be able to read that vault. A reference wins over a discovered field with the same key.
+  secrets_files:
+    name: Secrets files
+    description: The files this add-on writes, relative to the config directory, each named secrets.yaml or secret.yaml. secrets.yaml is always included and gets every key. Any other file (esphome/secrets.yaml, zigbee2mqtt/secret.yaml) gets the keys that the configuration next to it refers to.
+  poll_interval_seconds:
+    name: Check interval (seconds)
+    description: How often to look for changes in 1Password, from 15 to 3600 seconds. The built-in Connect server answers locally, so a short interval costs nothing.
+  restart_addons:
+    name: Restart add-ons
+    description: Restart add-ons whose options use a changed key (as "!secret key" or "secret://key"), and add-ons that read a changed file in their own directory, such as Zigbee2MQTT.
+  core_restart:
+    name: Home Assistant restart
+    description: When a changed key is used by an integration that cannot reload, "auto" checks the configuration, restarts Home Assistant and restores the previous values if it does not come back; "notify" asks you to restart instead.
+  dry_run:
+    name: Dry run
+    description: Show what would change in the panel without writing any file or restarting anything.
+  log_level:
+    name: Log level
+    description: How much the add-on logs. Values are never logged at any level.

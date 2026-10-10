@@ -1,0 +1,30 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - errcheck
+    - unused
+    - gosec
+    - misspell
+  settings:
+    misspell:
+      # Mosquitto is the MQTT broker add-on's actual name (core_mosquitto),
+      # not a misspelling of the insect.
+      ignore-rules:
+        - mosquitto
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofumpt

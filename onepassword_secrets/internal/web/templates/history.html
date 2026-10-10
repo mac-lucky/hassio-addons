@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>History - 1Password Secrets</title>
+<link rel="stylesheet" href="static/app.css?v={{.AssetVer}}">
+</head>
+<body>
+<header class="head">
+  <div class="head-row"><h1>History</h1><span class="spacer"></span><a class="link" href="./">Back to the panel</a></div>
+  <p class="meta"><span>Newest first, kept across restarts. Names only, never values.</span></p>
+</header>
+<section class="card">
+  {{if .Entries}}<ol class="timeline">{{range .Entries}}{{template "entry" .}}{{end}}</ol>
+  {{else}}<p class="empty">Nothing has happened yet.</p>{{end}}
+</section>
+<script>
+document.querySelectorAll('time[datetime]').forEach(function (el) {
+  var d = new Date(el.getAttribute('datetime'));
+  if (!isNaN(d)) { el.textContent = d.toLocaleString(); }
+});
+</script>
+</body>
+</html>

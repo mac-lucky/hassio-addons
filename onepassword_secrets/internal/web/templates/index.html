@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1Password Secrets</title>
+<link rel="stylesheet" href="static/app.css?v={{.AssetVer}}">
+<script src="static/htmx.min.js?v={{.AssetVer}}"></script>
+</head>
+<body>
+{{/* Outside #app, which every poll may replace. */}}
+<div id="req-error" class="req-error" role="alert" hidden>
+  <span id="req-error-text"></span>
+  <button type="button" id="req-error-dismiss" class="btn btn-quiet">Dismiss</button>
+</div>
+<div id="sr-status" role="status" aria-live="polite" class="sr-only"></div>
+{{.Fragment}}
+<script>
+(function () {
+  htmx.config.timeout = 20000;
+
+  var banner = document.getElementById('req-error');
+  var bannerText = document.getElementById('req-error-text');
+  var live = document.getElementById('sr-status');
+  document.getElementById('req-error-dismiss').addEventListener('click', function () {
+    banner.hidden = true;
+    bannerText.textContent = '';
+  });
+  // fromPoll marks a banner the poll raised: the next successful poll
+  // clears it (a restart from the panel takes the ingress proxy down too).
+  var fromPoll = false;
+  function showError(text, poll) {
+    bannerText.textContent = text;
+    banner.hidden = false;
+    fromPoll = !!poll;
+  }
+  document.body.addEventListener('htmx:responseError', function (ev) {
+    var xhr = ev.detail.xhr;
+    if (ev.detail.elt && ev.detail.elt.id === 'app') { return; }
+    showError((xhr && xhr.responseText) ? xhr.responseText.trim() : 'The request failed.');
+  });
+  document.body.addEventListener('htmx:sendError', function (ev) {
+    if (ev.detail.elt && ev.detail.elt.id === 'app') {
+      showError('The panel lost its connection to the add-on. It retries by itself.', true);
+      return;
+    }
+    showError('The add-on did not answer. Is it running?');
+  });
+
+  // Relative times: the server renders absolute ISO times so a fragment
+  // only changes when something happened, and this keeps them readable.
+  var fmtDate = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  function rel(ms) {
+    var s = Math.round((Date.now() - ms) / 1000);
+    var future = s < 0;
+    s = Math.abs(s);
+    var text;
+    if (s < 45) { text = s + ' s'; }
+    else if (s < 3600) { text = Math.round(s / 60) + ' min'; }
+    else if (s < 86400) { text = Math.round(s / 3600) + ' h'; }
+    else { text = Math.round(s / 86400) + ' d'; }
+    return future ? 'in ' + text : text + ' ago';
+  }
+  function renderTimes() {
+    document.querySelectorAll('time[data-rel]').forEach(function (el) {
+      var ms = Date.parse(el.getAttribute('datetime'));
+      if (isNaN(ms)) { return; }
+      el.textContent = rel(ms);
+      el.title = fmtDate.format(new Date(ms));
+    });
+  }
+
+  // Filter and search over the secrets list. The controls are preserved
+  // across swaps (hx-preserve); the filter is re-applied after each one.
+  var filter = 'all';
+  function applyFilter() {
+    var q = (document.getElementById('q') || { value: '' }).value.trim().toLowerCase();
+    var shown = 0;
+    document.querySelectorAll('.key-row').forEach(function (row) {
+      var matchesFilter = filter === 'all' || (row.getAttribute('data-tags') || '').split(' ').indexOf(filter) >= 0;
+      var matchesQuery = !q || (row.getAttribute('data-search') || '').toLowerCase().indexOf(q) >= 0;
+      var visible = matchesFilter && matchesQuery;
+      row.hidden = !visible;
+      if (visible) { shown++; }
+    });
+    var empty = document.getElementById('no-match');
+    if (empty) { empty.hidden = shown !== 0; }
+    document.querySelectorAll('.seg [data-filter]').forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-filter') === filter ? 'true' : 'false');
+    });
+  }
+  document.body.addEventListener('click', function (ev) {
+    var b = ev.target.closest('.seg [data-filter]');
+    if (!b) { return; }
+    filter = b.getAttribute('data-filter');
+    applyFilter();
+  });
+  document.body.addEventListener('input', function (ev) {
+    if (ev.target.id === 'q') { applyFilter(); }
+  });
+
+  // Keep expanded rows open across swaps.
+  var open = {};
+  document.body.addEventListener('toggle', function (ev) {
+    var d = ev.target;
+    if (d.matches && d.matches('details[data-key]')) {
+      if (d.open) { open[d.getAttribute('data-key')] = true; } else { delete open[d.getAttribute('data-key')]; }
+    }
+  }, true);
+  function restoreOpen() {
+    document.querySelectorAll('details[data-key]').forEach(function (d) {
+      if (open[d.getAttribute('data-key')]) { d.open = true; }
+    });
+  }
+
+  // A keyring tick opens and scrolls to its row.
+  document.body.addEventListener('click', function (ev) {
+    var a = ev.target.closest('a.tick');
+    if (!a) { return; }
+    ev.preventDefault();
+    var row = document.getElementById(a.getAttribute('href').slice(1));
+    if (!row) { return; }
+    filter = 'all';
+    var q = document.getElementById('q');
+    if (q) { q.value = ''; }
+    applyFilter();
+    var d = row.querySelector('details');
+    if (d) { d.open = true; }
+    row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    row.classList.add('flash');
+    setTimeout(function () { row.classList.remove('flash'); }, 1200);
+  });
+
+  document.body.addEventListener('htmx:afterRequest', function (ev) {
+    if (ev.detail.elt && ev.detail.elt.id === 'app' && ev.detail.successful && fromPoll) {
+      banner.hidden = true;
+      bannerText.textContent = '';
+      fromPoll = false;
+    }
+  });
+
+  // An idle poll answers 204 with only the new check time.
+  document.body.addEventListener('lastSync', function (ev) {
+    var el = document.getElementById('last-sync');
+    var iso = ev.detail && ev.detail.value;
+    if (!el || !iso) { return; }
+    el.setAttribute('datetime', iso);
+    el.parentNode.hidden = false;
+    renderTimes();
+  });
+
+  // A swap replaces every element in #app: remember what had focus (and the
+  // search box's text and caret) and put it back afterwards, so a poll never
+  // throws a keyboard or screen-reader user back to the top.
+  var saved = null;
+  document.body.addEventListener('htmx:beforeSwap', function (ev) {
+    if (!ev.detail.target || ev.detail.target.id !== 'app') { return; }
+    var q = document.getElementById('q');
+    var a = document.activeElement;
+    saved = { q: q ? q.value : '', focus: null };
+    if (a && a !== document.body && document.getElementById('app').contains(a)) {
+      var d = a.closest('details[data-key]');
+      saved.focus = {
+        id: a.id || null,
+        key: d ? d.getAttribute('data-key') : null,
+        summary: a.tagName === 'SUMMARY',
+        start: a.selectionStart, end: a.selectionEnd
+      };
+    }
+  });
+  function restoreFocus() {
+    if (!saved) { return; }
+    var q = document.getElementById('q');
+    if (q) { q.value = saved.q; }
+    var f = saved.focus;
+    saved = null;
+    if (!f) { return; }
+    var el = null;
+    if (f.id) { el = document.getElementById(f.id); }
+    if (!el && f.key && f.summary) {
+      document.querySelectorAll('details[data-key]').forEach(function (d) {
+        if (d.getAttribute('data-key') === f.key) { el = d.querySelector('summary'); }
+      });
+    }
+    if (!el) { return; }
+    el.focus({ preventScroll: true });
+    if (typeof f.start === 'number' && el.setSelectionRange) {
+      try { el.setSelectionRange(f.start, f.end); } catch (e) { /* not a text field */ }
+    }
+  }
+
+  var appAtLoad = document.getElementById('app');
+  var assetsAtLoad = appAtLoad ? appAtLoad.getAttribute('data-assets') : null;
+  // Announced: the overall state, not the transient "Syncing" pill.
+  function stateText() {
+    var app = document.getElementById('app');
+    return app ? (app.getAttribute('data-state-label') || '') : '';
+  }
+  var announced = stateText();
+
+  renderTimes();
+  applyFilter();
+  setInterval(renderTimes, 15000);
+
+  document.body.addEventListener('htmx:afterSwap', function () {
+    var app = document.getElementById('app');
+    var assets = app ? app.getAttribute('data-assets') : null;
+    if (assetsAtLoad && assets && assets !== assetsAtLoad) {
+      location.reload();
+      return;
+    }
+    renderTimes();
+    restoreOpen();
+    restoreFocus();
+    applyFilter();
+    var text = stateText();
+    if (text && text !== announced) {
+      announced = text;
+      live.textContent = text;
+    }
+  });
+})();
+</script>
+</body>
+</html>

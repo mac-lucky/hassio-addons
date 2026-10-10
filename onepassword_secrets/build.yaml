@@ -1,0 +1,16 @@
+# Debian, not the Alpine base: 1Password's Connect binaries are linked
+# against glibc.
+build_from:
+  amd64: ghcr.io/hassio-addons/debian-base:9.5.0
+  aarch64: ghcr.io/hassio-addons/debian-base:9.5.0
+
+args:
+  GO_VERSION: "1.27.1"
+  CONNECT_VERSION: "1.8.3"
+
+labels:
+  org.opencontainers.image.title: 1Password Secrets for Home Assistant
+  org.opencontainers.image.description: Renders Home Assistant's secrets files from 1Password through a built-in Connect server and follows rotations
+  org.opencontainers.image.vendor: Mac Lucky
+  org.opencontainers.image.licenses: MIT
+  org.opencontainers.image.source: https://github.com/mac-lucky/hassio-addons

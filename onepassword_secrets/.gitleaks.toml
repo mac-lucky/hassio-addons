@@ -1,0 +1,17 @@
+# gitleaks configuration for the 1Password Secrets add-on.
+#
+# The tests feed fake values through every code path to prove none of them
+# reaches a log or a page. They are named by pattern here rather than by
+# excluding the test files, so a real credential committed into a test
+# still fails the scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures - placeholder values that are not credentials"
+regexes = [
+  '''SENTINEL-[A-Za-z0-9-]+''',
+  '''s3ntinel-[A-Za-z0-9-]+''',
+  '''s3cr3t[A-Za-z0-9-]*''',
+]

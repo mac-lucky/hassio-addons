@@ -14,3 +14,12 @@
     type: go-module
     location: "/usr/bin/tempio"
 
+# connect-api and connect-sync: 1Password's own Go builds, copied unchanged out
+# of the 1password/connect-{api,sync} images by onepassword_secrets' Dockerfile.
+# Renovate bumps CONNECT_VERSION when 1Password ships a new pair.
+- package:
+    type: go-module
+    location: "/usr/local/bin/connect-api"
+- package:
+    type: go-module
+    location: "/usr/local/bin/connect-sync"

@@ -1,0 +1,55 @@
+name: "1Password Secrets"
+description: "Keeps Home Assistant's secrets files in sync with 1Password through a built-in Connect server, and applies rotated values by itself."
+slug: onepassword_secrets
+url: https://github.com/mac-lucky/hassio-addons/tree/main/onepassword_secrets
+# Keep in sync with Dockerfile's ARG BUILD_VERSION default.
+version: "0.1.0"
+arch:
+  - aarch64
+  - amd64
+# Prebuilt per architecture by CI and pushed to GHCR.
+image: ghcr.io/mac-lucky/hassio-addon-onepassword-secrets-{arch}
+# Before Home Assistant, so a restored box gets its secrets files first.
+startup: services
+ingress: true
+panel_icon: mdi:shield-key
+panel_title: Secrets
+# hassio.addon_stdin with input "sync" asks for a sync.
+stdin: true
+hassio_api: true
+# manager: reading other add-ons' options (to find !secret uses) and
+# restarting the ones that use a changed key.
+hassio_role: manager
+homeassistant_api: true
+map:
+  - type: homeassistant_config
+    read_only: false
+options:
+  connect_credentials: ""
+  connect_token: ""
+  vaults:
+    - homeassistant
+  references: []
+  secrets_files:
+    - secrets.yaml
+  poll_interval_seconds: 60
+  restart_addons: true
+  core_restart: auto
+  dry_run: false
+  log_level: info
+schema:
+  connect_credentials: password?
+  connect_token: password?
+  connect_url: url?
+  vaults:
+    - str
+  references:
+    - key: str
+      ref: str
+  secrets_files:
+    - str
+  poll_interval_seconds: int(15,3600)
+  restart_addons: bool
+  core_restart: list(auto|notify)
+  dry_run: bool
+  log_level: list(debug|info|warning|error)

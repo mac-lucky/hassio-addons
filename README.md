@@ -28,11 +28,24 @@ cluster in sync.
 - Dry-run diff, validate-then-apply, and rollback if Home Assistant refuses the result
 - Optionally reconciles floors, areas, labels, helpers, entity customizations,
   dashboards, other add-ons' options, config-flow integrations and HACS installs
-- Secret values encrypted with SOPS and age, so `secrets.yaml` can live in the
-  repository without living there in the clear
+- Never touches secrets files: pair it with 1Password Secrets (below), or
+  anything else that writes `secrets.yaml`
 - Syncs live edits back to the tracked branch or to a review branch, seeds a
   repository from an existing config, and can be triggered by webhook instead
   of only polling
+
+### 1Password Secrets
+
+[![1Password Secrets CI](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci-onepassword-secrets.yaml/badge.svg)](https://github.com/mac-lucky/hassio-addons/actions/workflows/ci-onepassword-secrets.yaml)
+
+Keeps `secrets.yaml` (and ESPHome's or Zigbee2MQTT's secrets files) filled
+from 1Password through a built-in Connect server.
+
+- A field labelled `wifi_password` is the secret `wifi_password`; no mapping to
+  maintain
+- Follows changes in 1Password: reloads, restarts add-ons, or restarts Home
+  Assistant behind a configuration check with rollback
+- Panel with each key's source, users and rotation date; values are never shown
 
 ## Installation
 

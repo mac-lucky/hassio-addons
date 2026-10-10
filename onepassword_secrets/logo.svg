@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="100" viewBox="0 0 250 100">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#4FD69C"/>
+      <stop offset="1" stop-color="#0B7A5C"/>
+    </linearGradient>
+  </defs>
+  <rect width="250" height="100" rx="20" fill="url(#bg)"/>
+  <g transform="translate(12,18) scale(0.5)">
+    <g fill="none" stroke="#ffffff" stroke-width="9.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="44" cy="64" r="17"/>
+      <path d="M 61 64 L 103 64"/>
+      <path d="M 88 64 L 88 81"/>
+      <path d="M 101 64 L 101 76"/>
+    </g>
+    <circle cx="44" cy="64" r="4.5" fill="#ffffff"/>
+  </g>
+  <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif" fill="#ffffff">
+    <text x="84" y="47" font-size="25" font-weight="700" letter-spacing="-0.5">1Password</text>
+    <text x="84" y="76" font-size="25" font-weight="700" letter-spacing="-0.5" opacity="0.78">Secrets</text>
+  </g>
+</svg>

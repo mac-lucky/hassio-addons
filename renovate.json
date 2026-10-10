@@ -6,6 +6,11 @@
       "matchDepNames": ["vectordotdev/vector"],
       "automerge": false,
       "labels": ["major"]
+    },
+    {
+      "description": "connect-api and connect-sync ship together; the add-on runs one pair of them",
+      "matchDepNames": ["1password/connect-api", "1password/connect-sync"],
+      "groupName": "1Password Connect"
     }
   ],
   "customManagers": [
@@ -23,10 +28,18 @@
     {
       "customType": "regex",
       "description": "GO_VERSION lives only in build.yaml (the Dockerfile ARG has no default), which no preset manager reads",
-      "managerFilePatterns": ["/^ha_gitops_agent/build\\.yaml$/"],
+      "managerFilePatterns": ["/^ha_gitops_agent/build\\.yaml$/", "/^onepassword_secrets/build\\.yaml$/"],
       "matchStrings": ["GO_VERSION: \"(?<currentValue>[0-9.]+)\""],
       "datasourceTemplate": "golang-version",
       "depNameTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "The Connect server binaries in onepassword_secrets are copied out of this image (and connect-sync, same tag); build.yaml passes the tag as CONNECT_VERSION",
+      "managerFilePatterns": ["/^onepassword_secrets/build\\.yaml$/"],
+      "matchStrings": ["CONNECT_VERSION: \"(?<currentValue>[0-9.]+)\""],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "1password/connect-api"
     },
     {
       "customType": "regex",
@@ -37,7 +50,7 @@
     },
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/workflows/ci-gitops-agent\\.yaml$/"],
+      "managerFilePatterns": ["/^\\.github/workflows/ci-gitops-agent\\.yaml$/", "/^\\.github/workflows/ci-onepassword-secrets\\.yaml$/"],
       "matchStrings": ["GITLEAKS_VERSION: \"(?<currentValue>[0-9.]+)\""],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "gitleaks/gitleaks",

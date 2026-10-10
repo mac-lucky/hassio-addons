@@ -1,0 +1,30 @@
+# Changelog
+
+All notable changes to this add-on are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+Nothing yet.
+
+## [0.1.0] - 2026-10-10
+
+First release.
+
+### Added
+
+- Built-in 1Password Connect server (1.8.3), started and supervised by the
+  add-on; an external Connect server can be used instead.
+- Every field in the configured vaults whose label is a secrets key becomes
+  that key; labels ending in `_json` are written as YAML structure. Extra keys
+  can point anywhere with `op://` references.
+- Writes `secrets.yaml` and any other configured secrets file (ESPHome's,
+  Zigbee2MQTT's), editing them as YAML so hand-written keys and comments stay.
+- Follows changes: reloads the YAML integrations that use a changed key,
+  restarts add-ons that use it, and restarts Home Assistant after a
+  configuration check when an integration cannot reload, restoring the previous
+  files if it does not come back.
+- Panel with every key, its source, what uses it and its rotation due date;
+  dry run; the `sensor.onepassword_secrets` sensor, the
+  `onepassword_secrets_changed` event and `hassio.addon_stdin` sync.

@@ -1,0 +1,231 @@
+{{define "main"}}
+<div id="app"
+     hx-get="fragment?h={{.Hash}}{{if .Preview}}&amp;preview={{.Preview}}{{end}}"
+     hx-trigger="every {{if .S.Syncing}}2s{{else}}5s{{end}}"
+     hx-swap="outerHTML"
+     data-assets="{{.AssetVer}}"
+     data-state="{{.S.State}}"
+     data-state-label="{{stateLabel .S.State}}: {{.S.Headline}}">
+
+<header class="head">
+  <div class="head-row">
+    <h1>1Password Secrets</h1>
+    <span class="pill pill-{{.S.State}}">{{if .S.Syncing}}{{if .S.Phase}}{{.S.Phase}}{{else}}Syncing{{end}}{{else}}{{stateLabel .S.State}}{{end}}</span>
+    {{if .S.DryRun}}<span class="pill pill-dry" title="dry_run is on: nothing is written">Dry run</span>{{end}}
+    <span class="spacer"></span>
+    {{if ne .S.State "unconfigured"}}
+    <button class="btn" id="sync-btn" hx-post="sync{{if .Preview}}?preview={{.Preview}}{{end}}" hx-swap="none" {{if .S.Syncing}}disabled{{end}}>Sync now</button>
+    {{end}}
+  </div>
+  <p class="headline">{{.S.Headline}}{{if .S.Detail}}<span class="detail">{{.S.Detail}}</span>{{end}}</p>
+  <p class="meta">
+    <span{{if .S.LastSync.IsZero}} hidden{{end}}>Checked <time id="last-sync" datetime="{{iso .S.LastSync}}" data-rel>{{iso .S.LastSync}}</time></span>
+    {{if not .S.LastChange.IsZero}}<span>Last change <time datetime="{{iso .S.LastChange}}" data-rel>{{iso .S.LastChange}}</time></span>{{end}}
+    {{if .S.Connect.ServerVersion}}<span>Connect {{.S.Connect.ServerVersion}}{{if not .S.Embedded}} (external){{end}}</span>{{end}}
+    {{if .S.Token.Known}}<span class="{{if le .S.Token.DaysLeft 30}}warn{{end}}">Token expires {{date .S.Token.ExpiresAt}}</span>{{end}}
+  </p>
+</header>
+
+{{if or (eq .S.State "unconfigured") (and (not .S.Connect.Synced) (not .S.Secrets))}}
+  {{template "setup" .}}
+{{end}}
+
+{{if .S.Secrets}}
+<section class="card keyring-card" aria-labelledby="kr-title">
+  <h2 id="kr-title" class="sr-only">All secrets at a glance</h2>
+  {{/* A picture of the list below, for pointer users: every tick links to
+       its row. Hidden from screen readers and the tab order, which get the
+       list itself. */}}
+  <div class="keyring" aria-hidden="true">
+    {{range .Ticks}}<a class="tick {{tickClass .}}" href="#{{keyID .Key}}" tabindex="-1" title="{{printable .Key}}: {{rowLabel .State}}{{if .Overdue}}, rotation overdue{{end}}"></a>{{end}}
+  </div>
+  <ul class="legend">
+    <li><i class="dot t-ok"></i>{{plural .S.Counts.Managed "key from 1Password" "keys from 1Password"}}</li>
+    {{if .S.Counts.Unmanaged}}<li><i class="dot t-file"></i>{{.S.Counts.Unmanaged}} only in a file</li>{{end}}
+    {{if .S.Counts.Missing}}<li><i class="dot t-bad"></i>{{.S.Counts.Missing}} missing</li>{{end}}
+    {{if .S.Counts.Conflicts}}<li><i class="dot t-bad"></i>{{plural .S.Counts.Conflicts "conflict" "conflicts"}}</li>{{end}}
+    {{if .S.Counts.Overdue}}<li><i class="dot t-due"></i>{{.S.Counts.Overdue}} due for rotation</li>{{end}}
+    {{if .S.Counts.Unused}}<li><i class="dot t-unused"></i>{{.S.Counts.Unused}} not used by any config</li>{{end}}
+  </ul>
+</section>
+{{end}}
+
+{{if .S.RestartPending}}
+<section class="banner" role="region" aria-label="Restart needed">
+  <div>
+    <strong>Home Assistant needs a restart</strong>
+    <p>New values are in place, but {{join .S.RestartPending ", "}} reads them only at startup.</p>
+  </div>
+  <button class="btn" hx-post="restart-core{{if .Preview}}?preview={{.Preview}}{{end}}" hx-swap="none" hx-confirm="Restart Home Assistant now? The configuration is checked first." {{if .S.Syncing}}disabled{{end}}>Restart Home Assistant</button>
+</section>
+{{end}}
+
+{{if .S.Problems}}
+<section class="card" aria-labelledby="pr-title">
+  <h2 id="pr-title">To fix</h2>
+  <ul class="problems">
+    {{range .S.Problems}}
+    <li class="problem sev-{{.Severity}}">
+      <span class="sev" aria-hidden="true"></span>
+      <div>
+        <p class="p-title">{{printable .Title}}</p>
+        {{if .Detail}}<p class="p-detail">{{printable .Detail}}</p>{{end}}
+        {{if .Fix}}<p class="p-fix">{{.Fix}}</p>{{end}}
+      </div>
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+
+{{if .S.Secrets}}
+<section class="card" aria-labelledby="sec-title">
+  <div class="card-head">
+    <h2 id="sec-title">Secrets</h2>
+    <div class="tools">
+      <input id="q" type="search" placeholder="Search keys, items, files" aria-label="Search secrets" autocomplete="off" spellcheck="false">
+      <div class="seg" id="seg" role="group" aria-label="Show">
+        <button type="button" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-filter="attention" aria-pressed="false">Needs a look</button>
+        <button type="button" data-filter="file" aria-pressed="false">Only in file</button>
+        <button type="button" data-filter="unused" aria-pressed="false">Not used</button>
+      </div>
+    </div>
+  </div>
+  <ul class="keys">
+    {{range .S.Secrets}}{{template "keyrow" .}}{{end}}
+  </ul>
+  <p id="no-match" class="empty" hidden>No secret matches.</p>
+</section>
+{{end}}
+
+{{if .S.Files}}
+<section class="card" aria-labelledby="files-title">
+  <h2 id="files-title">Files</h2>
+  <ul class="files">
+    {{range .S.Files}}
+    <li class="file">
+      <div class="file-main">
+        <code class="path">{{printable .Path}}</code>
+        {{if .Error}}<p class="p-detail bad">{{.Error}}</p>
+        {{else if not .Exists}}<p class="muted">Not created yet{{if $.S.DryRun}}; a sync without dry run creates it{{end}}.</p>
+        {{else}}<p class="muted">{{plural .Keys "key" "keys"}}, {{.Managed}} from 1Password{{if .Unmanaged}}, {{len .Unmanaged}} written by hand{{end}}</p>{{end}}
+        {{if or .PendingAdded .PendingChanged .PendingRemoved}}
+        <p class="pending">Dry run would
+          {{if .PendingAdded}}add {{join .PendingAdded ", "}}{{end}}{{if and .PendingAdded .PendingChanged}}; {{end}}
+          {{if .PendingChanged}}change {{join .PendingChanged ", "}}{{end}}{{if and (or .PendingAdded .PendingChanged) .PendingRemoved}}; {{end}}
+          {{if .PendingRemoved}}remove {{join .PendingRemoved ", "}}{{end}}</p>
+        {{end}}
+        {{if .Orphaned}}<p class="p-detail">Gone from 1Password but still used: {{join .Orphaned ", "}}</p>{{end}}
+      </div>
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+
+{{if .S.Activity}}
+<section class="card" aria-labelledby="act-title">
+  <div class="card-head">
+    <h2 id="act-title">Activity</h2>
+    <a class="link" href="history{{if .Preview}}?preview={{.Preview}}{{end}}">Full history</a>
+  </div>
+  <ol class="timeline">
+    {{range $i, $e := .S.Activity}}{{if lt $i 12}}{{template "entry" $e}}{{end}}{{end}}
+  </ol>
+</section>
+{{end}}
+
+{{if not (eq .S.State "unconfigured")}}
+<details class="card connect" data-key="__connect">
+  <summary><h2>Connect server</h2><span class="muted">{{if .S.Connect.Synced}}synced{{else if .S.Connect.Reachable}}not synced yet{{else}}not answering{{end}}</span></summary>
+  <dl class="kv">
+    <dt>Server</dt><dd>{{if .S.Embedded}}Built in{{else}}<code>{{.S.Connect.URL}}</code>{{end}}{{if .S.Connect.ServerVersion}}, version {{.S.Connect.ServerVersion}}{{end}}</dd>
+    {{range .S.Connect.Processes}}
+    <dt>{{.Name}}</dt>
+    <dd>{{if .Running}}running since <time datetime="{{iso .StartedAt}}" data-rel>{{iso .StartedAt}}</time>{{else}}stopped{{end}}{{if .Restarts}}, {{plural .Restarts "restart" "restarts"}}{{end}}{{if .LastError}}<br><span class="bad">{{.LastError}}</span>{{end}}</dd>
+    {{end}}
+    {{range .S.Connect.Dependencies}}<dt>{{.Service}}</dt><dd>{{.Status}}{{if .Message}}: {{.Message}}{{end}}</dd>{{end}}
+    {{range .S.Vaults}}<dt>Vault</dt><dd>{{.Name}}{{if .Missing}} <span class="bad">not readable</span>{{else}}, {{plural .Items "item" "items"}}{{if not .Discover}} (references only){{end}}{{end}}</dd>{{end}}
+    {{if .S.Connect.Error}}<dt>Last error</dt><dd class="bad">{{.S.Connect.Error}}</dd>{{end}}
+  </dl>
+</details>
+{{end}}
+
+<footer class="foot">1Password Secrets {{.S.Version}}. Values never leave the secrets files; this page shows names only.</footer>
+</div>
+{{end}}
+
+{{define "setup"}}
+<section class="card setup" aria-labelledby="setup-title">
+  <h2 id="setup-title">Set up</h2>
+  <p class="muted">{{setupDone .S.Setup}} of {{len .S.Setup}} done. This add-on runs its own 1Password Connect server; it needs that server's credentials and an access token.</p>
+  <ol class="steps">
+    {{range .S.Setup}}
+    <li class="{{if .Done}}done{{end}}"><span class="check" aria-hidden="true"></span><span>{{.Label}}{{if .Detail}}<span class="muted"> {{.Detail}}</span>{{end}}</span><span class="sr-only">{{if .Done}}(done){{else}}(not yet){{end}}</span></li>
+    {{end}}
+  </ol>
+  {{if eq .S.State "unconfigured"}}
+  <p>With the 1Password CLI, signed in as an owner or admin:</p>
+<pre class="cmd"><code>op vault create homeassistant
+op connect server create homeassistant --vaults homeassistant
+op connect token create home-assistant --server homeassistant \
+  --vault homeassistant,r --expires-in 365d</code></pre>
+  <p class="muted">The second command writes <code>1password-credentials.json</code>; paste its content into <code>connect_credentials</code> and the token into <code>connect_token</code> on the Configuration tab, then restart the add-on. Each field whose label is a secrets key (for example <code>wifi_password</code>) becomes that key.</p>
+  {{end}}
+</section>
+{{end}}
+
+{{define "keyrow"}}
+<li class="key-row" id="{{keyID .Key}}"
+    data-tags="{{if attention .}}attention{{end}}{{if eq .State "unmanaged"}} file{{end}}{{if eq .State "unused"}} unused{{end}}"
+    data-search="{{lower .Key}} {{lower .Source}} {{range .Files}}{{lower .}} {{end}}{{range .UsedBy}}{{lower .Label}} {{lower .File}} {{end}}">
+  <details data-key="{{.Key}}">
+    <summary>
+      <span class="k-main">
+        <code class="k-name">{{printable .Key}}</code>
+        <span class="state st-{{.State}}">{{rowLabel .State}}</span>
+        {{if .Structured}}<span class="tag" title="Rendered as a YAML structure">structured</span>{{end}}
+      </span>
+      <span class="k-sub">
+        {{if .ItemTitle}}<span class="src" title="{{printable .Source}}">{{printable .ItemTitle}}{{if ne .FieldLabel .Key}} / {{printable .FieldLabel}}{{end}} <span class="vault">in {{printable .VaultName}}</span></span>{{else if .Files}}<span class="src">in {{join .Files ", "}}</span>{{end}}
+        {{range .UsedBy}}<span class="use use-{{.Kind}}">{{useText .}}</span>{{end}}
+      </span>
+      {{if not .Due.IsZero}}
+      <span class="rot{{if .Overdue}} over{{else if .DueSoon}} soon{{end}}" title="{{dueText .}}">
+        <span class="rot-bar"><span style="width: {{.RotationPct}}%"></span></span>
+        <span class="rot-text">{{dueText .}}</span>
+      </span>
+      {{end}}
+    </summary>
+    <div class="k-detail">
+      <dl class="kv">
+        {{if .Ref}}<dt>Reference</dt><dd><code class="ref">{{printable .Ref}}</code></dd>{{end}}
+        {{if .Files}}<dt>Written to</dt><dd>{{range $i, $f := .Files}}{{if $i}}, {{end}}<code>{{$f}}</code>{{end}}</dd>{{end}}
+        {{if .UsedBy}}<dt>Used by</dt><dd><ul class="refs">{{range .UsedBy}}<li>{{if eq .Kind "addon"}}{{.Label}} add-on, option <code>{{.File}}</code>{{else}}<code>{{.File}}{{if .Line}}:{{.Line}}{{end}}</code>{{if .Domain}} ({{.Domain}}){{end}}{{end}}</li>{{end}}</ul></dd>
+        {{else}}<dt>Used by</dt><dd class="muted">Nothing in the config refers to it.</dd>{{end}}
+        {{if .Rotation}}<dt>Rotation</dt><dd>{{.Rotation}}{{if .Interval}}, every {{.Interval}}{{end}}{{if not .RotatedAt.IsZero}}, last {{date .RotatedAt}}{{end}}</dd>{{end}}
+        {{if not .ChangedAt.IsZero}}<dt>Value changed</dt><dd><time datetime="{{iso .ChangedAt}}" data-rel>{{iso .ChangedAt}}</time></dd>{{end}}
+      </dl>
+      <div class="k-history" hx-get="key?k={{qesc .Key}}" hx-trigger="intersect once" hx-swap="innerHTML"></div>
+    </div>
+  </details>
+</li>
+{{end}}
+
+{{define "entry"}}
+<li class="entry kind-{{.Kind}}">
+  <span class="e-dot" aria-hidden="true"></span>
+  <div>
+    <p class="e-title"><span class="sr-only">{{kindLabel .Kind}}: </span>{{printable .Title}}</p>
+    {{if .Detail}}<p class="e-detail">{{printable .Detail}}</p>{{end}}
+    {{if .Keys}}<p class="e-keys">{{range $i, $k := .Keys}}{{if lt $i 8}}<code>{{$k}}</code>{{end}}{{end}}{{if gt (len .Keys) 8}} and {{len .Keys}} in all{{end}}</p>{{end}}
+  </div>
+  <time datetime="{{iso .Time}}" data-rel>{{iso .Time}}</time>
+</li>
+{{end}}
+
+{{define "keyhistory"}}
+{{if .}}<p class="muted small">Recent activity for this key</p><ol class="timeline compact">{{range .}}{{template "entry" .}}{{end}}</ol>
+{{else}}<p class="muted small">No activity recorded for this key yet.</p>{{end}}
+{{end}}

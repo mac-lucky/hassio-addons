@@ -3,3 +3,8 @@
 # Locally built agent binary. The add-on image builds it in the Dockerfile;
 # this is only what `go build -o ha-gitops-agent` leaves behind.
 /ha_gitops_agent/ha-gitops-agent
+
+# 1Password Secrets: a local `go build` binary, and the config/data
+# directories `OPS_DEV=1 go run -tags dev ./cmd/onepassword-secrets` creates.
+/onepassword_secrets/onepassword-secrets
+/onepassword_secrets/.dev/

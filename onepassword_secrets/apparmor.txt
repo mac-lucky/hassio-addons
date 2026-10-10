@@ -1,0 +1,51 @@
+#include <tunables/global>
+
+profile onepassword_secrets flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network inet tcp,
+  network inet udp,
+  network inet6 tcp,
+  network inet6 udp,
+
+  # The add-on binary (static Go) and the two Connect binaries it runs
+  # (Go, linked against glibc, so they need the loader and libc below).
+  /onepassword-secrets rix,
+  /usr/local/bin/connect-api rix,
+  /usr/local/bin/connect-sync rix,
+  /{,usr/}lib{,64}/** mr,
+  /etc/ld.so.cache r,
+
+  # Name resolution and the TLS trust store: connect-sync talks to
+  # 1Password over HTTPS.
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/host.conf r,
+  /etc/gai.conf r,
+  /etc/services r,
+  /etc/ssl/certs{,/**} r,
+  /usr/share/ca-certificates{,/**} r,
+  /etc/ssl/openssl.cnf r,
+
+  # Go runtime startup for all three processes.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/sys/kernel/hostname r,
+  /sys/fs/cgroup/** r,
+  /sys/kernel/mm/transparent_hugepage/hpage_pmd_size r,
+
+  # /data holds the options, the Connect credentials file and Connect's
+  # encrypted local copy of the vaults (/data/connect), and this add-on's
+  # own state. /homeassistant is walked for !secret uses and holds the
+  # secrets files this add-on writes.
+  # k: Connect keeps its copy of the vaults in SQLite, which locks it.
+  /data{,/**} rwk,
+  /homeassistant{,/**} rw,
+  /tmp{,/**} rwk,
+
+  # Nothing here needs Home Assistant's internal storage.
+  deny /homeassistant/.storage{,/**} rw,
+  deny /homeassistant/.cloud{,/**} rw,
+}
