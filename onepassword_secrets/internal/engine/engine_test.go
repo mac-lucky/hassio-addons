@@ -808,3 +808,15 @@ func TestFirstSyncIsKicked(t *testing.T) {
 		t.Fatalf("Connect was never asked with the token: %s %q", st.State, st.Headline)
 	}
 }
+
+func TestStartDismissesAnEarlierErrorNotice(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	h.sync()
+	h.ha.mu.Lock()
+	calls := strings.Join(h.ha.calls, "\n")
+	h.ha.mu.Unlock()
+	if n := strings.Count(calls, "dismiss "+notifyError); n != 1 {
+		t.Fatalf("error notice dismissed %d times on a healthy start, want 1:\n%s", n, calls)
+	}
+}

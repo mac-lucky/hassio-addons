@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.6] - 2026-10-11
+
+### Fixed
+
+- An error notification raised before the add-on restarted stayed in Home
+  Assistant after the problem was gone. The first sync that ends healthy
+  now dismisses it.
+
 ## [0.1.5] - 2026-10-11
 
 ### Changed

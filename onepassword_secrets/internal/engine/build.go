@@ -443,6 +443,11 @@ func (e *Engine) publish(ctx context.Context, s Status) {
 			e.record(state.KindInfo, "Recovered", "", nil)
 		}
 		e.lastErr = errText
+		e.errNoticeChecked = true
+	}
+	if !e.errNoticeChecked && (s.State == StateHealthy || s.State == StateAttention) {
+		_ = e.ha.Dismiss(ctx, notifyError)
+		e.errNoticeChecked = true
 	}
 	if s.Token.Known && s.Token.DaysLeft <= tokenWarnDays && !e.tokenNotified {
 		e.tokenNotified = true

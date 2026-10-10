@@ -121,7 +121,11 @@ type Engine struct {
 	addons      []ha.Addon
 	addonRefsAt time.Time
 	lastErr     string
-	lastDryRun  string
+	// errNoticeChecked is set once a cycle has decided whether an error
+	// notification should stand: one raised before a restart is otherwise
+	// never dismissed, since lastErr starts empty.
+	errNoticeChecked bool
+	lastDryRun       string
 	// addonsLoaded is set once other add-ons' options were read: until
 	// then nothing is known about who uses a key from add-on options, so
 	// no previously written key may be removed.
