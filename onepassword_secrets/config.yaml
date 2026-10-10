@@ -3,7 +3,7 @@ description: "Keeps Home Assistant's secrets files in sync with 1Password throug
 slug: onepassword_secrets
 url: https://github.com/mac-lucky/hassio-addons/tree/main/onepassword_secrets
 # Keep in sync with Dockerfile's ARG BUILD_VERSION default.
-version: "0.1.4"
+version: "0.1.5"
 arch:
   - aarch64
   - amd64

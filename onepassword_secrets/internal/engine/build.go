@@ -260,11 +260,23 @@ func (e *Engine) rowProblems(s *Status, row SecretRow, root string) {
 	}
 	switch row.State {
 	case RowMissing:
+		// An ESPHome device keeps running on what it was flashed with; a
+		// missing key only stops its next install, so it is a warning.
+		sev := "warning"
+		for _, u := range row.UsedBy {
+			if u.Kind != "esphome" {
+				sev = "error"
+			}
+		}
+		fix := fmt.Sprintf("Add a field labelled %s to an item in the %s vault.", row.Key, vault)
+		if !discover.KeyPattern.MatchString(row.Key) {
+			fix = fmt.Sprintf("1Password field labels here are lowercase letters, digits and underscores: rename %s where it is used, then add a field with the new name to an item in the %s vault.", row.Key, vault)
+		}
 		s.Problems = append(s.Problems, Problem{
-			Severity: "error", Key: row.Key,
+			Severity: sev, Key: row.Key,
 			Title:  row.Key + " is missing",
 			Detail: "Used by " + where + ", but it is in neither 1Password nor " + root + ".",
-			Fix:    fmt.Sprintf("Add a field labelled %s to an item in the %s vault.", row.Key, vault),
+			Fix:    fix,
 		})
 	case RowUnmanaged:
 		if len(row.UsedBy) > 0 {

@@ -590,6 +590,21 @@ func TestConflictKeepsLastGoodAndMissingIsReported(t *testing.T) {
 		t.Fatalf("problems = %v state %s", titles, st.State)
 	}
 	h.assertNoLeak()
+
+	// A key only an ESPHome device uses is a warning; one whose name
+	// cannot be a 1Password label says to rename it.
+	h2 := newHarness(t, nil)
+	write(t, h2.root, "esphome/iot.yaml", "wifi:\n  ssid: !secret wifi_ssid_IOT\n")
+	st = h2.sync()
+	var p Problem
+	for _, q := range st.Problems {
+		if q.Key == "wifi_ssid_IOT" {
+			p = q
+		}
+	}
+	if p.Severity != "warning" || !strings.Contains(p.Fix, "rename wifi_ssid_IOT") || st.State != StateAttention {
+		t.Fatalf("esphome-only missing key = %+v, state %s", p, st.State)
+	}
 }
 
 func TestRefusesSymlinkOutsideRoot(t *testing.T) {
