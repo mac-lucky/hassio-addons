@@ -83,6 +83,13 @@ var skipDirs = map[string]bool{
 	"image":             true,
 }
 
+// skipPaths are config-relative directories never descended into:
+// esphome/archive is where the ESPHome dashboard moves the configuration
+// of a deleted device, which nothing compiles any more.
+var skipPaths = map[string]bool{
+	"esphome/archive": true,
+}
+
 var (
 	stringRefRe = regexp.MustCompile(`^!(secret|[A-Za-z0-9_.-]+\.ya?ml)\s+(\S+)\s*$`)
 	lineTagRe   = regexp.MustCompile(`!secret\s+([A-Za-z0-9_.-]+)`)
@@ -129,7 +136,7 @@ func walk(o Options) ([]fileInfo, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if p != o.Root && (strings.HasPrefix(d.Name(), ".") || skipDirs[d.Name()]) {
+			if p != o.Root && (strings.HasPrefix(d.Name(), ".") || skipDirs[d.Name()] || skipPaths[rel]) {
 				return filepath.SkipDir
 			}
 			return nil

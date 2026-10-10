@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.3] - 2026-10-11
+
+### Fixed
+
+- Every start raised a "Connect is not answering" error and notification
+  for a minute, because the first check ran before Connect was listening.
+  For a minute after a Connect process starts, the add-on now shows
+  "Starting Connect" and checks again every 10 seconds.
+- Configurations of devices archived in the ESPHome dashboard
+  (`esphome/archive`) were scanned, so their old `!secret` uses showed up as
+  missing keys.
+
 ## [0.1.2] - 2026-10-11
 
 ### Fixed

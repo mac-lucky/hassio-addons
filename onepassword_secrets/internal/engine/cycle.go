@@ -71,6 +71,17 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 			e.fail(ctx, next, connectStoppingHeadline, err, connectStoppingFix)
 			return
 		}
+		if e.connectJustStarted() {
+			// The API listens only once connect-sync has created its
+			// database: a second or so after every start.
+			next.State = StateStarting
+			next.Headline = "Starting Connect"
+			next.Detail = "The built-in Connect server is starting."
+			e.keepLastView(&next)
+			next.Setup = setupSteps(opts, next, nil)
+			e.publish(ctx, next)
+			return
+		}
 		e.fail(ctx, next, "Connect is not answering", err, "The embedded server may still be starting; its log lines are in the add-on log.")
 		return
 	}
@@ -188,6 +199,25 @@ func (e *Engine) connectCrashLooping() bool {
 	return false
 }
 
+// connectStartGrace is how long after a Connect process (re)starts an
+// unanswered health check counts as starting, not as an error.
+const connectStartGrace = time.Minute
+
+// connectJustStarted reports an embedded Connect process started within
+// connectStartGrace.
+func (e *Engine) connectJustStarted() bool {
+	if e.procs == nil {
+		return false
+	}
+	now := e.cfg.Now()
+	for _, p := range e.procs.Status() {
+		if !p.StartedAt.IsZero() && now.Sub(p.StartedAt) < connectStartGrace {
+			return true
+		}
+	}
+	return false
+}
+
 // baseStatus is the part of Status that does not depend on a cycle.
 func (e *Engine) baseStatus() Status {
 	now := e.cfg.Now()
@@ -219,16 +249,20 @@ func (e *Engine) fail(ctx context.Context, next Status, headline string, err err
 	if fix != "" {
 		next.Problems = append(next.Problems, Problem{Severity: "error", Title: headline, Detail: err.Error(), Fix: fix})
 	}
-	// Keep the last good view of the keys so the page does not go blank
-	// while Connect restarts.
+	e.keepLastView(&next)
+	next.Setup = setupSteps(e.cfg.Options, next, nil)
+	e.publish(ctx, next)
+}
+
+// keepLastView carries the last good view of the keys into next, so the
+// page does not go blank while Connect restarts.
+func (e *Engine) keepLastView(next *Status) {
 	e.mu.Lock()
 	next.Secrets = e.status.Secrets
 	next.Files = e.status.Files
 	next.Vaults = e.status.Vaults
 	next.Counts = e.status.Counts
 	e.mu.Unlock()
-	next.Setup = setupSteps(e.cfg.Options, next, nil)
-	e.publish(ctx, next)
 }
 
 // fetch reads the vaults the options name (and the ones references point

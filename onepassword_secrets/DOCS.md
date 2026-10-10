@@ -240,7 +240,8 @@ op connect token delete <old token id> --server homeassistant
 - **"Vault is not readable"**: the server or the token was not given that
   vault. Tokens cannot be widened; create a new one.
 - **A key is "missing"**: something uses `!secret key` but there is no field
-  with that label and no such key in the file.
+  with that label and no such key in the file. Archived ESPHome devices
+  (`esphome/archive`) are not scanned.
 - **Nothing reloads after a change**: the key is only used by files Home
   Assistant does not load from `configuration.yaml`; the activity list names
   the file.

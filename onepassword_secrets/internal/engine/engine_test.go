@@ -666,6 +666,31 @@ func TestConnectDownAndCrashLooping(t *testing.T) {
 	}
 }
 
+func TestConnectStartingIsNotAnError(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	managed := h.engine.Status().Counts.Managed
+	h.connect.down = true
+	h.engine.procs = fakeProcs{
+		{Name: "connect-sync", Running: true, StartedAt: time.Now().Add(-2 * time.Second)},
+		{Name: "connect-api", Running: true, StartedAt: time.Now().Add(-2 * time.Second)},
+	}
+	st := h.sync()
+	if st.State != StateStarting || st.Headline != "Starting Connect" || st.Counts.Managed != managed || managed == 0 {
+		t.Fatalf("just started = %s %q managed %d/%d", st.State, st.Headline, st.Counts.Managed, managed)
+	}
+	h.ha.mu.Lock()
+	calls := strings.Join(h.ha.calls, "\n")
+	h.ha.mu.Unlock()
+	if strings.Contains(calls, "notify "+notifyError) {
+		t.Fatalf("error notification while Connect starts:\n%s", calls)
+	}
+	h.engine.procs = fakeProcs{{Name: "connect-api", Running: true, StartedAt: time.Now().Add(-5 * time.Minute)}}
+	if st := h.sync(); st.State != StateError || st.Headline != "Connect is not answering" {
+		t.Fatalf("long down = %s %q", st.State, st.Headline)
+	}
+}
+
 func TestCheckConfigTextNeverLeaks(t *testing.T) {
 	h := newHarness(t, nil)
 	h.sync()

@@ -39,6 +39,7 @@ sensor: !include_dir_merge_list sensors
 		"sensors/a.yaml":                 "- platform: x\n  key: !secret sensor_key\n",
 		"esphome/node.yaml":              "api:\n  encryption:\n    key: !secret node_api_key\n",
 		"esphome/secrets.yaml":           "node_api_key: old\n",
+		"esphome/archive/gone.yaml":      "api:\n  encryption:\n    key: !secret archived_key\n",
 		"zigbee2mqtt/configuration.yaml": "mqtt:\n  password: '!secret mqtt_password'\nadvanced:\n  network_key: '!secret network_key_json'\n  pan_id: 1234\n  other: '!creds.yaml other'\n",
 		"broken.yaml":                    "a: [unclosed\nb: !secret from_broken # !secret commented\n",
 		".storage/core.yaml":             "x: !secret hidden_store\n",
