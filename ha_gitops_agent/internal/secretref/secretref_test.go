@@ -451,3 +451,18 @@ func TestResolveMapWalksNonStringKeyedMappings(t *testing.T) {
 		t.Error("ContainsRef must see through a map[any]any too")
 	}
 }
+
+// RefName is what lets startup tell a reference worth waiting for from a
+// typo no wait can fix.
+func TestRefNameOnlyAnswersForAWellFormedReference(t *testing.T) {
+	for in, want := range map[string]string{"secret://forge_token": "forge_token", "secret://a.b-c": "a.b-c"} {
+		if got, ok := RefName(in); !ok || got != want {
+			t.Errorf("RefName(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "literal", "secret://", "secret://has space", "SECRET://x"} {
+		if got, ok := RefName(in); ok {
+			t.Errorf("RefName(%q) = (%q, true), want false", in, got)
+		}
+	}
+}

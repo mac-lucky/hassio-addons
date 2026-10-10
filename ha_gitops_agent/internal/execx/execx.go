@@ -1,7 +1,6 @@
 // Package execx runs one external command, reports what it did, and
-// scrubs a secret back out of what it said. Shared by internal/gitsync
-// (git) and internal/sopscrypt (sops); a standard-library-only leaf, so
-// neither has to depend on the other.
+// scrubs a secret back out of what it said. Used by internal/gitsync
+// (git); a standard-library-only leaf.
 package execx
 
 import (
@@ -42,9 +41,10 @@ type CommandRunner struct{}
 
 // Run executes args[0] with args[1:] in dir with exactly env, capturing
 // both output streams. env replaces the process environment rather than
-// extending it, so no inherited age key can reach an encrypt call.
+// extending it, so nothing inherited reaches the child unless the caller
+// passes it on.
 func (CommandRunner) Run(ctx context.Context, dir string, env []string, args ...string) (RunResult, error) {
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204 -- argv is built by the calling package from fixed git/sops subcommands plus repo config and paths, never unsanitized input. Covers internal/gitsync and internal/sopscrypt; a new caller must re-justify it.
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...) // #nosec G204 -- argv is built by the calling package from fixed git subcommands plus repo config and paths, never unsanitized input. Covers internal/gitsync; a new caller must re-justify it.
 	cmd.Dir = dir
 	cmd.Env = env
 	// CommandContext's default cancel kills only the direct child; a timed
@@ -88,14 +88,14 @@ func (CommandRunner) Run(ctx context.Context, dir string, env []string, args ...
 }
 
 // maxOutputBytes bounds each captured stream. Any blob a caller needs in
-// full (git show, a sops decrypt) fits comfortably; an unbounded stream
+// full (git show) fits comfortably; an unbounded stream
 // would grow the add-on into its memory limit and be OOM-killed mid-apply
 // instead of failing the one call.
 const maxOutputBytes = 64 << 20
 
 // cappedBuffer is a bytes.Buffer that refuses to grow past limit. Refusal,
 // not truncation: the callers use stdout as file CONTENT, and a silently
-// truncated decrypt or git show must never be written anywhere.
+// truncated git show must never be written anywhere.
 type cappedBuffer struct {
 	buf   bytes.Buffer
 	limit int

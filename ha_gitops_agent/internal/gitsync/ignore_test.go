@@ -48,7 +48,7 @@ func TestExcludedCoversMachineWrittenArtifacts(t *testing.T) {
 		{"known_devices.yaml", true},
 		{"known_devices.yaml.bak", true},
 		// ESPHome build cache and Device Builder state. The peer link key is
-		// binary key material, which values-only encryption cannot cover.
+		// binary key material.
 		{"esphome/.esphome/build/x.o", true},
 		{"esphome/.device-builder-peer-link-key.bin", true},
 		{"esphome/.device-builder.json", true},
@@ -142,8 +142,8 @@ func TestImportSeedsGitignoreOnFirstImport(t *testing.T) {
 	}
 }
 
-// The seed is a starting point the user edits. Unlike ensureSopsConfig,
-// regenerating it would re-ignore what they un-ignored on purpose.
+// The seed is a starting point the user edits: regenerating it would
+// re-ignore what they un-ignored on purpose.
 func TestEnsureGitignoreNeverOverwrites(t *testing.T) {
 	tmp := t.TempDir()
 	bare, work := makeRemote(t, tmp, "repo")
@@ -411,5 +411,17 @@ func TestPreviewIgnoredLeavesTheWorktreeAlone(t *testing.T) {
 	}
 	if string(got) != "*.repo-rule\n" {
 		t.Errorf("worktree %s = %q, want the repository's copy untouched", GitignoreFile, string(got))
+	}
+}
+
+// writeLiveText writes content at rel under root, parents included.
+func writeLiveText(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+		t.Fatalf("MkdirAll %s: %v", full, err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile %s: %v", full, err)
 	}
 }

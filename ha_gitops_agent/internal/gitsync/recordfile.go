@@ -37,11 +37,9 @@ const recordBranch = "gitops/record"
 //
 // relPath is NOT checked against Excluded, unlike stageDrift/stageImport:
 // this file only ever exists repository-side, and being excluded is the
-// point of it, exactly as for the managed .sops.yaml. A secret-shaped one
-// is refused unconditionally - the strict matchesSecretPattern, since there
-// is no encryption story for a file the agent renders itself - and a
+// point of it. A secret-shaped one is refused unconditionally, and a
 // gitignored one fails loudly rather than recording nothing. The content is
-// written verbatim, never through the encryption path.
+// written verbatim; the agent renders it itself and puts no secret in it.
 //
 // The tip is fetched inside this call and the push carries no --force, no
 // --force-with-lease and no "+" prefix, so git's own fast-forward check is

@@ -26,10 +26,10 @@ func guardChangePath(cfg Config, path, configRootReal string) error {
 // guardPathContained errors if path is absolute, empty, the root itself,
 // contains ".." after normalization, or resolves (via fsx.Realpath,
 // catching symlink tricks too) outside configRootReal. No exclusion
-// check: RollbackFrom uses this alone, because a stash manifest records
-// what the apply actually touched, and an exclusion pattern that changed
-// since then (age_key cleared, an older binary's pattern set) must not
-// strand the restore of a file the apply provably wrote.
+// check: RollbackFrom uses this, because a stash manifest records what the
+// apply actually touched, and an older binary's pattern set must not strand
+// the restore of a file the apply provably wrote. RollbackFrom skips only
+// what something else now owns outright (see rollbackSkips).
 func guardPathContained(path, configRootReal string) error {
 	if filepath.IsAbs(path) {
 		return fmt.Errorf("refusing to touch absolute path: %s", path)
@@ -58,19 +58,6 @@ func guardPathContained(path, configRootReal string) error {
 // counterpart of internal/differ.isRegularFile), and a symlinked dst would
 // have os.WriteFile follow it and overwrite whatever it points at.
 func copyFile(src, dst string) error {
-	return copyFileTransformed(src, dst, "", nil)
-}
-
-// copyFileTransformed is copyFile with an optional content transform on
-// what it read from src - decryption, in practice (see
-// Config.TransformRepoFile). rel is the repository-relative path the
-// transform needs to know how much of the file was encrypted.
-//
-// Only writeChanges' repository -> config direction passes one: stashing
-// and rollback must stay byte-identical copies, or a rollback would restore
-// something the user never had. The transform runs between the Lstat guards
-// and the write, so a failure leaves dst untouched.
-func copyFileTransformed(src, dst, rel string, transform TransformRepoFileFunc) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -85,12 +72,6 @@ func copyFileTransformed(src, dst, rel string, transform TransformRepoFileFunc) 
 	data, err := os.ReadFile(src) // #nosec G304 -- src is a change path resolved under a guarded root, and just Lstat-confirmed regular above
 	if err != nil {
 		return err
-	}
-	if transform != nil {
-		data, err = transform(rel, data)
-		if err != nil {
-			return err
-		}
 	}
 	// The Random variant, not WriteFileAtomic: dst sits in live config,
 	// where a fixed "<name>.tmp" can be a real, unmanaged user file. The

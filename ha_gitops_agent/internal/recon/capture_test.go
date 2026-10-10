@@ -914,3 +914,127 @@ func TestYAMLFilesOffKeepsTheConflictRecord(t *testing.T) {
 		t.Errorf("logged %d conflict-cleared event(s), want none", n)
 	}
 }
+
+// A file capture holds back for a literal secret stays out of the apply -
+// the live edit is still the one to keep - keeps the cycle in drift, shows
+// on the dashboard by key path, and is logged once per set rather than
+// every cycle.
+func TestAHeldBackCaptureStaysOutOfTheApplyAndIsReportedOnce(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "tip1"
+	fakes.applier.state = applier.State{Manifest: []string{"a.yaml", "esphome/node.yaml"}, LastGoodSHA: "base1"}
+	fakes.differ.changes = []differ.Change{{Path: "a.yaml", Kind: "update"}, {Path: "esphome/node.yaml", Kind: "update"}}
+	fakes.git.captureResult = gitsync.CaptureResult{
+		CommitSHA: "capture1", BaseSHA: "tip1", Paths: []string{"a.yaml"},
+		HeldBack: []gitsync.HeldBack{{Path: "esphome/node.yaml", Keys: []string{"wifi.password"}}},
+	}
+
+	r := fakes.reconciler(captureOpts())
+	r.runCycle(context.Background())
+
+	if got := appliedPaths(fakes.applier); len(got) != 0 {
+		t.Errorf("applied = %v, want nothing: a held-back live edit must not be overwritten", got)
+	}
+	status := r.Status()
+	if want := []string{"esphome/node.yaml (wifi.password)"}; !slices.Equal(status.HeldBack, want) {
+		t.Errorf("held_back = %v, want %v", status.HeldBack, want)
+	}
+	if status.State != StateDriftPending {
+		t.Errorf("state = %q, want drift_pending while a file is held back", status.State)
+	}
+	if status.CaptureFailing {
+		t.Error("capture_failing raised for a hold-back, which is not a push failure")
+	}
+	const event = "hold a literal value under a secret-shaped key: esphome/node.yaml (wifi.password)"
+	if !hasEventContaining(status.Events, event) {
+		t.Errorf("no held-back event in %+v", status.Events)
+	}
+
+	r.runCycle(context.Background())
+	if n := countEventsContaining(r.Status().Events, event); n != 1 {
+		t.Errorf("held-back event logged %d times over two identical cycles, want once", n)
+	}
+
+	// Fixed live (no more drift): the card clears.
+	fakes.differ.changes = nil
+	r.runCycle(context.Background())
+	if got := r.Status().HeldBack; len(got) != 0 {
+		t.Errorf("held_back = %v after the drift went away, want empty", got)
+	}
+}
+
+// A conflict whose live copy holds a literal secret is not parked; the
+// verdict stands and the feed says why no copy exists.
+func TestAConflictCopyWithASecretIsNotParked(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "tip1"
+	fakes.applier.state = applier.State{Manifest: []string{"a.yaml"}, LastGoodSHA: "base1"}
+	fakes.differ.changes = []differ.Change{{Path: "a.yaml", Kind: "update"}}
+	fakes.git.changedBetween = []string{"a.yaml"}
+	fakes.git.parkBranch = ""
+	fakes.git.parkHeldBack = []gitsync.HeldBack{{Path: "a.yaml", Keys: []string{"token"}}}
+
+	r := fakes.reconciler(captureOpts())
+	r.runCycle(context.Background())
+
+	status := r.Status()
+	if !slices.Equal(status.Conflicts, []string{"a.yaml"}) {
+		t.Fatalf("conflicts = %v, want [a.yaml]", status.Conflicts)
+	}
+	if !hasEventContaining(status.Events, "no copy pushed of a.yaml (token)") {
+		t.Errorf("events = %+v, want the missing copy explained", status.Events)
+	}
+}
+
+// The 0.9.0 cutover. 0.8.x committed SOPS ciphertext and applied what it
+// decrypted, so every such base differs from live whoever moved. The
+// commit that swaps those values for !secret references moves the
+// repository too, and read three ways that is a conflict nobody could
+// ever clear. A SOPS base is no base: the repository wins, as before
+// capture existed, nothing is captured and nothing is parked - for an
+// edit and for a file the commit removes alike.
+func TestASOPSBaseIsNoBaseSoTheCutoverCommitApplies(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.git.sha = "tip1"
+	fakes.applier.state = applier.State{
+		Manifest:    []string{"zigbee2mqtt/configuration.yaml", "includes/HAandGHome.json", "automations.yaml"},
+		LastGoodSHA: "base1",
+	}
+	fakes.differ.changes = []differ.Change{
+		{Path: "automations.yaml", Kind: "update"},
+		{Path: "zigbee2mqtt/configuration.yaml", Kind: "update"},
+		{Path: "includes/HAandGHome.json", Kind: "delete"},
+	}
+	// Both repository files moved since the base, and neither live copy
+	// matches it - the bytes would say "both moved" for each.
+	fakes.git.changedBetween = []string{"zigbee2mqtt/configuration.yaml", "includes/HAandGHome.json"}
+	fakes.git.liveFacts = map[string]gitsync.LiveFacts{
+		"zigbee2mqtt/configuration.yaml": {BaseTracks: true, MatchesBase: false, BaseIsSops: true},
+		"includes/HAandGHome.json":       {BaseTracks: true, MatchesBase: false, BaseIsSops: true},
+		// An ordinary live edit next to them is still captured.
+		"automations.yaml": {BaseTracks: true, MatchesBase: false},
+	}
+
+	r := fakes.reconciler(captureOpts())
+	r.runCycle(context.Background())
+
+	if got := capturedPaths(fakes.git); !slices.Equal(got, []string{"automations.yaml"}) {
+		t.Errorf("captured = %v, want only automations.yaml", got)
+	}
+	if len(fakes.git.parkCalls) != 0 {
+		t.Errorf("ParkConflicts called %d time(s), want none", len(fakes.git.parkCalls))
+	}
+	if got := r.Status().Conflicts; len(got) != 0 {
+		t.Errorf("conflicts = %v, want none", got)
+	}
+	var applied []string
+	for _, call := range fakes.applier.applyCalls {
+		for _, c := range call {
+			applied = append(applied, c.Kind+" "+c.Path)
+		}
+	}
+	want := []string{"update zigbee2mqtt/configuration.yaml", "delete includes/HAandGHome.json"}
+	if !slices.Equal(applied, want) {
+		t.Errorf("applied = %v, want %v", applied, want)
+	}
+}

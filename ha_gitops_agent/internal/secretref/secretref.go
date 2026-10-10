@@ -1,8 +1,9 @@
 // Package secretref resolves "secret://<name>" references declared in a
-// gitops manifest against the LIVE Home Assistant secrets file, so a
-// credential never has to be written into the repository: the manifest
-// carries the reference, secrets.yaml on the box carries the value (the
-// repository's own copy stays SOPS-encrypted, see internal/sopscrypt).
+// gitops manifest or an add-on option against the LIVE Home Assistant
+// secrets file, so a credential never has to be written into the
+// repository: the manifest carries the reference, secrets.yaml on the box
+// carries the value. secrets.yaml itself is never synced; whatever renders
+// it (the 1Password Secrets add-on, typically) owns it.
 //
 // Three layers use it - internal/flows, internal/subentries and
 // internal/addonopts - each resolving at PLAN time on a COPY of the
@@ -58,6 +59,15 @@ func isRef(s string) bool {
 		}
 	}
 	return true
+}
+
+// RefName returns the secrets.yaml key s names when s is a well-formed
+// reference, and false for anything else, a malformed reference included.
+func RefName(s string) (string, bool) {
+	if !isRef(s) {
+		return "", false
+	}
+	return s[len(Scheme):], true
 }
 
 // hasScheme reports whether s is WRITTEN as a reference, well-formed or
@@ -159,7 +169,7 @@ type Resolver struct {
 }
 
 // NewResolver returns a Resolver reading <configRoot>/secrets.yaml - the
-// LIVE file, never the repository's encrypted copy.
+// LIVE file.
 //
 // Symlinks are followed deliberately, unlike internal/differ and
 // internal/applier: their escape guard exists because those paths come

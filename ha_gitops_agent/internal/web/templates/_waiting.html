@@ -1,0 +1,21 @@
+{{/* Startup waiting on a secret:// option (recon.Status.WaitingForSecret).
+     No reconciler exists yet; the dashboard replaces this on its own. */}}
+<section class="card firstrun">
+  <div class="firstrun-icon">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"></circle>
+      <polyline points="12 7 12 12 15 14"></polyline>
+    </svg>
+  </div>
+  <h1>GitOps Agent</h1>
+  <p class="firstrun-sub">Waiting for secrets.yaml. An option in the
+  Configuration tab holds a <code>secret://</code> reference that the live
+  <code>/homeassistant/secrets.yaml</code> cannot answer yet, so the agent
+  has not started syncing.</p>
+  <pre class="warning-text" tabindex="0">{{printable .Status.WaitingForSecret}}</pre>
+  <p class="firstrun-note">It checks again every few seconds and starts on
+  its own once the key is there - on a fresh install, usually right after
+  the add-on that renders secrets.yaml (such as 1Password Secrets) has run.
+  If that will not happen, add the key to secrets.yaml or put the value in
+  the option itself.</p>
+</section>

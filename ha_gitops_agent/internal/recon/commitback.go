@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/differ"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 )
 
 // errBusy is the single "another operation is already running" refusal
@@ -69,6 +71,14 @@ func (r *Reconciler) CommitDriftBack(ctx context.Context) (string, error) {
 // the activity feed - it never sets lastError or flips state to
 // StateError, like internal/snapshot's best-effort backups.
 func (r *Reconciler) commitDriftBack(ctx context.Context, changes []differ.Change) (string, error) {
+	return r.commitDriftBackAs(ctx, changes, false)
+}
+
+// commitDriftBackAs is commitDriftBack, told whether the automatic policy
+// is asking: a drift set whose every file is held back fails the same way
+// on every cycle until someone edits one, so the automatic half reports
+// each such set once, while a button press always gets its answer.
+func (r *Reconciler) commitDriftBackAs(ctx context.Context, changes []differ.Change, auto bool) (string, error) {
 	// Both refusals log: only the manual button can reach them, and a
 	// button press that logs nothing looks like one that worked.
 	if len(changes) == 0 {
@@ -83,11 +93,26 @@ func (r *Reconciler) commitDriftBack(ctx context.Context, changes []differ.Chang
 		return "", errNoFetchedTip
 	}
 
-	branch, err := r.git.CommitBack(ctx, driftFiles(changes), ConfigRoot, lastSHA, time.Now())
+	branch, heldBack, err := r.git.CommitBack(ctx, driftFiles(changes), ConfigRoot, lastSHA, time.Now())
+	if errors.Is(err, gitsync.ErrAllHeldBack) {
+		// Not persisted as done (LastDriftBackHash): the hash covers paths,
+		// not content, so the edit that replaces the value with a reference
+		// would never be pushed. Retried every cycle instead, quietly.
+		summary := gitsync.HeldBackSummary(heldBack)
+		if auto && summary == r.autoCommitBackHeld {
+			return "", err
+		}
+		if auto {
+			r.autoCommitBackHeld = summary
+		}
+		r.logWarn("commit-back skipped: " + err.Error())
+		return "", err
+	}
 	if err != nil {
 		r.logError("commit-back failed: " + err.Error())
 		return "", err
 	}
+	r.autoCommitBackHeld = ""
 
 	state := r.applier.StateLoad()
 	state.LastDriftBranch = branch
@@ -98,6 +123,10 @@ func (r *Reconciler) commitDriftBack(ctx context.Context, changes []differ.Chang
 
 	r.withMu(func() { r.lastDriftBranch = branch })
 	r.logEvent("committed drift back to branch " + branch)
+	if len(heldBack) > 0 {
+		r.logWarn(fmt.Sprintf("commit-back left out %d file(s) holding a literal value under a secret-shaped key: %s - %s",
+			len(heldBack), gitsync.HeldBackSummary(heldBack), gitsync.HeldBackAdvice))
+	}
 	r.pushStatus()
 	return branch, nil
 }
@@ -111,5 +140,5 @@ func (r *Reconciler) maybeAutoCommitDriftBack(ctx context.Context, changes []dif
 	if driftSetHash(changes) == state.LastDriftBackHash {
 		return
 	}
-	_, _ = r.commitDriftBack(ctx, changes)
+	_, _ = r.commitDriftBackAs(ctx, changes, true)
 }

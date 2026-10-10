@@ -12,9 +12,11 @@ to the tracked branch (`capture_live_changes`) or to a review branch
 (`allow_import`), and be triggered on demand over a secret-gated
 webhook, instead of only ever polling on an interval.
 
-With an age key configured (`age_key`), secret values are encrypted with
-SOPS before they reach git and decrypted again on apply, so `secrets.yaml`
-can live in the repository without living there in the clear.
+Secrets never pass through git. `secrets.yaml` (and Zigbee2MQTT's
+`secret.yaml`) is never synced in either direction; render it on the box
+with the 1Password Secrets app or another tool, and reference its keys
+with `!secret`. A file holding a password, token or key written out in
+full is held back rather than pushed.
 
 ## Install
 

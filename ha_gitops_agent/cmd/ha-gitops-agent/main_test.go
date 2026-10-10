@@ -2,72 +2,135 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/recon"
 )
 
-// configureEncryption is the one place the encryption switch and the
-// Crypter are set together; these cases pin that "switch on, no Crypter"
-// stays unreachable. Each restores the switch, which is process-global.
+// --- awaitSecretRefs ------------------------------------------------------
 
-func TestConfigureEncryptionWithoutAKeyLeavesTheSwitchOff(t *testing.T) {
-	t.Cleanup(func() { gitsync.SetEncryptionEnabled(false) })
+// secretsDir points awaitSecretRefs at a temp config root and shrinks its
+// timings for one test.
+func secretsDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	prevRoot, prevRetry, prevLog := secretsRoot, secretRetryInterval, secretLogInterval
+	secretsRoot, secretRetryInterval, secretLogInterval = dir, 5*time.Millisecond, time.Hour
+	t.Cleanup(func() { secretsRoot, secretRetryInterval, secretLogInterval = prevRoot, prevRetry, prevLog })
+	return dir
+}
 
-	for _, key := range []string{"", "   ", "\n"} {
-		crypter, err := configureEncryption(key)
-		if err != nil {
-			t.Fatalf("configureEncryption(%q) = %v, want no error", key, err)
-		}
-		if crypter.Enabled() {
-			t.Errorf("configureEncryption(%q) returned an enabled Crypter, want none", key)
-		}
-		if gitsync.EncryptionEnabled() {
-			t.Errorf("configureEncryption(%q) turned the encryption switch on", key)
-		}
+func writeSecrets(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "secrets.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestConfigureEncryptionRejectsAMalformedKeyWithoutFlippingTheSwitch(t *testing.T) {
-	t.Cleanup(func() { gitsync.SetEncryptionEnabled(false) })
+// On a fresh box secrets.yaml may not exist yet: the agent waits, says
+// what for (the key and the option, never a value), and starts once the
+// file answers.
+func TestAwaitSecretRefsWaitsForTheKeyToAppear(t *testing.T) {
+	dir := secretsDir(t)
+	logged := captureLogs(t)
 
-	crypter, err := configureEncryption("not-an-age-key")
-	if err == nil {
-		t.Fatal("configureEncryption() = nil error, want a refusal for a malformed key")
+	reasons := make(chan string, 100)
+	done := make(chan options.Options, 1)
+	errs := make(chan error, 1)
+	go func() {
+		opts, err := awaitSecretRefs(context.Background(),
+			options.Options{GitToken: "secret://forge_token", WebhookSecret: "literal-hook-secret-value"},
+			nil, func(r string) {
+				select {
+				case reasons <- r:
+				default: // never block the loop on a slow reader
+				}
+			})
+		errs <- err
+		done <- opts
+	}()
+
+	first := <-reasons
+	if !strings.Contains(first, "forge_token") || !strings.Contains(first, "git_token") {
+		t.Errorf("waiting reason = %q, want the key and the option named", first)
 	}
-	if crypter.Enabled() {
-		t.Error("configureEncryption() returned an enabled Crypter for a malformed key")
+	// The file appears without the key: still waiting.
+	writeSecrets(t, dir, "other: x\n")
+	for r := range reasons {
+		if strings.Contains(r, "has no key") {
+			break
+		}
 	}
-	// The dangerous outcome: the switch on lets secrets.yaml into the
-	// repository with no key to protect it.
-	if gitsync.EncryptionEnabled() {
-		t.Error("a malformed key still turned the encryption switch on")
+	writeSecrets(t, dir, "forge_token: tok-RESOLVED-VALUE\n")
+
+	if err := <-errs; err != nil {
+		t.Fatalf("awaitSecretRefs: %v", err)
+	}
+	opts := <-done
+	if opts.GitToken != "tok-RESOLVED-VALUE" || opts.WebhookSecret != "literal-hook-secret-value" {
+		t.Errorf("opts = %+v, want the reference resolved and the literal kept", opts)
+	}
+	if out := logged(); strings.Contains(out, "tok-RESOLVED-VALUE") {
+		t.Errorf("the log carries the resolved value: %s", out)
+	}
+	if out := logged(); strings.Count(out, "waiting for secrets.yaml key") != 1 {
+		t.Errorf("logged the wait %d times, want once per secretLogInterval:\n%s", strings.Count(out, "waiting for secrets.yaml key"), out)
 	}
 }
 
-// testAgeIdentity is an age key used only by this test file.
-const testAgeIdentity = "AGE-SECRET-KEY-1QUUCUYTP2443EWJWQKK6LCAAUGS09XXGDHLVQV82Z2Y6200NDGAQJ8SUFT"
+func TestAwaitSecretRefsWithNothingToResolveDoesNotWait(t *testing.T) {
+	secretsDir(t)
+	called := false
+	opts, err := awaitSecretRefs(context.Background(), options.Options{GitToken: "literal"}, nil, func(string) { called = true })
+	if err != nil || opts.GitToken != "literal" {
+		t.Errorf("awaitSecretRefs = (%+v, %v), want the literal back at once", opts, err)
+	}
+	if called {
+		t.Error("reported a wait with nothing to wait for")
+	}
+}
 
-func TestConfigureEncryptionEnablesBothTogether(t *testing.T) {
-	if _, err := exec.LookPath("sops"); err != nil {
-		t.Skip("sops is not installed; configureEncryption probes the real binary")
+// No wait fixes a typo, so a malformed reference stays fatal.
+func TestAwaitSecretRefsMalformedReferenceIsFatal(t *testing.T) {
+	secretsDir(t)
+	_, err := awaitSecretRefs(context.Background(), options.Options{WebhookSecret: "secret://"}, nil, func(string) {})
+	if err == nil || errors.Is(err, context.Canceled) {
+		t.Fatalf("awaitSecretRefs() error = %v, want a refusal", err)
 	}
-	t.Cleanup(func() { gitsync.SetEncryptionEnabled(false) })
+}
 
-	crypter, err := configureEncryption(testAgeIdentity)
-	if err != nil {
-		t.Fatalf("configureEncryption: %v", err)
+func TestAwaitSecretRefsStopsOnShutdownAndOnAServerFailure(t *testing.T) {
+	secretsDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := awaitSecretRefs(ctx, options.Options{GitToken: "secret://x"}, nil, func(string) {}); !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
 	}
-	if !crypter.Enabled() {
-		t.Error("configureEncryption() returned a disabled Crypter for a valid key")
+
+	abort := make(chan error, 1)
+	abort <- errors.New("address already in use")
+	_, err := awaitSecretRefs(context.Background(), options.Options{GitToken: "secret://x"}, abort, func(string) {})
+	if !errors.Is(err, errServeStopped) {
+		t.Errorf("error = %v, want errServeStopped", err)
 	}
-	// The switch must go on only after the probe proves sops runs.
-	if !gitsync.EncryptionEnabled() {
-		t.Error("a valid key left the encryption switch off")
+}
+
+func TestWaitingStatusShowsTheReason(t *testing.T) {
+	opts := options.Options{RepoURL: "https://x.invalid/r.git", Branch: "main"}
+	if got := waitingStatus(opts, nil); got.WaitingForSecret == "" || got.State != recon.StateWaiting {
+		t.Errorf("waitingStatus(nil) = %+v, want a placeholder reason and the waiting state", got)
+	}
+	reason := "waiting for secrets.yaml key 'k' (git_token): no file"
+	if got := waitingStatus(opts, &reason); got.WaitingForSecret != reason || got.Branch != "main" {
+		t.Errorf("waitingStatus = %+v", got)
 	}
 }
 

@@ -87,9 +87,10 @@ type fakeGit struct {
 	checkoutCalls     []string
 	guardSecretsCalls [][]string
 
-	commitBackBranch string
-	commitBackErr    error
-	commitBackCalls  []commitBackCall
+	commitBackBranch   string
+	commitBackErr      error
+	commitBackHeldBack []gitsync.HeldBack
+	commitBackCalls    []commitBackCall
 
 	importResult  gitsync.ImportResult
 	importErr     error
@@ -112,9 +113,10 @@ type fakeGit struct {
 	captureErr    error
 	captureCalls  []captureCall
 
-	parkBranch string
-	parkErr    error
-	parkCalls  []captureCall
+	parkBranch   string
+	parkErr      error
+	parkHeldBack []gitsync.HeldBack
+	parkCalls    []captureCall
 
 	// commitReachable answers CommitReachable per sha; nil means every
 	// non-empty sha resolves, which is what a repository nobody rewrote
@@ -217,16 +219,16 @@ func (f *fakeGit) GuardSecretsAt(ctx context.Context, sha string, files []string
 
 func (f *fakeGit) Workdir() string { return f.workdir }
 
-func (f *fakeGit) CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+func (f *fakeGit) CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, []gitsync.HeldBack, error) {
 	f.commitBackCalls = append(f.commitBackCalls, commitBackCall{files: files, configRoot: configRoot, baseSHA: baseSHA})
 	if f.commitBackErr != nil {
-		return "", f.commitBackErr
+		return "", f.commitBackHeldBack, f.commitBackErr
 	}
 	branch := f.commitBackBranch
 	if branch == "" {
 		branch = "gitops/drift-20260101T000000Z"
 	}
-	return branch, nil
+	return branch, f.commitBackHeldBack, nil
 }
 
 func (f *fakeGit) Import(ctx context.Context, configRoot string, limits gitsync.ImportLimits, now time.Time) (gitsync.ImportResult, error) {
@@ -310,17 +312,17 @@ func (f *fakeGit) CaptureFiles(_ context.Context, files []gitsync.DriftFile, con
 
 func (f *fakeGit) ParkConflicts(
 	_ context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, _ time.Time,
-) (string, error) {
+) (string, []gitsync.HeldBack, error) {
 	f.parkCalls = append(f.parkCalls, captureCall{
 		files: append([]gitsync.DriftFile(nil), files...), configRoot: configRoot, baseSHA: baseSHA,
 	})
 	if f.parkErr != nil {
-		return "", f.parkErr
+		return "", f.parkHeldBack, f.parkErr
 	}
 	if f.parkBranch == "" {
-		return "gitops/conflict-20260806T120000Z", nil
+		return "gitops/conflict-20260806T120000Z", f.parkHeldBack, nil
 	}
-	return f.parkBranch, nil
+	return f.parkBranch, f.parkHeldBack, nil
 }
 
 func (f *fakeGit) CommitReachable(_ context.Context, sha string) (bool, error) {
@@ -372,7 +374,6 @@ var _ Git = (*fakeGit)(nil)
 type fakeDiffer struct {
 	changes            []differ.Change
 	skippedContainment []string
-	decryptFailures    []string
 	computeCalls       int
 	panicOnCompute     bool
 	// beforeCompute runs inside the cycle, where a real diff spends most of
@@ -380,7 +381,7 @@ type fakeDiffer struct {
 	beforeCompute func()
 }
 
-func (f *fakeDiffer) Compute(repoRoot, configRoot string, tracked, prevManifest []string) ([]differ.Change, []string, []string) {
+func (f *fakeDiffer) Compute(repoRoot, configRoot string, tracked, prevManifest []string) ([]differ.Change, []string) {
 	f.computeCalls++
 	if f.beforeCompute != nil {
 		f.beforeCompute()
@@ -388,7 +389,7 @@ func (f *fakeDiffer) Compute(repoRoot, configRoot string, tracked, prevManifest 
 	if f.panicOnCompute {
 		panic("boom")
 	}
-	return f.changes, f.skippedContainment, f.decryptFailures
+	return f.changes, f.skippedContainment
 }
 
 var _ Differ = (*fakeDiffer)(nil)
@@ -1501,13 +1502,16 @@ func TestSecretsTrackedErrorSetsErrorAndSkipsCheckoutAndApply(t *testing.T) {
 	}
 }
 
-// Content the agent cannot decrypt makes every verdict about those paths
-// a guess, so the cycle errors rather than applying the half it read.
-func TestDecryptFailureFailsTheCycleWithoutApplying(t *testing.T) {
+// A tracked SOPS file is a hard stop like a tracked secrets file: nothing
+// is checked out, planned, captured or applied, and lastError carries the
+// way out. Both kinds at once are both named.
+func TestSopsTrackedErrorSetsErrorAndSkipsEverything(t *testing.T) {
 	fakes := newReconcilerFakes()
 	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
-	fakes.differ.decryptFailures = []string{"secrets.yaml: sops decrypt failed (exit 1)"}
-	r := fakes.reconciler(baseOpts())
+	fakes.git.secretsErr = &gitsync.SopsTrackedError{Files: []string{"packages/mqtt.yaml", "secrets.yaml"}}
+	opts := baseOpts()
+	opts.CaptureLiveChanges = true
+	r := fakes.reconciler(opts)
 
 	result := r.ReconcileNow(context.Background())
 
@@ -1518,11 +1522,23 @@ func TestDecryptFailureFailsTheCycleWithoutApplying(t *testing.T) {
 	if status.State != StateError {
 		t.Errorf("state = %q, want error", status.State)
 	}
-	if want := "refusing to sync: secrets.yaml: sops decrypt failed (exit 1)"; status.LastError != want {
-		t.Errorf("last_error = %q, want %q", status.LastError, want)
+	want := "refusing to sync: SOPS-encrypted files tracked in repository: packages/mqtt.yaml, secrets.yaml - this version no longer decrypts SOPS files"
+	if !strings.HasPrefix(status.LastError, want) {
+		t.Errorf("last_error = %q, want it to start %q", status.LastError, want)
 	}
-	if len(fakes.applier.applyCalls) != 0 {
-		t.Errorf("apply_calls = %v, want none", fakes.applier.applyCalls)
+	if fakes.differ.computeCalls != 0 || len(fakes.git.checkoutCalls) != 0 || len(fakes.git.captureCalls) != 0 || len(fakes.applier.applyCalls) != 0 {
+		t.Errorf("compute=%d checkout=%v capture=%v apply=%v, want nothing past the guard",
+			fakes.differ.computeCalls, fakes.git.checkoutCalls, fakes.git.captureCalls, fakes.applier.applyCalls)
+	}
+
+	fakes.git.secretsErr = errors.Join(
+		&gitsync.SecretsTrackedError{Files: []string{"esphome/secrets.yaml"}},
+		&gitsync.SopsTrackedError{Files: []string{"packages/mqtt.yaml"}},
+	)
+	r.ReconcileNow(context.Background())
+	got := r.Status().LastError
+	if !strings.Contains(got, "secrets tracked in repository: esphome/secrets.yaml") || !strings.Contains(got, "SOPS-encrypted files tracked in repository: packages/mqtt.yaml") {
+		t.Errorf("last_error = %q, want both refusals named", got)
 	}
 }
 

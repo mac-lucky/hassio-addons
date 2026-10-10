@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 )
 
 // ImportCommitMessage is the fixed commit message Import uses.
@@ -37,6 +35,9 @@ type ImportResult struct {
 	// Created reports whether this import brought opts.Branch into
 	// existence rather than advancing it.
 	Created bool
+	// HeldBack is the scanned files left out because they hold a literal
+	// value under a secret-shaped key. Not counted in Files or Bytes.
+	HeldBack []HeldBack
 }
 
 // Import copies every importable file under configRoot (see ScanLive) into
@@ -58,6 +59,10 @@ type ImportResult struct {
 // legitimately holds paths that never exist live - gitops/ manifests, a
 // README, CI workflows, .gitignore itself - and excluded paths are
 // invisible to the scan, so mirroring live would delete all of them.
+//
+// A file holding a literal value under a secret-shaped key is left out and
+// reported (ImportResult.HeldBack): the rest of the import still lands,
+// and the caller says which files are missing and why.
 //
 // A .gitignore match is silently left out, which is the supported way to
 // shape an import; seeding an empty branch copies the config's own
@@ -149,6 +154,10 @@ func (g *GitSync) Import(ctx context.Context, configRoot string, limits ImportLi
 		return ImportResult{}, err
 	}
 	if clean {
+		if len(staged.heldBack) > 0 {
+			return ImportResult{}, fmt.Errorf("gitsync: import: nothing to import: everything else already matches, and %d file(s) were held back - %s: %s",
+				len(staged.heldBack), HeldBackSummary(staged.heldBack), HeldBackAdvice)
+		}
 		return ImportResult{}, fmt.Errorf("gitsync: import: nothing to import (the repository already matches the live config, or every scanned path is gitignored)")
 	}
 
@@ -181,31 +190,31 @@ func (g *GitSync) Import(ctx context.Context, configRoot string, limits ImportLi
 		BaseSHA:   baseSHA,
 		// What was copied, not what the scan found: a live tree churns, so
 		// a file can vanish between the two.
-		Files:   staged.files,
-		Bytes:   staged.bytes,
-		Created: !remoteHasBranch,
+		Files:    staged.files,
+		Bytes:    staged.bytes,
+		Created:  !remoteHasBranch,
+		HeldBack: staged.heldBack,
 	}, nil
 }
 
 // stageImport writes the live content of every scanned path into the
 // repository tree and stages the lot. Every path is re-checked against
-// Excluded/secretShapedDisallowed and fails the whole call rather than
-// being skipped, the same posture stageDrift takes.
+// Excluded/matchesSecretPattern and fails the whole call rather than being
+// skipped, the same posture stageDrift takes; a file holding a literal
+// secret is held back instead, every one of them gathered and reported.
 //
 // The staging is one bulk "git add" doing three jobs: --ignore-removal
 // makes staging a deletion mechanically impossible (Import's never-remove
 // promise), a directory pathspec skips .gitignore'd paths silently where
 // naming one is fatal, and one subprocess instead of thousands is seconds
 // instead of minutes. Safe on the whole worktree because Import has just
-// forced a checkout and a clean.
+// forced a checkout and a clean, and a held-back file is never written
+// into it.
 func (g *GitSync) stageImport(ctx context.Context, files []string, configRoot string) (stagedTally, error) {
-	if _, err := g.ensureSopsConfig(); err != nil {
-		return stagedTally{}, fmt.Errorf("gitsync: import: %w", err)
-	}
 	// Ignore rules first, in copyIgnoresFromLive's order: the config's own
 	// files, then the seed only if that left the root bare. PreviewIgnored
 	// builds its throwaway tree the same way and has to stay in step.
-	if err := g.copyIgnoresFromLive(ctx, files, configRoot); err != nil {
+	if err := g.copyIgnoresFromLive(files, configRoot); err != nil {
 		return stagedTally{}, fmt.Errorf("gitsync: import: %w", err)
 	}
 	if _, err := g.ensureGitignore(); err != nil {
@@ -217,32 +226,15 @@ func (g *GitSync) stageImport(ctx context.Context, files []string, configRoot st
 	}
 
 	var tally stagedTally
-	// Refusals are collected, not returned on the first: files SOPS cannot
-	// encrypt safely come in groups, and one per full scan would be
-	// thirteen slow rounds for the user.
-	var refusals []string
 	for _, p := range files {
 		if err := refuseUnsyncablePath(p); err != nil {
 			return stagedTally{}, fmt.Errorf("gitsync: import: %w", err)
 		}
-		unchanged, err := g.encryptedCopyIsCurrent(ctx, configRoot, p)
+		copied, err := g.copyLiveIntoWorkdir(configRoot, p)
 		if err != nil {
-			return stagedTally{}, fmt.Errorf("gitsync: import: %w", err)
-		}
-		if unchanged {
-			// Counted, not skipped: the file IS in the snapshot this
-			// import produces, it just did not have to be rewritten.
-			tally.files++
-			if info, err := os.Lstat(filepath.Join(configRoot, filepath.FromSlash(p))); err == nil {
-				tally.bytes += info.Size()
-			}
-			continue
-		}
-		copied, err := g.copyLiveIntoWorkdir(ctx, configRoot, p)
-		if err != nil {
-			var refusal *EncryptRefusedError
-			if errors.As(err, &refusal) {
-				refusals = append(refusals, refusal.Error())
+			var held *HeldBackError
+			if errors.As(err, &held) {
+				tally.heldBack = append(tally.heldBack, held.HeldBack)
 				continue
 			}
 			return stagedTally{}, fmt.Errorf("gitsync: import: %w", err)
@@ -258,12 +250,6 @@ func (g *GitSync) stageImport(ctx context.Context, files []string, configRoot st
 			tally.bytes += info.Size()
 		}
 	}
-	if len(refusals) > 0 {
-		// Nothing is staged when any file was refused: a partial import
-		// looks complete while missing exactly the files holding secrets.
-		return stagedTally{}, fmt.Errorf("gitsync: import: %d file(s) cannot be encrypted safely:\n  %s",
-			len(refusals), strings.Join(refusals, "\n  "))
-	}
 	if _, err := g.runGitWith(ctx, []string{"add", "--ignore-removal", "--", "."}, "", nil, importGitTimeout); err != nil {
 		return stagedTally{}, err
 	}
@@ -271,59 +257,11 @@ func (g *GitSync) stageImport(ctx context.Context, files []string, configRoot st
 }
 
 // stagedTally is what stageImport actually copied, as opposed to what
-// ScanLive found a moment earlier.
+// ScanLive found a moment earlier, and what it held back.
 type stagedTally struct {
-	files int
-	bytes int64
-}
-
-// encryptedCopyIsCurrent reports whether the worktree already holds an
-// encrypted copy of p whose plaintext is exactly what is live now. Not an
-// optimization: sops ciphertext is nondeterministic, so without this every
-// import would rewrite every encrypted file and commit pure noise. Import
-// runs after a forced checkout at the base commit, so "in the worktree"
-// means "in the repository at the tip being built on".
-//
-// Fails open in every uncertain case - a wrong "no" costs one rewrite, a
-// wrong "yes" keeps a stale secret. The comparison is
-// sopscrypt.SemanticallyEqual, as the differ uses, because sops re-emits
-// from its own parse (quotes dropped, empty values written as null).
-func (g *GitSync) encryptedCopyIsCurrent(ctx context.Context, configRoot, p string) (bool, error) {
-	// The path test comes first because it is the only free check here: an
-	// import walks thousands of files this agent never encrypts, and each
-	// would otherwise be read twice. A superset of what gets encrypted.
-	if !g.Crypter.Enabled() || !sopscrypt.EncryptablePath(p) {
-		return false, nil
-	}
-	repoPath, err := guardDriftPath(g.Workdir, p)
-	if err != nil {
-		return false, err
-	}
-	existing, err := os.ReadFile(repoPath) // #nosec G304 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
-	if err != nil || !sopscrypt.IsEncrypted(existing) {
-		return false, nil
-	}
-	livePath, err := guardDriftPath(configRoot, p)
-	if err != nil {
-		return false, err
-	}
-	info, statErr := os.Stat(livePath)
-	if statErr != nil || !info.Mode().IsRegular() {
-		return false, nil
-	}
-	live, err := os.ReadFile(livePath) // #nosec G304 -- livePath is guardDriftPath-confined (symlink-resolved) under configRoot
-	if err != nil {
-		return false, nil
-	}
-	plaintext, err := g.Crypter.DecryptFile(ctx, repoPath)
-	if err != nil {
-		// Most likely encrypted to a different age key than the one
-		// configured now; re-encrypting from live is how a rotation
-		// completes.
-		slog.Debug("gitsync: import: could not decrypt the repository copy, re-encrypting from live", "path", p, "error", err)
-		return false, nil
-	}
-	return sopscrypt.SemanticallyEqual(plaintext, live), nil
+	files    int
+	bytes    int64
+	heldBack []HeldBack
 }
 
 // errTrackedPushRejected reports the one push failure the tracked-branch

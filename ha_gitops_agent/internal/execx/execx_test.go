@@ -29,10 +29,10 @@ func TestRedactStripsTokenFromText(t *testing.T) {
 	}
 }
 
-// TestRedactStripsEveryOccurrence: sops echoes the same identity once
-// per rule it tried, so replacing only the first would leak the rest.
+// TestRedactStripsEveryOccurrence: git can echo the same credential more
+// than once, so replacing only the first would leak the rest.
 func TestRedactStripsEveryOccurrence(t *testing.T) {
-	secret := "AGE-SECRET-KEY-EXAMPLE"
+	secret := "SECRET-TOKEN-EXAMPLE"
 	text := "failed with " + secret + " and again with " + secret
 
 	redacted := Redact(text, secret)
@@ -55,7 +55,7 @@ func TestRedactLeavesTextWithoutTheSecretAlone(t *testing.T) {
 
 // --- CommandRunner --------------------------------------------------------
 // Real subprocesses, but only /bin/sh: these assert this package's own
-// contract, nothing about git or sops.
+// contract, nothing about git.
 
 func TestCommandRunnerCapturesBothStreamsAndZeroExit(t *testing.T) {
 	result, err := CommandRunner{}.Run(context.Background(), t.TempDir(), os.Environ(),
@@ -76,7 +76,7 @@ func TestCommandRunnerCapturesBothStreamsAndZeroExit(t *testing.T) {
 
 // TestCommandRunnerReportsNonZeroExitWithoutError: a command that ran and
 // failed is a RunResult, not an error, so the caller decides what the
-// code means (sops's 203 "already encrypted" is not a failure).
+// code means (git grep's 1 "nothing matched" is not a failure).
 func TestCommandRunnerReportsNonZeroExitWithoutError(t *testing.T) {
 	result, err := CommandRunner{}.Run(context.Background(), t.TempDir(), os.Environ(),
 		"/bin/sh", "-c", "printf nope >&2; exit 3")
@@ -119,8 +119,8 @@ func TestCommandRunnerReportsADeadlineAsDeadlineExceeded(t *testing.T) {
 }
 
 // TestCommandRunnerRunsInDirWithExactlyTheGivenEnv covers Run's two
-// non-argv arguments: env replaces the process environment, so no
-// inherited SOPS_AGE_KEY can reach an encrypt call.
+// non-argv arguments: env replaces the process environment, so nothing
+// inherited reaches the child unless the caller passes it on.
 func TestCommandRunnerRunsInDirWithExactlyTheGivenEnv(t *testing.T) {
 	t.Setenv("EXECX_INHERITED", "leaked")
 

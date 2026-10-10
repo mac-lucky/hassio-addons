@@ -2,16 +2,11 @@ package gitsync
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 )
-
-// The encrypted tests here flip the package-wide encryption switch through
-// enableEncryption, so nothing in this file may call t.Parallel.
 
 // zeroSHA is a well-formed object name nothing in a fresh repository can
 // resolve - a stand-in for a base commit the remote has since rewritten
@@ -188,126 +183,6 @@ func TestBlobEquivalentReadsThroughGitShowWithoutTouchingTheCheckout(t *testing.
 	// checkout the differ and applier are looking at is untouched.
 	if got := f.gs.CurrentSHA(ctx); got != f.sha {
 		t.Errorf("CurrentSHA() = %q, want %q: BlobEquivalent must not move HEAD", got, f.sha)
-	}
-}
-
-// Without this the ciphertext's own nondeterminism reads as drift, and an
-// encrypted file is captured on every single cycle forever.
-func TestBlobEquivalentComparesEncryptedContentSemantically(t *testing.T) {
-	tmp := t.TempDir()
-	bare, work := makeRemote(t, tmp, "remote")
-	const live = "http_password: \"abc#123\"\nunused:\n"
-	commitFile(t, work, "secrets.yaml", fakeEncrypt(live), "seed encrypted secrets")
-
-	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
-	fake := enableEncryption(t, gs)
-	ctx := context.Background()
-	if err := gs.EnsureClone(ctx); err != nil {
-		t.Fatalf("EnsureClone: %v", err)
-	}
-	sha, err := gs.Fetch(ctx)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-
-	// Stands in for sops re-emitting from its own parse: quotes dropped,
-	// an empty value written as null. Byte-different, same document.
-	fake.decryptRewrite = func(plaintext string) string {
-		return strings.ReplaceAll(strings.ReplaceAll(plaintext, `"abc#123"`, "abc#123"), "unused:\n", "unused: null\n")
-	}
-
-	equiv, tracked, err := gs.BlobEquivalent(ctx, sha, "secrets.yaml", []byte(live))
-	if err != nil {
-		t.Fatalf("BlobEquivalent: %v", err)
-	}
-	if !tracked {
-		t.Fatal("tracked = false, want true")
-	}
-	if !equiv {
-		t.Error("equivalent = false, want true: sops formatting is not a live edit")
-	}
-
-	// And a real edit still reads as one, or the comparison is worthless.
-	equiv, _, err = gs.BlobEquivalent(ctx, sha, "secrets.yaml", []byte("http_password: \"different\"\nunused:\n"))
-	if err != nil {
-		t.Fatalf("BlobEquivalent on changed content: %v", err)
-	}
-	if equiv {
-		t.Error("equivalent = true for genuinely different content, want false")
-	}
-}
-
-// The temp file exists so sops has a path to open. It must hold ciphertext,
-// keep its basename so sops picks the right store, live outside the worktree
-// where "git clean -fdx" and a capture's staging cannot see it, and be gone
-// afterwards.
-func TestBlobEquivalentMaterializesTheBaseBlobSafely(t *testing.T) {
-	tmp := t.TempDir()
-	bare, work := makeRemote(t, tmp, "remote")
-	const live = "http_password: secret\n"
-	commitFile(t, work, "secrets.yaml", fakeEncrypt(live), "seed encrypted secrets")
-
-	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
-	fake := enableEncryption(t, gs)
-	ctx := context.Background()
-	if err := gs.EnsureClone(ctx); err != nil {
-		t.Fatalf("EnsureClone: %v", err)
-	}
-	sha, err := gs.Fetch(ctx)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-
-	if _, _, err := gs.BlobEquivalent(ctx, sha, "secrets.yaml", []byte(live)); err != nil {
-		t.Fatalf("BlobEquivalent: %v", err)
-	}
-
-	if len(fake.calls) == 0 {
-		t.Fatal("sops was never invoked, so nothing about the temp file is proven")
-	}
-	last := fake.calls[len(fake.calls)-1]
-	handed := last[len(last)-1]
-
-	if got := filepath.Base(handed); got != "secrets.yaml" {
-		t.Errorf("sops was handed %q, want the basename kept as secrets.yaml: it picks its store from the extension", got)
-	}
-	if strings.HasPrefix(handed, gs.Workdir+string(filepath.Separator)) {
-		t.Errorf("base blob was materialized inside the worktree at %q, where clean -fdx and a capture's staging would see it", handed)
-	}
-	if _, err := os.Stat(handed); !os.IsNotExist(err) {
-		t.Errorf("os.Stat(%q) err = %v, want the temp directory removed", handed, err)
-	}
-}
-
-// Fail closed: the caller turns an error into a conflict, which refuses both
-// directions. Answering "not equivalent" would call it a live edit and push
-// the live copy over whatever the repository holds.
-func TestBlobEquivalentFailsClosedWhenTheBaseBlobCannotBeDecrypted(t *testing.T) {
-	tmp := t.TempDir()
-	bare, work := makeRemote(t, tmp, "remote")
-	commitFile(t, work, "secrets.yaml", fakeEncrypt("http_password: secret\n"), "seed encrypted secrets")
-
-	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
-	ctx := context.Background()
-	if err := gs.EnsureClone(ctx); err != nil {
-		t.Fatalf("EnsureClone: %v", err)
-	}
-	sha, err := gs.Fetch(ctx)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-
-	// No Crypter configured at all, which is what a missing age_key looks
-	// like from here.
-	_, tracked, err := gs.BlobEquivalent(ctx, sha, "secrets.yaml", []byte("http_password: secret\n"))
-	if err == nil {
-		t.Fatal("BlobEquivalent() error = nil, want a refusal it cannot decrypt")
-	}
-	if !tracked {
-		t.Error("tracked = false, want true: the commit does track the path, it just could not be read")
-	}
-	if !strings.Contains(err.Error(), "age key") {
-		t.Errorf("error = %v, want it to name the missing age key", err)
 	}
 }
 

@@ -27,6 +27,9 @@ type ImportSummary struct {
 	CommitSHA string
 	Branch    string
 	Created   bool
+	// HeldBack is the files left out because they hold a literal value
+	// under a secret-shaped key, as "path (key, key)".
+	HeldBack []string
 }
 
 // PreviewImport scans the live config tree and reports what an import
@@ -190,11 +193,26 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 	// Files counts what was COMMITTED, and the SHA is a commit this import
 	// created rather than read - the only kind where that is true. RegOps
 	// stays zero: an import touches no registries.
-	run.finish(history.Record{
+	record := history.Record{
 		Outcome: history.OutcomeOK,
 		SHA:     res.CommitSHA,
 		Files:   res.Files,
-	})
+	}
+	var heldBack []string
+	if len(res.HeldBack) > 0 {
+		// Partial: the commit landed, without these. Named on the feed and
+		// on the history row, or the repository looks complete while
+		// missing exactly the files that hold secrets.
+		for _, h := range res.HeldBack {
+			heldBack = append(heldBack, h.String())
+		}
+		held := fmt.Sprintf("held back %d file(s) holding a literal value under a secret-shaped key: %s - %s",
+			len(res.HeldBack), gitsync.HeldBackSummary(res.HeldBack), gitsync.HeldBackAdvice)
+		r.logWarn("import " + held)
+		record.Outcome = history.OutcomePartial
+		record.Error = held
+	}
+	run.finish(record)
 	r.pushStatus()
 
 	return ImportSummary{
@@ -203,6 +221,7 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 		CommitSHA: res.CommitSHA,
 		Branch:    r.opts.Branch,
 		Created:   res.Created,
+		HeldBack:  heldBack,
 	}, nil
 }
 

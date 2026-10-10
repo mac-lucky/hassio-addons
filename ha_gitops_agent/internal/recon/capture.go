@@ -372,9 +372,9 @@ func (r *Reconciler) classifyChanges(
 				routing.deferred = append(routing.deferred, change)
 				continue
 			case err != nil:
-				// The BASE could not be read - most often an encrypted blob
-				// this agent has no key for. Fail closed: overwriting content
-				// nobody could check is the one outcome worth refusing.
+				// The BASE could not be read. Fail closed: overwriting
+				// content nobody could check is the one outcome worth
+				// refusing.
 				slog.Warn("recon: capture: could not read the merge base, treating as a conflict", "path", change.Path, "error", err)
 				routing.conflicts = append(routing.conflicts, change)
 				continue
@@ -382,6 +382,15 @@ func (r *Reconciler) classifyChanges(
 			f.baseTracks = live.BaseTracks
 			f.liveIsBase = live.MatchesBase
 			f.liveGone = live.Gone
+			if live.BaseIsSops {
+				// The base is SOPS ciphertext from before 0.9.0 and live is
+				// what that version decrypted out of it, so they differ
+				// whoever moved. No base, then: the repository wins, as it
+				// did before capture existed, and nothing is captured or
+				// parked - or the commit that replaces those values with
+				// !secret references would stand as a conflict forever.
+				f.baseKnown = false
+			}
 		}
 
 		switch classify(f) {
@@ -423,6 +432,7 @@ func (r *Reconciler) captureLiveChanges(
 	}
 	if !r.opts.CaptureLiveChanges || len(changes) == 0 {
 		r.clearStandingConflicts(state)
+		r.noteHeldBack(nil)
 		return changes, 0
 	}
 
@@ -445,6 +455,7 @@ func (r *Reconciler) captureLiveChanges(
 	// the dashboard saying "in sync" over an edit still waiting to be saved.
 	unresolved = len(routing.conflicts) + len(routing.deferred)
 
+	var heldBack []gitsync.HeldBack
 	if len(routing.capture) > 0 {
 		result, err := r.git.CaptureFiles(ctx, driftFiles(routing.capture), ConfigRoot, tip)
 		if len(result.Refused) > 0 {
@@ -453,6 +464,12 @@ func (r *Reconciler) captureLiveChanges(
 			unresolved += len(result.Refused)
 			r.logWarn(fmt.Sprintf("not captured, the repository changed them meanwhile: %s",
 				strings.Join(result.Refused, ", ")))
+		}
+		if len(result.HeldBack) > 0 && err == nil {
+			// Out of the apply too: the live edit is still the one to keep,
+			// it just may not travel to git with a secret in it.
+			unresolved += len(result.HeldBack)
+			heldBack = result.HeldBack
 		}
 		switch {
 		case err != nil:
@@ -487,18 +504,24 @@ func (r *Reconciler) captureLiveChanges(
 	// already in hand, and unlike a drift set its CONTENT does not matter -
 	// the parked branch is a copy, not a proposal.
 	if len(routing.conflicts) > 0 && !slices.Equal(next.ConflictedPaths, state.ConflictedPaths) {
-		branch, err := r.git.ParkConflicts(ctx, driftFiles(routing.conflicts), ConfigRoot, tip, time.Now())
+		branch, parkHeld, err := r.git.ParkConflicts(ctx, driftFiles(routing.conflicts), ConfigRoot, tip, time.Now())
 		if err != nil {
 			// The verdict stands regardless: refusing to touch the path in
 			// either direction is the protection, the branch is only the copy.
 			failures = append(failures, fmt.Sprintf("could not park %d conflicted live copy/copies: %v", len(routing.conflicts), err))
-		} else {
+		} else if branch != "" {
 			next.LastConflictBranch = branch
 			next.LastConflictUTC = utcNowISO()
 		}
-		r.logWarn(fmt.Sprintf("conflict on %d path(s), left untouched in both directions: %s",
-			len(routing.conflicts), strings.Join(next.ConflictedPaths, ", ")))
+		msg := fmt.Sprintf("conflict on %d path(s), left untouched in both directions: %s",
+			len(routing.conflicts), strings.Join(next.ConflictedPaths, ", "))
+		if len(parkHeld) > 0 {
+			msg += fmt.Sprintf("; no copy pushed of %s, which hold a literal value under a secret-shaped key",
+				gitsync.HeldBackSummary(parkHeld))
+		}
+		r.logWarn(msg)
 	}
+	r.noteHeldBack(heldBack)
 
 	if len(failures) > 0 {
 		r.noteCaptureFailure(strings.Join(failures, "; "))
@@ -627,6 +650,28 @@ func dropConflicted(changes []differ.Change, conflicted []string) []differ.Chang
 		}
 	}
 	return kept
+}
+
+// noteHeldBack records the files capture would not push because they hold
+// a literal value under a secret-shaped key, for the dashboard, and puts
+// one event on the feed whenever that set changes - capture runs every
+// cycle, and the same files are held back every cycle until someone edits
+// them. nil clears it quietly.
+func (r *Reconciler) noteHeldBack(items []gitsync.HeldBack) {
+	var rendered []string
+	for _, h := range items {
+		rendered = append(rendered, h.String())
+	}
+	sort.Strings(rendered)
+	changed := false
+	r.withMu(func() {
+		changed = !slices.Equal(r.heldBack, rendered)
+		r.heldBack = rendered
+	})
+	if changed && len(rendered) > 0 {
+		r.logWarn(fmt.Sprintf("not captured, %d file(s) hold a literal value under a secret-shaped key: %s - %s",
+			len(rendered), strings.Join(rendered, ", "), gitsync.HeldBackAdvice))
+	}
 }
 
 // noteCaptureFailure logs one event on ENTERING failure and nothing on the

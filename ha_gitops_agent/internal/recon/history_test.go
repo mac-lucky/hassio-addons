@@ -306,7 +306,9 @@ func TestEachFailCyclePathRecordsExactlyOneErrorRun(t *testing.T) {
 		{"secrets_guard", func(f *reconcilerFakes) { f.git.secretsErr = errors.New("secrets.yaml is tracked") }},
 		{"tracked", func(f *reconcilerFakes) { f.git.trackedErr = errors.New("ls-files failed") }},
 		{"checkout", func(f *reconcilerFakes) { f.git.checkoutErr = errors.New("detached head") }},
-		{"decrypt", func(f *reconcilerFakes) { f.differ.decryptFailures = []string{"secrets.yaml: no key"} }},
+		{"sops_guard", func(f *reconcilerFakes) {
+			f.git.secretsErr = &gitsync.SopsTrackedError{Files: []string{"packages/mqtt.yaml"}}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

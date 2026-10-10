@@ -4,7 +4,6 @@ package differ
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 	"github.com/pmezard/go-difflib/difflib"
 )
 
@@ -64,15 +62,13 @@ type Change struct {
 
 // Compute compares tracked repo files against live config, one Change per
 // differing path: "add", "update", or "delete" (only prevManifest paths
-// can be deleted). gitsync.Excluded is skipped in both directions.
+// can be deleted). gitsync.Excluded is skipped in both directions, so a
+// secrets file or an exclude_paths entry is never planned - not even the
+// delete of one an older version applied and recorded in the manifest.
 //
-// skippedContainment names paths refused for a security reason - a symlink
-// or an escape past the root - and decryptFailures names repo paths
-// transform could not decrypt ("path: reason"), which fail the cycle
-// rather than apply ciphertext. Only the repo side is ever transformed.
-func Compute(
-	repoRoot, configRoot string, tracked, prevManifest []string, transform RepoTransform,
-) (changes []Change, skippedContainment, decryptFailures []string) {
+// skippedContainment names paths refused for a security reason - a
+// symlink or an escape past the root.
+func Compute(repoRoot, configRoot string, tracked, prevManifest []string) (changes []Change, skippedContainment []string) {
 	trackedSet := make(map[string]bool, len(tracked))
 	for _, p := range tracked {
 		trackedSet[p] = true
@@ -87,15 +83,12 @@ func Compute(
 		if gitsync.Excluded(p) {
 			continue
 		}
-		c, ok, suspicious, decryptFailure := diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p, transform)
+		c, ok, suspicious := diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p)
 		if ok {
 			changes = append(changes, c)
 		}
 		if suspicious {
 			skippedContainment = append(skippedContainment, p)
-		}
-		if decryptFailure != "" {
-			decryptFailures = append(decryptFailures, decryptFailure)
 		}
 	}
 
@@ -120,23 +113,20 @@ func Compute(
 		return changes[i].Path < changes[j].Path
 	})
 	sort.Strings(skippedContainment)
-	sort.Strings(decryptFailures)
-	return changes, skippedContainment, decryptFailures
+	return changes, skippedContainment
 }
 
 // diffTrackedPath produces one "add" or "update" Change, or nothing when
 // the content matches or the path could not be compared - one unreadable
 // file must never abort the diff. suspicious means a security refusal (see
-// isRegularFile); decryptFailure is the one failure not swallowed.
-func diffTrackedPath(
-	repoRoot, configRoot, repoRootReal, configRootReal, p string, transform RepoTransform,
-) (change Change, ok, suspicious bool, decryptFailure string) {
+// isRegularFile).
+func diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p string) (change Change, ok, suspicious bool) {
 	repoPath := filepath.Join(repoRoot, p)
 	configPath := filepath.Join(configRoot, p)
 
 	if regular, susp := isRegularFile(repoPath, repoRootReal); !regular {
 		slog.Warn("tracked path missing, not a regular file, or escapes the repo root via a symlink", "path", p)
-		return Change{}, false, susp, ""
+		return Change{}, false, susp
 	}
 
 	// Any stat error, not only ENOENT, takes the "add" branch - matching
@@ -145,93 +135,60 @@ func diffTrackedPath(
 		repoSize, sizeErr := fileSize(repoPath)
 		if sizeErr != nil {
 			slog.Warn("skipping while diffing", "path", p, "error", sizeErr)
-			return Change{}, false, false, ""
+			return Change{}, false, false
 		}
 		if repoSize > largeFileThresholdBytes {
-			if reason := largeFileEncryptedReason(repoPath, p); reason != "" {
-				return Change{}, false, false, fmt.Sprintf("%s: %s", p, reason)
-			}
-			return Change{Path: p, Kind: "add", DiffText: largeFileSummary(0, repoSize)}, true, false, ""
+			return Change{Path: p, Kind: "add", DiffText: largeFileSummary(0, repoSize)}, true, false
 		}
 		repoBytes := readFile(repoPath)
 		if repoBytes == nil {
-			return Change{}, false, false, ""
+			return Change{}, false, false
 		}
-		repoPlain, encrypted, transformErr := applyRepoTransform(transform, p, repoBytes)
-		if transformErr != nil {
-			return Change{}, false, false, fmt.Sprintf("%s: %s", p, transformErr)
-		}
-		return Change{Path: p, Kind: "add", DiffText: diffTextFor(nil, repoPlain, p, encrypted, encrypted)}, true, false, ""
+		return Change{Path: p, Kind: "add", DiffText: diffTextFor(nil, repoBytes, p)}, true, false
 	}
 
 	if regular, susp := isRegularFile(configPath, configRootReal); !regular {
 		slog.Warn("config path is missing, not a regular file, or escapes the config root via a symlink", "path", p)
-		return Change{}, false, susp, ""
+		return Change{}, false, susp
 	}
 
 	repoSize, err := fileSize(repoPath)
 	if err != nil {
 		slog.Warn("skipping while diffing", "path", p, "error", err)
-		return Change{}, false, false, ""
+		return Change{}, false, false
 	}
 	configSize, err := fileSize(configPath)
 	if err != nil {
 		slog.Warn("skipping while diffing", "path", p, "error", err)
-		return Change{}, false, false, ""
+		return Change{}, false, false
 	}
 
 	if repoSize > largeFileThresholdBytes || configSize > largeFileThresholdBytes {
-		if reason := largeFileEncryptedReason(repoPath, p); reason != "" {
-			return Change{}, false, false, fmt.Sprintf("%s: %s", p, reason)
-		}
 		if largeFilesEqual(repoPath, configPath) {
-			return Change{}, false, false, ""
+			return Change{}, false, false
 		}
-		return Change{Path: p, Kind: "update", DiffText: largeFileSummary(configSize, repoSize)}, true, false, ""
+		return Change{Path: p, Kind: "update", DiffText: largeFileSummary(configSize, repoSize)}, true, false
 	}
 
 	repoBytes := readFile(repoPath)
 	configBytes := readFile(configPath)
 	if repoBytes == nil || configBytes == nil {
-		return Change{}, false, false, ""
+		return Change{}, false, false
 	}
-	repoPlain, encrypted, err := applyRepoTransform(transform, p, repoBytes)
-	if err != nil {
-		return Change{}, false, false, fmt.Sprintf("%s: %s", p, err)
+	if bytes.Equal(repoBytes, configBytes) {
+		return Change{}, false, false
 	}
-	if bytes.Equal(repoPlain, configBytes) {
-		return Change{}, false, false, ""
-	}
-	// Only after the cheap byte compare failed, and only for a file sops
-	// rewrote: see yamlSemanticallyEqual for why that is not drift.
-	if encrypted && yamlSemanticallyEqual(repoPlain, configBytes) {
-		return Change{}, false, false, ""
-	}
-	// Masked when either side is secret-bearing, not only when the repo copy
-	// was encrypted: the "-" lines quote the LIVE file, and a secret typed
-	// into a plaintext-tracked file in the HA editor is still a secret. The
-	// same test diffDeletedPath applies to the live copy it quotes.
-	mask := encrypted || sopscrypt.IsSecretsFile(p)
-	if !mask {
-		need, refusal := sopscrypt.NeedsEncryption(p, configBytes)
-		mask = need || refusal != ""
-	}
-	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoPlain, p, mask, encrypted)}, true, false, ""
+	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoBytes, p)}, true, false
 }
 
-// diffTextFor builds a Change's DiffText, routing a secret-bearing file's
-// through the masking pass so that no secret is ever published. encrypted
-// only picks the wording of the summary that replaces a diff that cannot
-// be shown: mask is also set for a plaintext file that holds secrets.
-func diffTextFor(beforeBytes, afterBytes []byte, path string, mask, encrypted bool) string {
-	if !mask {
+// diffTextFor builds a Change's DiffText, routing it through the masking
+// pass when either side holds a literal value under a secret-shaped key,
+// so that no secret is ever published.
+func diffTextFor(beforeBytes, afterBytes []byte, path string) string {
+	if !holdsSecrets(path, beforeBytes, afterBytes) {
 		return makeDiff(beforeBytes, afterBytes, path)
 	}
-	summary := secretSummary
-	if encrypted {
-		summary = encryptedSummary
-	}
-	return maskedDiff(beforeBytes, afterBytes, path, summary)
+	return maskedDiff(beforeBytes, afterBytes, path)
 }
 
 // diffDeletedPath produces a "delete" Change for an untracked prevManifest
@@ -256,66 +213,7 @@ func diffDeletedPath(configRoot, configRootReal, p string) (change Change, ok, s
 	if configBytes == nil {
 		return Change{}, false, false
 	}
-	// Masked whenever the live content is what WOULD be encrypted in the
-	// repo, not only for secrets.yaml.
-	need, refusal := sopscrypt.NeedsEncryption(p, configBytes)
-	mask := sopscrypt.IsSecretsFile(p) || need || refusal != ""
-	return Change{Path: p, Kind: "delete", DiffText: diffTextFor(configBytes, nil, p, mask, false)}, true, false
-}
-
-// largeFileEncryptedReason reports why a file too large to diff cannot be
-// handled, or "" for ordinary content. A large encrypted file never
-// reaches the transform, so applying it would write ENC[...] into the
-// config; sniffing bounded windows avoids the whole-document read.
-func largeFileEncryptedReason(path, rel string) string {
-	if !sopscrypt.EncryptablePath(rel) {
-		return ""
-	}
-	f, err := os.Open(path) // #nosec G304 -- caller-guarded path, already stat-checked and containment-checked
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = f.Close() }()
-
-	// Both ends, and the TAIL is the one that matters: a head-only sniff
-	// misses a late first value, while sops always appends its metadata
-	// block last in all three formats.
-	if sniffHasSopsMarker(f, 0, io.SeekStart) {
-		return sopsTooLargeReason
-	}
-	if sniffHasSopsMarker(f, -sniffBytes, io.SeekEnd) {
-		return sopsTooLargeReason
-	}
-	return ""
-}
-
-const (
-	sniffBytes         = 64 * 1024
-	sopsTooLargeReason = "SOPS-encrypted file is too large to decrypt and diff, so it cannot be applied safely"
-)
-
-// sniffHasSopsMarker reports whether a bounded window of f, positioned by
-// offset and whence, carries a sops fingerprint.
-func sniffHasSopsMarker(f *os.File, offset int64, whence int) bool {
-	if _, err := f.Seek(offset, whence); err != nil {
-		return false
-	}
-	buf := make([]byte, sniffBytes)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return false
-	}
-	window := buf[:n]
-	for _, marker := range [][]byte{[]byte("ENC[AES256_GCM"), []byte("sops_version="), []byte("\"version\":"), []byte("version:")} {
-		if bytes.Contains(window, marker) {
-			// The generic version markers only count alongside sops's own
-			// name, or every versioned config file would be refused.
-			if bytes.Contains(marker, []byte("ENC[")) || bytes.Contains(window, []byte("sops")) {
-				return true
-			}
-		}
-	}
-	return false
+	return Change{Path: p, Kind: "delete", DiffText: diffTextFor(configBytes, nil, p)}, true, false
 }
 
 // isRegularFile Lstats path (no symlink following) and requires its

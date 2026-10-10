@@ -14,7 +14,3 @@
     type: go-module
     location: "/usr/bin/tempio"
 
-# sops: installed from the Alpine repository of the base image's release.
-- package:
-    type: go-module
-    location: "/usr/bin/sops"

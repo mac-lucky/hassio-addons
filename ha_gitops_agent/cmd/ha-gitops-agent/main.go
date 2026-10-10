@@ -5,11 +5,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,7 +22,6 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/recon"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/web"
 )
 
@@ -47,9 +49,6 @@ const (
 	writeTimeout      = 30 * time.Second
 	idleTimeout       = 120 * time.Second
 
-	// sopsProbeTimeout bounds one local "sops --version" call at startup.
-	sopsProbeTimeout = 10 * time.Second
-
 	// waitIdleGrace is extra time, on top of shutdownTimeout, for an
 	// in-flight apply/rollback: those run detached from the request, so
 	// only recon.WaitIdle sees them. Deliberately NOT the apply's own
@@ -66,6 +65,15 @@ const (
 // awaitLoops, the wait for the two background loops to return. A var, not
 // a const, so awaitLoops' tests can shrink it.
 var shutdownTimeout = 5 * time.Second
+
+// Startup secret:// resolution: how often an unresolved reference is
+// retried, how often the wait is logged, and the config root whose
+// secrets.yaml answers. Vars so awaitSecretRefs' tests can shrink them.
+var (
+	secretRetryInterval = 10 * time.Second
+	secretLogInterval   = time.Minute
+	secretsRoot         = recon.ConfigRoot
+)
 
 func main() {
 	os.Exit(run())
@@ -87,26 +95,61 @@ func run() int {
 		opts = options.Options{}
 	}
 
-	// Before configureEncryption: age_key may itself be a secret://
-	// reference. Fatal on failure - a reference that fell through as its
-	// literal text would authenticate as "secret://..." somewhere.
-	if err := opts.ResolveSecretRefs(secretref.NewResolver(recon.ConfigRoot)); err != nil {
+	// Before anything reads a path: syncing with an exclusion dropped would
+	// write or delete exactly what the user asked to protect.
+	if err := gitsync.SetUserExclusions(opts.ExcludePaths); err != nil {
+		slog.Error("fatal: the exclude_paths option is invalid", "error", err)
+		return 1
+	}
+	if len(opts.ExcludePaths) > 0 {
+		slog.Info("extra exclusions configured", "exclude_paths", strings.Join(opts.ExcludePaths, ", "))
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// The ingress UI comes up first, on a page saying what startup waits
+	// for; the dashboard replaces it once the reconciler exists.
+	// A copy: opts takes the resolved credentials below while a request
+	// may still be reading this one.
+	waitOpts := opts
+	var waitingFor atomic.Pointer[string]
+	ui := &uiHandler{}
+	ui.set(web.Waiting(func() recon.Status { return waitingStatus(waitOpts, waitingFor.Load()) }))
+	srv := &http.Server{
+		Addr:              bindAddr,
+		Handler:           ui,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	// secret:// options resolve against the live secrets.yaml, which on a
+	// fresh box may not exist until the add-on rendering it has run, so an
+	// unresolvable one is waited for rather than fatal. A malformed one
+	// still is - no wait fixes a typo - and a reference never falls back
+	// to its literal text, which would authenticate as "secret://...".
+	resolved, err := awaitSecretRefs(ctx, opts, serveErr, func(reason string) { waitingFor.Store(&reason) })
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.Info("shutting down while waiting for secrets.yaml")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+			return 0
+		}
+		if errors.Is(err, errServeStopped) {
+			slog.Error("fatal: cannot start the web server, is another copy of the agent already running?",
+				"addr", bindAddr, "error", err)
+			return 1
+		}
 		slog.Error("fatal: cannot resolve a secret reference in the add-on options", "error", err)
 		return 1
 	}
-
-	crypter, err := configureEncryption(opts.AgeKey)
-	if err != nil {
-		// Fatal, not "carry on unencrypted": the user configured a key,
-		// so starting anyway would push secrets to git in the clear.
-		slog.Error("fatal: age_key is set but secret encryption cannot start", "error", err)
-		return 1
-	}
-	if crypter.Enabled() {
-		// The recipient is the public half, safe to print: it is what the
-		// user checks their key against when a repository will not decrypt.
-		slog.Info("secret encryption enabled", "recipient", crypter.Recipient())
-	}
+	opts = resolved
 
 	// Not fatal: a failed load keeps hashing in the legacy unkeyed form,
 	// stable across restarts, so nothing replans - state.json just stays
@@ -115,10 +158,8 @@ func run() int {
 		slog.Warn("hash key unavailable; state hashes stay unkeyed", "error", err)
 	}
 
-	reconciler := recon.New(opts, recon.Deps{Crypter: crypter})
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	reconciler := recon.New(opts, recon.Deps{})
+	ui.set(web.New(reconciler))
 
 	loopDone := make(chan struct{})
 	if opts.RepoURL != "" {
@@ -149,15 +190,6 @@ func run() int {
 		slog.Info("add-on version recording enabled", "branch", opts.Branch)
 	}
 
-	srv := &http.Server{
-		Addr:              bindAddr,
-		Handler:           web.New(reconciler),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-	}
-
 	// The webhook trigger exists only when a secret is configured. Both
 	// stay nil otherwise, and a receive on a nil channel never fires, so
 	// the select below needs no "is it enabled" branch.
@@ -183,9 +215,6 @@ func run() int {
 		go func() { hookServeErr <- hookSrv.ListenAndServe() }()
 		slog.Info("webhook trigger enabled", "addr", hookBindAddr)
 	}
-
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
 
 	select {
 	case err := <-serveErr:
@@ -255,31 +284,80 @@ func awaitLoops(loopDone, addonUpdateDone <-chan struct{}) {
 	}
 }
 
-// configureEncryption turns the age_key option into the process-wide
-// Crypter and sets gitsync's encryption switch - the only place the two
-// are set together, since the switch on with no Crypter is what would push
-// a plaintext secret (gitsync fails closed on it anyway).
+// uiHandler serves whichever handler was stored last: the waiting page
+// until the reconciler exists, the dashboard from then on. Swapped once and
+// read per request, so an atomic pointer rather than a lock.
+type uiHandler struct {
+	current atomic.Pointer[http.Handler]
+}
+
+func (u *uiHandler) set(h http.Handler) { u.current.Store(&h) }
+
+func (u *uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*u.current.Load()).ServeHTTP(w, r)
+}
+
+// waitingStatus is what the waiting page shows: the repository it will
+// sync and why it has not started. reason is nil before the first attempt
+// has finished, a moment at most.
+func waitingStatus(opts options.Options, reason *string) recon.Status {
+	waiting := "resolving secret:// references in the add-on options"
+	if reason != nil {
+		waiting = *reason
+	}
+	return recon.Status{
+		State:            recon.StateWaiting,
+		Configured:       opts.RepoURL != "",
+		DryRun:           opts.DryRun,
+		RepoURL:          opts.RepoURL,
+		Branch:           opts.Branch,
+		IntervalMinutes:  opts.IntervalMinutes,
+		WaitingForSecret: waiting,
+	}
+}
+
+// errServeStopped is awaitSecretRefs' report that the web server stopped
+// while it waited.
+var errServeStopped = errors.New("the web server stopped while waiting for secrets.yaml")
+
+// awaitSecretRefs resolves opts' secret:// references against the live
+// secrets.yaml under secretsRoot, retrying every secretRetryInterval while
+// a well-formed one cannot be answered yet. Each attempt reads the file
+// afresh, and waiting gets the reason every time, which names the option,
+// the key and why - never a value. Logged once per secretLogInterval.
 //
-// A key that cannot be used is returned as an error, fatal in run(); no
-// error here carries the key.
-func configureEncryption(ageKey string) (*sopscrypt.Crypter, error) {
-	if strings.TrimSpace(ageKey) == "" {
-		gitsync.SetEncryptionEnabled(false)
-		return nil, nil
+// Returns the resolved options, the first error that waiting cannot fix
+// (a malformed reference), ctx's error once it is cancelled, or the web
+// server's if it stops meanwhile: nothing would show the wait then.
+func awaitSecretRefs(ctx context.Context, opts options.Options, abort <-chan error, waiting func(string)) (options.Options, error) {
+	var lastLogged time.Time
+	for {
+		resolved := opts
+		err := resolved.ResolveSecretRefs(secretref.NewResolver(secretsRoot))
+		if err == nil {
+			if !lastLogged.IsZero() {
+				slog.Info("startup: every secret:// reference resolved, starting")
+			}
+			return resolved, nil
+		}
+		var pending *options.PendingSecretError
+		if !errors.As(err, &pending) {
+			return options.Options{}, err
+		}
+		reason := fmt.Sprintf("waiting for secrets.yaml key '%s' (%s): %v", pending.Name, pending.Option, pending.Err)
+		waiting(reason)
+		if lastLogged.IsZero() || time.Since(lastLogged) >= secretLogInterval {
+			slog.Warn("startup: "+reason, "retry_every", secretRetryInterval.String())
+			lastLogged = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return options.Options{}, ctx.Err()
+		case err := <-abort:
+			return options.Options{}, fmt.Errorf("%w: %v", errServeStopped, err)
+		case <-time.After(secretRetryInterval):
+		}
 	}
-	crypter, err := sopscrypt.New(ageKey)
-	if err != nil {
-		return nil, err
-	}
-	// At startup, because the first import would otherwise find sops
-	// missing only after writing plaintext secrets into the worktree.
-	probeCtx, cancel := context.WithTimeout(context.Background(), sopsProbeTimeout)
-	defer cancel()
-	if err := crypter.Probe(probeCtx); err != nil {
-		return nil, err
-	}
-	gitsync.SetEncryptionEnabled(true)
-	return crypter, nil
 }
 
 // logLevel reads LOG_LEVEL, defaulting to info.

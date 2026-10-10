@@ -43,14 +43,13 @@ type Options struct {
 	// WebhookSecret, when non-empty, starts internal/hook's listener on
 	// :8098, reconciling on a matching POST /webhook.
 	WebhookSecret string
-	// AgeKey is the "AGE-SECRET-KEY-1..." identity values are encrypted to
-	// on their way into git (internal/sopscrypt). Empty means encryption
-	// is off and secrets.yaml stays out of the repository.
-	//
-	// The most sensitive value the add-on holds: never logged, never
-	// rendered by the web UI, never passed to a subprocess as an argument.
-	// cmd/ha-gitops-agent hands it to sopscrypt.New and keeps no copy.
-	AgeKey string
+	// ExcludePaths are extra repo/config-relative paths or globs never
+	// synced in either direction and never deleted, on top of
+	// gitsync.ExcludedPatterns and in the same syntax: files another
+	// add-on writes with secrets in them. Kept verbatim, an empty entry
+	// included, so gitsync.SetUserExclusions can refuse a bad one by name
+	// rather than this loader dropping it unseen.
+	ExcludePaths []string
 	// AutoUpdateAddons lists the installed add-ons this agent may update
 	// once Supervisor reports an update for them; empty turns the whole
 	// capability off. Entries are Supervisor slugs, not display names. The
@@ -128,37 +127,58 @@ var validApplyAfterPull = map[string]bool{
 // SUPERVISOR_TOKEN is not set in the environment.
 var ErrMissingSupervisorToken = errors.New("options: SUPERVISOR_TOKEN is not set in the environment")
 
+// PendingSecretError is ResolveSecretRefs' error for a well-formed
+// reference the live secrets file cannot answer yet: the file is missing,
+// or lacks the key, or holds something unusable under it. On a fresh box
+// the add-on that renders secrets.yaml may simply not have run yet, so
+// the caller waits and retries rather than giving up. Err never carries a
+// value, only the file, the key and why.
+type PendingSecretError struct {
+	// Option is the add-on option holding the reference ("git_token").
+	Option string
+	// Name is the secrets.yaml key it names.
+	Name string
+	Err  error
+}
+
+func (e *PendingSecretError) Error() string {
+	return fmt.Sprintf("options: %s: %v", e.Option, e.Err)
+}
+
+func (e *PendingSecretError) Unwrap() error { return e.Err }
+
 // ResolveSecretRefs replaces "secret://<name>" values in the
 // credential-bearing options with the named entries from the live secrets
 // file, so those options can hold a pointer instead of the secret itself.
 // Add-on options are NOT private: `format: password` only masks the UI,
 // and Supervisor's API returns the whole options object in the clear to
-// anything holding a hassio token - which for age_key means the private
-// identity for everything sops-encrypted in the repository. The live
-// /homeassistant/secrets.yaml is plaintext (encryption applies only to
-// the copy pushed to git), so age_key itself resolves from it with no
-// chicken-and-egg.
+// anything holding a hassio token.
 //
-// Literal values pass through untouched, so existing installs are
-// unaffected. An unresolvable or malformed reference is an error the
-// caller must treat as fatal: falling back to the literal text would
-// authenticate somewhere as "secret://..." and read as a wrong password,
-// not as the typo it is.
+// Literal values pass through untouched. Nothing is changed unless every
+// reference resolves. A well-formed reference that cannot be resolved yet
+// is a *PendingSecretError, which the caller retries; a malformed one
+// ("secret://" with no name) is any other error and fatal, since no wait
+// fixes a typo. Neither may fall back to the literal text, which would
+// authenticate somewhere as "secret://..." and read as a wrong password.
 func (o *Options) ResolveSecretRefs(resolver *secretref.Resolver) error {
+	resolved := *o
 	for _, field := range []struct {
 		name  string
 		value *string
 	}{
-		{"git_token", &o.GitToken},
-		{"age_key", &o.AgeKey},
-		{"webhook_secret", &o.WebhookSecret},
+		{"git_token", &resolved.GitToken},
+		{"webhook_secret", &resolved.WebhookSecret},
 	} {
-		resolved, err := resolver.ResolveString(*field.value)
+		value, err := resolver.ResolveString(*field.value)
 		if err != nil {
+			if name, ok := secretref.RefName(*field.value); ok {
+				return &PendingSecretError{Option: field.name, Name: name, Err: err}
+			}
 			return fmt.Errorf("options: %s: %w", field.name, err)
 		}
-		*field.value = resolved
+		*field.value = value
 	}
+	*o = resolved
 	return nil
 }
 
@@ -207,7 +227,7 @@ func Load(path string) (Options, error) {
 		CommitBack:                truthy(raw["commit_back"], false),
 		AllowImport:               truthy(raw["allow_import"], false),
 		WebhookSecret:             asString(raw["webhook_secret"], ""),
-		AgeKey:                    asString(raw["age_key"], ""),
+		ExcludePaths:              asPathList(raw["exclude_paths"]),
 		AutoUpdateAddons:          asStringSlice(raw["auto_update_addons"]),
 		AutoUpdateIntervalMinutes: autoUpdateIntervalMinutes,
 		TrackAddonVersions:        truthy(raw["track_addon_versions"], false),
@@ -293,6 +313,29 @@ func asStringSlice(value any) []string {
 		}
 		seen[s] = true
 		out = append(out, s)
+	}
+	return out
+}
+
+// asPathList converts value to a list of strings kept exactly as written:
+// unlike asStringSlice nothing is trimmed, deduplicated or dropped, so a
+// validator downstream can name the entry that is wrong. A non-string
+// element is kept as its JSON-ish rendering for the same reason.
+func asPathList(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		} else {
+			out = append(out, fmt.Sprint(item))
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

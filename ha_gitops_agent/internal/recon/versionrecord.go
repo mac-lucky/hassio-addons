@@ -217,7 +217,7 @@ func versionsBySlug(addons []regapply.InstalledAddon) map[string]string {
 // Every scalar is tagged !!str so version "1.2" cannot read back as a
 // float for a user's own tooling. That follows YAML 1.2's core schema, so
 // legacy 1.1 booleans ("yes", "off") stay unquoted - nothing here reaches
-// HA's 1.1 loader, where that would matter (see internal/sopscrypt).
+// HA's 1.1 loader, where that would matter.
 func renderAddonVersions(addons []regapply.InstalledAddon) ([]byte, error) {
 	bySlug := make(map[string]regapply.InstalledAddon, len(addons))
 	slugs := make([]string, 0, len(addons))

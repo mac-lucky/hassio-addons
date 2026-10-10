@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/execx"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 )
 
 // --- the happy path -------------------------------------------------------
@@ -320,44 +319,93 @@ func TestCaptureFilesSkipsGitignoredPathsAndOmitsThemFromResultPaths(t *testing.
 	}
 }
 
-// A capture must never put a plaintext secret on the tracked branch, and the
-// commit has to carry the .sops.yaml needed to read it back.
-func TestCaptureFilesEncryptsSecretsOnTheWayIn(t *testing.T) {
+// A capture must never put a plaintext secret on the tracked branch: a
+// file with a literal under a secret-shaped key is held back, named with
+// its key paths only, and the rest of the batch still lands. References -
+// HA's !secret tag and Zigbee2MQTT's '!secret key' strings - are fine.
+func TestCaptureFilesHoldsBackLiteralSecrets(t *testing.T) {
 	gs, bare, _, configRoot, _ := driftClone(t, map[string]string{
-		"secrets.yaml": fakeEncrypt("http_password: old\n"),
+		"automations.yaml":               "- id: demo\n",
+		"esphome/node.yaml":              "wifi:\n  password: !secret wifi_password\n",
+		"zigbee2mqtt/configuration.yaml": "mqtt:\n  server: mqtt://old\n",
+		"settings.json":                  "{\"name\": \"x\"}\n",
 	})
-	enableEncryption(t, gs)
 	ctx := context.Background()
 
-	const live = "http_password: rotated\n"
-	writeLiveFile(t, configRoot, "secrets.yaml", live)
+	writeLiveFile(t, configRoot, "automations.yaml", "- id: edited\n")
+	writeLiveFile(t, configRoot, "esphome/node.yaml", "wifi:\n  password: LEAKEDWIFI\n")
+	writeLiveFile(t, configRoot, "zigbee2mqtt/configuration.yaml",
+		"mqtt:\n  server: mqtt://new\n  password: '!secret.yaml password'\n")
+	writeLiveFile(t, configRoot, "settings.json", "{\"name\": \"x\", \"api\": {\"token\": \"LEAKEDTOKEN\"}}\n")
 
-	result, err := gs.CaptureFiles(ctx, []DriftFile{{Path: "secrets.yaml", Kind: "update"}}, configRoot, "")
+	result, err := gs.CaptureFiles(ctx, []DriftFile{
+		{Path: "automations.yaml", Kind: "update"},
+		{Path: "esphome/node.yaml", Kind: "update"},
+		{Path: "settings.json", Kind: "update"},
+		{Path: "zigbee2mqtt/configuration.yaml", Kind: "update"},
+	}, configRoot, "")
 	if err != nil {
 		t.Fatalf("CaptureFiles: %v", err)
 	}
-	if !slices.Equal(result.Paths, []string{"secrets.yaml"}) {
-		t.Errorf("Paths = %v, want secrets.yaml", result.Paths)
+	if want := []string{"automations.yaml", "zigbee2mqtt/configuration.yaml"}; !slices.Equal(result.Paths, want) {
+		t.Errorf("Paths = %v, want %v", result.Paths, want)
+	}
+	want := []HeldBack{
+		{Path: "esphome/node.yaml", Keys: []string{"wifi.password"}},
+		{Path: "settings.json", Keys: []string{"api.token"}},
+	}
+	if len(result.HeldBack) != len(want) {
+		t.Fatalf("HeldBack = %+v, want %+v", result.HeldBack, want)
+	}
+	for i := range want {
+		if result.HeldBack[i].Path != want[i].Path || !slices.Equal(result.HeldBack[i].Keys, want[i].Keys) {
+			t.Errorf("HeldBack[%d] = %+v, want %+v", i, result.HeldBack[i], want[i])
+		}
+		if strings.Contains(result.HeldBack[i].String(), "LEAKED") {
+			t.Errorf("HeldBack[%d] renders a value: %q", i, result.HeldBack[i].String())
+		}
 	}
 
-	pushed, ok := showAtRef(t, bare, "main", "secrets.yaml")
-	if !ok {
-		t.Fatal("secrets.yaml missing from main")
+	for path, secret := range map[string]string{"esphome/node.yaml": "LEAKEDWIFI", "settings.json": "LEAKEDTOKEN"} {
+		got, _ := showAtRef(t, bare, "main", path)
+		if strings.Contains(got, secret) {
+			t.Fatalf("%s on main carries the literal secret: %q", path, got)
+		}
 	}
-	if strings.Contains(pushed, "rotated") {
-		t.Fatalf("secrets.yaml on main holds plaintext: %q", pushed)
+	if got, _ := showAtRef(t, bare, "main", "zigbee2mqtt/configuration.yaml"); !strings.Contains(got, "'!secret.yaml password'") {
+		t.Errorf("zigbee2mqtt/configuration.yaml on main = %q, want the reference captured", got)
 	}
-	if !sopscrypt.IsEncrypted([]byte(pushed)) {
-		t.Errorf("secrets.yaml on main is not a sops document: %q", pushed)
+}
+
+// Every file held back: no commit, no error, the list still reported.
+func TestCaptureFilesWithEverythingHeldBackCommitsNothing(t *testing.T) {
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{"esphome/node.yaml": "api:\n  key: !secret api_key\n"})
+	writeLiveFile(t, configRoot, "esphome/node.yaml", "api:\n  key: LEAKED\n")
+
+	result, err := gs.CaptureFiles(context.Background(), []DriftFile{{Path: "esphome/node.yaml", Kind: "update"}}, configRoot, "")
+	if err != nil {
+		t.Fatalf("CaptureFiles: %v", err)
 	}
-	plaintext, decoded := fakeDecrypt([]byte(pushed))
-	if !decoded || string(plaintext) != live {
-		t.Errorf("decrypted = %q (ok=%v), want the live content %q", plaintext, decoded, live)
+	if result.CommitSHA != "" {
+		t.Errorf("CommitSHA = %q, want no commit", result.CommitSHA)
 	}
-	// Without the config riding along, the commit carries a secret nobody
-	// with a plain "sops" can open.
-	if _, ok := showAtRef(t, bare, "main", sopscrypt.ConfigFile); !ok {
-		t.Errorf("%s missing from main, want it committed alongside the encrypted file", sopscrypt.ConfigFile)
+	if len(result.HeldBack) != 1 || result.HeldBack[0].Path != "esphome/node.yaml" {
+		t.Errorf("HeldBack = %+v, want esphome/node.yaml", result.HeldBack)
+	}
+	if got := headSHA(t, bare, "main"); got != sha {
+		t.Errorf("main moved to %s, want it left at %s", got, sha)
+	}
+}
+
+// A secrets file at any depth is never captured, whatever a caller asks.
+func TestCaptureFilesRefusesSecretsFilesAtAnyDepth(t *testing.T) {
+	gs, _, _, configRoot, _ := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
+	for _, p := range []string{"secrets.yaml", "esphome/secrets.yaml", "zigbee2mqtt/secret.yaml", "zigbee2mqtt/secret.yml"} {
+		writeLiveFile(t, configRoot, p, "x: 1\n")
+		_, err := gs.CaptureFiles(context.Background(), []DriftFile{{Path: p, Kind: "update"}}, configRoot, "")
+		if err == nil || !strings.Contains(err.Error(), "excluded/secret-shaped") {
+			t.Errorf("CaptureFiles(%s) error = %v, want the excluded/secret-shaped refusal", p, err)
+		}
 	}
 }
 

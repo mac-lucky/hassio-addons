@@ -500,34 +500,16 @@ func New(agent Agent) http.Handler {
 	// One per handler, so two servers in a test never share a slot.
 	tracker := &opTracker{}
 
-	staticSub, err := fs.Sub(staticFiles, "static")
-	if err != nil {
-		// The "static" directory is compile-time verified by the embed.
-		panic(err)
-	}
-	mux.Handle("GET /static/", http.StripPrefix("/static/", cacheStatic(staticSub, http.FileServerFS(staticSub))))
+	mux.Handle("GET /static/", staticHandler())
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		status, preview := requestStatus(agent, r)
 		renderPage(w, status, preview)
 	})
 
-	// GET /fragment is what the dashboard polls. It answers 204 when the
-	// fragment is byte-for-byte the caller's, and htmx does not swap on a
-	// 204 - so an idle dashboard never tears out an open diff.
 	mux.HandleFunc("GET /fragment", func(w http.ResponseWriter, r *http.Request) {
-		body, hash := renderFragment(requestStatus(agent, r))
-		if hash == r.URL.Query().Get("h") {
-			// No Content-Type: there is no content. Cache-Control still
-			// applies - this is as short lived as the fragment.
-			w.Header().Set("Cache-Control", "no-cache")
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		writeHTMLHeaders(w)
-		if _, err := w.Write(body); err != nil {
-			slog.Warn("web: writing the fragment failed", "error", err)
-		}
+		status, preview := requestStatus(agent, r)
+		serveFragment(w, r, status, preview)
 	})
 
 	// GET /history is the whole run history on its own page: no htmx, no
@@ -655,6 +637,35 @@ func New(agent Agent) http.Handler {
 	})
 
 	return requireIngress(requireSameOrigin(mux))
+}
+
+// staticHandler serves the embedded static/ directory under /static/.
+func staticHandler() http.Handler {
+	staticSub, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		// The "static" directory is compile-time verified by the embed.
+		panic(err)
+	}
+	return http.StripPrefix("/static/", cacheStatic(staticSub, http.FileServerFS(staticSub)))
+}
+
+// serveFragment answers GET /fragment, what the dashboard polls. It
+// answers 204 when the fragment is byte-for-byte the caller's, and htmx
+// does not swap on a 204 - so an idle dashboard never tears out an open
+// diff.
+func serveFragment(w http.ResponseWriter, r *http.Request, status recon.Status, preview string) {
+	body, hash := renderFragment(status, preview)
+	if hash == r.URL.Query().Get("h") {
+		// No Content-Type: there is no content. Cache-Control still
+		// applies - this is as short lived as the fragment.
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeHTMLHeaders(w)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("web: writing the fragment failed", "error", err)
+	}
 }
 
 // opRoute builds one action route: refuse while an operation is running,

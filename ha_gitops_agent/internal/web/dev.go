@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/history"
@@ -93,6 +94,51 @@ var devStatuses = map[string]recon.Status{
 	"managed":        devManagedStatus(),
 	"paused":         devPausedStatus(),
 	"forge_outage":   devForgeOutageStatus(),
+	"held_back":      devHeldBackStatus(),
+	"sops_tracked":   devSopsTrackedStatus(),
+	"waiting":        devWaitingStatus(),
+}
+
+// devHeldBackStatus is capture holding two files back: each holds a
+// literal under a secret-shaped key, so neither is pushed or applied over.
+func devHeldBackStatus() recon.Status {
+	status := devDriftStatus(false)
+	status.CaptureEnabled = true
+	status.HeldBack = []string{
+		"esphome/garage_door.yaml (wifi.password, api.encryption.key)",
+		"zigbee2mqtt/configuration.yaml (mqtt.password)",
+	}
+	status.Events = append(status.Events, recon.Event{
+		TS: "2026-08-02T07:35:02+00:00",
+		Message: "not captured, 2 file(s) hold a literal value under a secret-shaped key: " +
+			strings.Join(status.HeldBack, ", ") + " - move each value into secrets.yaml and reference it with !secret, " +
+			"or list the file in exclude_paths",
+	})
+	return status
+}
+
+// devSopsTrackedStatus is the hard stop on a repository still holding SOPS
+// ciphertext from before 0.9.0.
+func devSopsTrackedStatus() recon.Status {
+	status := devErrorStatus()
+	status.LastError = "refusing to sync: SOPS-encrypted files tracked in repository: esphome/garage_door.yaml, " +
+		"secrets.yaml, zigbee2mqtt/configuration.yaml - this version no longer decrypts SOPS files: move those " +
+		"values to 1Password (the 1Password Secrets add-on renders secrets.yaml), reference them with !secret, " +
+		"then remove the encrypted files and .sops.yaml from the repository"
+	return status
+}
+
+// devWaitingStatus is startup waiting on a secret:// option: the page
+// main serves before any reconciler exists.
+func devWaitingStatus() recon.Status {
+	return recon.Status{
+		State:            recon.StateWaiting,
+		Configured:       true,
+		RepoURL:          "https://github.com/example/ha-config.git",
+		Branch:           "main",
+		IntervalMinutes:  5,
+		WaitingForSecret: "waiting for secrets.yaml key 'github_token' (git_token): /homeassistant/secrets.yaml does not exist, so secret:// references cannot be resolved",
+	}
 }
 
 // devForgeOutageStatus is a pending plan held through a short forge

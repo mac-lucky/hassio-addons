@@ -1,7 +1,6 @@
 package gitsync
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +12,7 @@ import (
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretshape"
 )
 
 // commitAuthorName/commitAuthorEmail identify every CommitBack commit.
@@ -59,28 +58,36 @@ type DriftFile struct {
 
 // CommitBack captures the CURRENT LIVE state of every path in files into a
 // new "gitops/drift-<timestamp>" branch based on baseSHA and pushes it with
-// Fetch's credential mechanism, returning the branch name. opts.Branch is
-// never touched.
+// Fetch's credential mechanism, returning the branch name and the files it
+// held back (see HeldBack). opts.Branch is never touched.
 //
 // Kind is not consulted: each path is re-read under configRoot and staged
 // with git add, or git rm when it is genuinely gone (fs.ErrNotExist alone -
 // see liveFileIsGone) and the repo tracks it. A live deletion arrives here
 // as differ's "add", so a repo-side file no apply has written out yet is
-// captured as a deletion too, on the throwaway branch only.
+// captured as a deletion too, on the throwaway branch only. A branch whose
+// every file was held back is not made; that is an error naming them.
 //
 // Workdir is left back at its detached baseSHA either way. Callers
 // serialize this against every other GitSync method (recon's opLock).
-func (g *GitSync) CommitBack(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+func (g *GitSync) CommitBack(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, []HeldBack, error) {
 	branch := "gitops/drift-" + now.UTC().Format(driftBranchTimeFormat)
-	if _, err := g.commitLiveOnto(ctx, "commit-back", branch, DriftCommitMessage, files, configRoot, baseSHA); err != nil {
-		return "", err
+	staged, err := g.commitLiveOnto(ctx, "commit-back", branch, DriftCommitMessage, files, configRoot, baseSHA)
+	if errors.Is(err, ErrAllHeldBack) {
+		return "", staged.HeldBack, fmt.Errorf("gitsync: commit-back: nothing to commit: %w - %s: %s",
+			err, HeldBackSummary(staged.HeldBack), HeldBackAdvice)
 	}
-	return branch, nil
+	if err != nil {
+		return "", staged.HeldBack, err
+	}
+	return branch, staged.HeldBack, nil
 }
 
 // ParkConflicts captures the CURRENT LIVE state of every path in files into
 // a new "gitops/conflict-<timestamp>" branch based on baseSHA and pushes it,
-// returning the branch name. opts.Branch is never touched.
+// returning the branch name and the files it held back. opts.Branch is
+// never touched. When every file was held back nothing is pushed and the
+// branch is "", with no error: the refusal stands, there is just no copy.
 //
 // CommitBack's machinery with a different prefix and a different meaning.
 // Commit-back captures drift a human may want to merge; this preserves work
@@ -89,45 +96,58 @@ func (g *GitSync) CommitBack(ctx context.Context, files []DriftFile, configRoot,
 // is no way to tell which one is meant. So the branch is a safety net rather
 // than a proposal, and a failure to park does not change that verdict: the
 // refusal is the protection, this is only the copy.
-func (g *GitSync) ParkConflicts(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+func (g *GitSync) ParkConflicts(ctx context.Context, files []DriftFile, configRoot, baseSHA string, now time.Time) (string, []HeldBack, error) {
 	branch := "gitops/conflict-" + now.UTC().Format(driftBranchTimeFormat)
-	if _, err := g.commitLiveOnto(ctx, "park-conflicts", branch, ConflictCommitMessage, files, configRoot, baseSHA); err != nil {
-		return "", err
+	staged, err := g.commitLiveOnto(ctx, "park-conflicts", branch, ConflictCommitMessage, files, configRoot, baseSHA)
+	if errors.Is(err, ErrAllHeldBack) {
+		return "", staged.HeldBack, nil
 	}
-	return branch, nil
+	if err != nil {
+		return "", staged.HeldBack, err
+	}
+	return branch, staged.HeldBack, nil
 }
+
+// ErrAllHeldBack reports that nothing was staged because every file was
+// held back. CommitBack wraps it, so a caller can tell a drift set that
+// will never commit as it stands from a push that failed; ParkConflicts
+// absorbs it.
+var ErrAllHeldBack = errors.New("every file was held back")
 
 // commitLiveOnto builds branch at baseSHA holding the current live state of
 // every path in files, commits it with message and pushes it under its own
-// name, returning the paths the commit carries. The shared body of
-// CommitBack and ParkConflicts, which differ only in what their branch
-// MEANS. Both leave opts.Branch alone, and neither needs the fast-forward
-// dance Import, RecordFile and CaptureFiles go through: the ref is new every
-// time, so there is nothing on the remote to race.
+// name, returning what was staged. The shared body of CommitBack and
+// ParkConflicts, which differ only in what their branch MEANS. Both leave
+// opts.Branch alone, and neither needs the fast-forward dance Import,
+// RecordFile and CaptureFiles go through: the ref is new every time, so
+// there is nothing on the remote to race.
 //
 // op names the operation in every error, so a failure says which button or
 // which verdict produced it.
 func (g *GitSync) commitLiveOnto(
 	ctx context.Context, op, branch, message string, files []DriftFile, configRoot, baseSHA string,
-) ([]string, error) {
+) (stagedSet, error) {
 	if len(files) == 0 {
-		return nil, fmt.Errorf("gitsync: %s: no files given", op)
+		return stagedSet{}, fmt.Errorf("gitsync: %s: no files given", op)
 	}
 	if baseSHA == "" {
-		return nil, fmt.Errorf("gitsync: %s: no base commit to branch from", op)
+		return stagedSet{}, fmt.Errorf("gitsync: %s: no base commit to branch from", op)
 	}
 
 	if _, err := g.runGit(ctx, []string{"checkout", "-B", branch, baseSHA}, "", nil); err != nil {
-		return nil, err
+		return stagedSet{}, err
 	}
 	defer g.restoreDetachedCheckout(ctx, baseSHA, branch)
 
 	staged, err := g.stageDrift(ctx, op, files, configRoot)
 	if err != nil {
-		return nil, err
+		return stagedSet{}, err
 	}
 	if len(staged.Paths) == 0 {
-		return nil, fmt.Errorf("gitsync: %s: nothing to stage among %v", op, files)
+		if len(staged.HeldBack) > 0 {
+			return staged, ErrAllHeldBack
+		}
+		return staged, fmt.Errorf("gitsync: %s: nothing to stage among %v", op, files)
 	}
 
 	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", message}, "", commitIdentityEnv()); err != nil {
@@ -135,16 +155,16 @@ func (g *GitSync) commitLiveOnto(
 			// Everything staged is byte-identical to baseSHA. Named
 			// explicitly rather than reported as success with an empty
 			// branch name, which would set LastDriftBranch to "".
-			return nil, fmt.Errorf("gitsync: %s: nothing to commit (live content already matches the repository)", op)
+			return staged, fmt.Errorf("gitsync: %s: nothing to commit (live content already matches the repository)", op)
 		}
-		return nil, err
+		return staged, err
 	}
 
 	if _, err := g.runGit(ctx, []string{"push", g.Opts.RepoURL, branch}, "", g.credentialEnv()); err != nil {
-		return nil, err
+		return staged, err
 	}
 
-	return staged.Paths, nil
+	return staged, nil
 }
 
 // isNothingToCommitError matches git commit's "nothing to commit, working
@@ -155,42 +175,22 @@ func isNothingToCommitError(err error) bool {
 
 // stagedSet is what one staging pass put in the index.
 type stagedSet struct {
-	// Paths is the content staged from live. A .sops.yaml refresh is
-	// deliberately NOT in here: it is not drift, and an operation whose only
-	// change is that config must still refuse as "nothing to stage".
+	// Paths is the content staged from live.
 	Paths []string
-	// SopsConfig records that this pass also refreshed the managed
-	// .sops.yaml. Kept separate for the reason above, but a "commit --only"
-	// pathspec has to name it as well, or a commit carrying a newly
-	// encrypted secrets.yaml would leave behind the config to decrypt it.
-	SopsConfig bool
-}
-
-// pathspec is every path this pass staged, for a commit that names them
-// rather than trusting the index.
-func (s stagedSet) pathspec() []string {
-	if s.SopsConfig {
-		return append(append([]string{}, s.Paths...), sopscrypt.ConfigFile)
-	}
-	return s.Paths
+	// HeldBack is the live files left out because they hold a literal
+	// value under a secret-shaped key.
+	HeldBack []HeldBack
 }
 
 // stageDrift stages the live version of each path (git add), or its removal
 // (git rm) when genuinely gone, and reports what it staged so a caller can
 // refuse an empty commit and so one committing by pathspec knows the names.
-// Every path is re-checked against Excluded/secretShapedDisallowed and
-// guardDriftPath here, whatever the caller already filtered. op names the
-// operation in the errors and the skip logs.
+// Every path is re-checked against Excluded/matchesSecretPattern and
+// guardDriftPath here, whatever the caller already filtered, and a live
+// file holding a literal secret is held back rather than staged. op names
+// the operation in the errors and the skip logs.
 func (g *GitSync) stageDrift(ctx context.Context, op string, files []DriftFile, configRoot string) (stagedSet, error) {
 	var set stagedSet
-
-	// Written first, so a branch carrying a newly encrypted secrets.yaml
-	// also carries the config to decrypt it.
-	wroteConfig, err := g.stageSopsConfig(ctx, op)
-	if err != nil {
-		return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
-	}
-	set.SopsConfig = wroteConfig
 
 	for _, f := range files {
 		p := f.Path
@@ -198,8 +198,14 @@ func (g *GitSync) stageDrift(ctx context.Context, op string, files []DriftFile, 
 			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 
-		copied, err := g.copyLiveIntoWorkdir(ctx, configRoot, p)
+		copied, err := g.copyLiveIntoWorkdir(configRoot, p)
 		if err != nil {
+			var held *HeldBackError
+			if errors.As(err, &held) {
+				slog.Info("gitsync: "+op+": holding back a file with a literal secret", "path", p, "keys", strings.Join(held.Keys, ", "))
+				set.HeldBack = append(set.HeldBack, held.HeldBack)
+				continue
+			}
 			return stagedSet{}, fmt.Errorf("gitsync: %s: %w", op, err)
 		}
 		if copied {
@@ -261,9 +267,12 @@ func liveFileIsGone(configRoot, p string) (bool, error) {
 // copyLiveIntoWorkdir writes p's live content from configRoot into the same
 // relative place under Workdir and reports whether it did; false with a nil
 // error means absent or not a regular file, and the caller decides what
-// that means. Both ends go through guardDriftPath, and a configured Crypter
-// encrypts in place before this returns, so plaintext is never staged.
-func (g *GitSync) copyLiveIntoWorkdir(ctx context.Context, configRoot, p string) (bool, error) {
+// that means. Both ends go through guardDriftPath.
+//
+// A live file holding a literal value under a secret-shaped key is never
+// written: that is a *HeldBackError, and whatever the worktree held at that
+// path stays as the checked-out commit has it, so nothing of it is staged.
+func (g *GitSync) copyLiveIntoWorkdir(configRoot, p string) (bool, error) {
 	livePath, err := guardDriftPath(configRoot, p)
 	if err != nil {
 		return false, err
@@ -282,105 +291,63 @@ func (g *GitSync) copyLiveIntoWorkdir(ctx context.Context, configRoot, p string)
 	if err != nil {
 		return false, fmt.Errorf("reading live %s: %w", p, err)
 	}
+	if keys := secretshape.Literals(p, content); len(keys) > 0 {
+		return false, &HeldBackError{HeldBack: HeldBack{Path: p, Keys: keys}}
+	}
 	if err := os.MkdirAll(filepath.Dir(repoPath), 0o750); err != nil {
 		return false, err
 	}
-	// 0600, and removed again on a failed encrypt: between this write and
-	// encryptInWorkdir the live content - a secrets file included - sits in
-	// the worktree in the clear, and a copy left behind by a failed sops
-	// call would otherwise stay there, inside every Supervisor backup of
-	// /data. Git records only the executable bit, so the tighter mode
-	// never reaches the repository. The next cycle's forced checkout
-	// restores anything removed here.
+	// 0600: the worktree sits inside every Supervisor backup of /data. Git
+	// records only the executable bit, so the tighter mode never reaches
+	// the repository.
 	if err := os.WriteFile(repoPath, content, 0o600); err != nil { // #nosec G304,G703 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
 		return false, err
 	}
-	if err := g.encryptInWorkdir(ctx, repoPath, p, content); err != nil {
-		_ = os.Remove(repoPath)
-		return false, err
-	}
 	return true, nil
 }
 
-// encryptInWorkdir encrypts the just-written worktree copy of p when its
-// content calls for it; a no-op with no age key. content is passed in
-// rather than re-read, so the answer cannot differ from what was written.
-// A NeedsEncryption refusal fails the whole operation: skipping would push
-// a plaintext secret, encrypting anyway would corrupt the file.
-func (g *GitSync) encryptInWorkdir(ctx context.Context, repoPath, p string, content []byte) error {
-	if !g.Crypter.Enabled() {
-		if EncryptionEnabled() {
-			// Fail closed on a half-wired agent: the switch alone has
-			// already let secrets.yaml through Excluded and
-			// secretShapedDisallowed, with nothing left to encrypt it.
-			return fmt.Errorf(
-				"encryption is enabled but no age key is loaded - refusing to write %s to the repository in the clear", p)
-		}
-		return nil
-	}
-	need, refusal := sopscrypt.NeedsEncryption(p, content)
-	if refusal != "" {
-		return &EncryptRefusedError{Path: p, Reason: refusal}
-	}
-	if !need {
-		return nil
-	}
-	if err := g.Crypter.EncryptFileInPlace(ctx, repoPath, p); err != nil {
-		return fmt.Errorf("encrypting %s: %w", p, err)
-	}
-	return nil
+// maxHeldBackKeys bounds how many key paths HeldBack.String names per file.
+const maxHeldBackKeys = 5
+
+// HeldBackAdvice is the fix every held-back report ends with.
+const HeldBackAdvice = "move each value into secrets.yaml and reference it with !secret, or list the file in exclude_paths"
+
+// HeldBack is one live file a write to git left out because it holds a
+// literal value under a secret-shaped key (internal/secretshape). Keys are
+// key paths, never values, so it is safe to log and to display.
+type HeldBack struct {
+	Path string
+	Keys []string
 }
 
-// EncryptRefusedError reports one file holding a secret SOPS cannot encrypt
-// without breaking it (see sopscrypt.NeedsEncryption). Typed so a caller
-// walking a whole tree can gather every one and report them together.
-type EncryptRefusedError struct {
-	Path   string
-	Reason string
+// String renders "path (key, key)".
+func (h HeldBack) String() string {
+	keys := h.Keys
+	more := ""
+	if len(keys) > maxHeldBackKeys {
+		more = fmt.Sprintf(" and %d more", len(keys)-maxHeldBackKeys)
+		keys = keys[:maxHeldBackKeys]
+	}
+	return h.Path + " (" + strings.Join(keys, ", ") + more + ")"
 }
 
-func (e *EncryptRefusedError) Error() string {
-	return e.Path + " " + e.Reason
+// HeldBackSummary renders a list of them for an event or an error.
+func HeldBackSummary(items []HeldBack) string {
+	parts := make([]string, len(items))
+	for i, h := range items {
+		parts[i] = h.String()
+	}
+	return strings.Join(parts, ", ")
 }
 
-// ensureSopsConfig writes the .sops.yaml the agent manages at the worktree
-// root and reports whether it had to; a no-op with no age key or when the
-// file is already right, which keeps it out of every commit after the
-// first. It lets a human run plain "sops <file>" in their own clone, and is
-// in ExcludedPatterns so it never reaches /homeassistant.
-func (g *GitSync) ensureSopsConfig() (bool, error) {
-	if !g.Crypter.Enabled() {
-		return false, nil
-	}
-	want := g.Crypter.SopsConfig()
-	// Guarded and unlinked first: a tracked .sops.yaml that is a SYMLINK
-	// survives clone and checkout, and an unguarded write would follow it
-	// (pointed at /homeassistant/configuration.yaml, say).
-	full, err := guardDriftPath(g.Workdir, sopscrypt.ConfigFile)
-	if err != nil {
-		return false, err
-	}
-	if existing, err := os.ReadFile(full); err == nil && bytes.Equal(existing, want) { // #nosec G304 -- guardDriftPath-confined under g.Workdir
-		return false, nil
-	}
-	if err := os.Remove(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, fmt.Errorf("replacing %s: %w", sopscrypt.ConfigFile, err)
-	}
-	if err := os.WriteFile(full, want, 0o644); err != nil { // #nosec G306 -- public recipient and path rules, nothing secret
-		return false, fmt.Errorf("writing %s: %w", sopscrypt.ConfigFile, err)
-	}
-	return true, nil
+// HeldBackError is copyLiveIntoWorkdir's refusal of one file. Typed so a
+// caller walking many files can gather every one and carry on.
+type HeldBackError struct {
+	HeldBack
 }
 
-// stageSopsConfig is ensureSopsConfig plus the explicit "git add" stageDrift
-// needs, since it stages path by path rather than in one bulk call, and
-// reports whether the config was actually staged.
-func (g *GitSync) stageSopsConfig(ctx context.Context, op string) (bool, error) {
-	written, err := g.ensureSopsConfig()
-	if err != nil || !written {
-		return false, err
-	}
-	return g.gitAddSkippingIgnored(ctx, op, sopscrypt.ConfigFile)
+func (e *HeldBackError) Error() string {
+	return e.String() + " holds a literal value under a secret-shaped key"
 }
 
 // gitAddSkippingIgnored stages p, tolerating the one failure a gitignored
@@ -434,10 +401,8 @@ func guardDriftPath(root, path string) (string, error) {
 	}
 	if rel, err := filepath.Rel(rootReal, destReal); err == nil && rel != "." {
 		relSlash := filepath.ToSlash(rel)
-		// matchesSecretPattern, NOT the encryption-gated version: the gate
-		// excuses a file DECLARED secrets.yaml, but the declared name picks
-		// the encryption rules, so "automations.yaml -> secrets.yaml" would
-		// be encrypted key-by-key and commit most values in the clear.
+		// The TARGET is what gets read or written, so "automations.yaml ->
+		// secrets.yaml" is refused like secrets.yaml itself.
 		if relSlash != normalized && (Excluded(relSlash) || matchesSecretPattern(relSlash)) {
 			return "", fmt.Errorf("path resolves (via symlink) to an excluded/secret-shaped path: %s -> %s", path, relSlash)
 		}

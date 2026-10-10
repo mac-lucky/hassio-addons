@@ -19,7 +19,6 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/snapshot"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/statusd"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/subentries"
 )
@@ -36,15 +35,15 @@ type Git interface {
 	CurrentSHA(ctx context.Context) string
 	TrackedFiles(ctx context.Context, sha string) ([]string, error)
 	TrackedFilesRaw(ctx context.Context, sha string) ([]string, error)
-	// GuardSecretsAt takes the sha the file list came from: with encryption
-	// on, judging a tracked secrets.yaml means reading its blob there.
+	// GuardSecretsAt takes the sha the file list came from: the SOPS check
+	// reads blobs there, before anything is checked out.
 	GuardSecretsAt(ctx context.Context, sha string, files []string) error
 	// Workdir is the checked-out tree Differ/Applier/Registries read from.
 	// A method here, a plain field on gitsync.GitSync.
 	Workdir() string
 	// CommitBack is the gitsync.CommitBack seam, used only by
 	// commitDriftBack, always under opLock.
-	CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error)
+	CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, []gitsync.HeldBack, error)
 	// Import is the gitsync.Import seam, used only by importLive, always
 	// under opLock.
 	Import(ctx context.Context, configRoot string, limits gitsync.ImportLimits, now time.Time) (gitsync.ImportResult, error)
@@ -67,7 +66,7 @@ type Git interface {
 	CaptureFiles(ctx context.Context, files []gitsync.DriftFile, configRoot, classifiedTip string) (gitsync.CaptureResult, error)
 	// ParkConflicts is the gitsync.ParkConflicts seam, used only when the
 	// classifier refuses a path in both directions.
-	ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error)
+	ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, []gitsync.HeldBack, error)
 	// CommitReachable, IsAncestor, ChangedBetween and LiveFactsAt are the
 	// three-way classifier's reads. None of them touches the working tree, so
 	// the detached checkout the differ and applier share is safe across a
@@ -102,7 +101,7 @@ func (r *realGit) GuardSecretsAt(ctx context.Context, sha string, files []string
 }
 func (r *realGit) Workdir() string { return r.g.Workdir }
 
-func (r *realGit) CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+func (r *realGit) CommitBack(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, []gitsync.HeldBack, error) {
 	return r.g.CommitBack(ctx, files, configRoot, baseSHA, now)
 }
 
@@ -126,7 +125,7 @@ func (r *realGit) CaptureFiles(ctx context.Context, files []gitsync.DriftFile, c
 	return r.g.CaptureFiles(ctx, files, configRoot, classifiedTip)
 }
 
-func (r *realGit) ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, error) {
+func (r *realGit) ParkConflicts(ctx context.Context, files []gitsync.DriftFile, configRoot, baseSHA string, now time.Time) (string, []gitsync.HeldBack, error) {
 	return r.g.ParkConflicts(ctx, files, configRoot, baseSHA, now)
 }
 
@@ -152,19 +151,13 @@ var _ Git = (*realGit)(nil)
 type Differ interface {
 	Compute(
 		repoRoot, configRoot string, tracked, prevManifest []string,
-	) (changes []differ.Change, skippedContainment, decryptFailures []string)
+	) (changes []differ.Change, skippedContainment []string)
 }
 
-// realDiffer holds the transform differ.Compute reads encrypted files
-// through, rather than taking it per call, so the reconcile loop's call
-// site knows nothing about encryption - like realApplier and its Config.
-// A zero realDiffer has no transform: exactly "no age key configured".
-type realDiffer struct {
-	transform differ.RepoTransform
-}
+type realDiffer struct{}
 
-func (d realDiffer) Compute(repoRoot, configRoot string, tracked, prevManifest []string) ([]differ.Change, []string, []string) {
-	return differ.Compute(repoRoot, configRoot, tracked, prevManifest, d.transform)
+func (realDiffer) Compute(repoRoot, configRoot string, tracked, prevManifest []string) ([]differ.Change, []string) {
+	return differ.Compute(repoRoot, configRoot, tracked, prevManifest)
 }
 
 var _ Differ = realDiffer{}
@@ -789,16 +782,4 @@ type Deps struct {
 	Subentries      Subentries
 	Hacs            Hacs
 	History         History
-
-	// Crypter is the age identity from the age_key option, or nil. Unlike
-	// the seams above it has no real implementation to fall back on: nil is
-	// a supported configuration meaning encryption is off, and New must not
-	// invent one.
-	//
-	// One field rather than three constructor arguments because it reaches
-	// Git (encrypt), Differ and Applier (decrypt) at once, and a build
-	// where only some of them got the key is the shape of every bad
-	// outcome. Ignored when the seam is supplied explicitly, so an injected
-	// collaborator is never half-configured.
-	Crypter *sopscrypt.Crypter
 }

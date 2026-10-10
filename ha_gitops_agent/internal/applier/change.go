@@ -31,15 +31,6 @@ const (
 // actually uses; DefaultIsExcluded is the production implementation.
 type IsExcludedFunc func(p string) bool
 
-// TransformRepoFileFunc converts one repository file's bytes into what
-// belongs in the live config for that path - sops decryption, in practice
-// (see internal/sopscrypt). rel, the repository-relative path, decides how
-// much of the file was encrypted. Config.TransformRepoFile holds the one
-// Apply uses, in exactly one direction: repository -> config. An error
-// takes the whole apply down the rollback path, since ciphertext must never
-// be written into a config Home Assistant is about to read.
-type TransformRepoFileFunc func(rel string, data []byte) ([]byte, error)
-
 // DefaultIsExcluded is gitsync.Excluded - the same root-anchored gitops/
 // plus glob/segment algorithm internal/differ and internal/gitsync use for
 // the identical purpose, rather than a second copy here.

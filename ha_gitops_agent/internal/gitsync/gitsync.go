@@ -21,7 +21,6 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/execx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
 )
 
 // DefaultWorkdir is the local clone location GitSync uses by default.
@@ -37,31 +36,39 @@ const DefaultNetworkTimeout = 10 * time.Minute
 // DefaultGitTimeout bounds every git subprocess call this package makes.
 const DefaultGitTimeout = 60 * time.Second
 
-// encryptionOn is the process-wide SOPS+age switch: see SetEncryptionEnabled.
-var encryptionOn atomic.Bool
+// secretsFileNames are the files Home Assistant and its add-ons read
+// secrets from: secrets.yaml (or .yml) for Home Assistant and ESPHome,
+// secret.yaml (or .yml) for Zigbee2MQTT. Something other than this agent
+// renders them, so they are never synced in either direction, at any
+// depth, and a tracked one is a hard stop (they are SecretPatterns too).
+var secretsFileNames = []string{"secrets.yaml", "secrets.yml", "secret.yaml", "secret.yml"}
 
-// SetEncryptionEnabled turns SOPS+age handling on or off package-wide -
-// Excluded, secretShapedDisallowed and the import scan take no *GitSync.
-// Set once in main, before any goroutine starts.
-func SetEncryptionEnabled(on bool) { encryptionOn.Store(on) }
-
-// EncryptionEnabled reports whether SOPS+age handling is on.
-func EncryptionEnabled() bool { return encryptionOn.Load() }
-
-// secretsFileEntry is the one ExcludedPatterns entry encryption switches
-// off: encrypted before it enters the worktree, secrets.yaml is syncable.
-const secretsFileEntry = "secrets.yaml"
+// IsSecretsFile reports whether p's basename is one of secretsFileNames,
+// ignoring case. Excluded consults it on top of the exact entries below,
+// so "Secrets.YAML" is never synced either.
+func IsSecretsFile(p string) bool {
+	base := path.Base(strings.ReplaceAll(p, `\`, "/"))
+	for _, name := range secretsFileNames {
+		if strings.EqualFold(base, name) {
+			return true
+		}
+	}
+	return false
+}
 
 // ExcludedPatterns are paths never synced in either direction, by differ or
-// applier. The entry syntax is documented on Excluded; every entry is
-// unconditional except secretsFileEntry.
+// applier, and never deleted. The entry syntax is documented on Excluded.
+// The exclude_paths option adds to them (SetUserExclusions).
 var ExcludedPatterns = []string{
 	".storage/",
 	".cloud/",
-	secretsFileEntry,
-	// The sops config the agent maintains (see ensureSopsConfig):
-	// repository-side tooling, never written into /homeassistant.
-	sopscrypt.ConfigFile,
+	"secrets.yaml",
+	"secrets.yml",
+	"secret.yaml",
+	"secret.yml",
+	// The sops config versions before 0.9.0 maintained: repository-side
+	// tooling, never written into /homeassistant.
+	".sops.yaml",
 	"*.db",
 	// SQLite's sidecars (.db-wal, .db-shm) and anything else suffixing a
 	// database file: "*.db-*" alone missed "zigbee2mqtt/database.db.backup".
@@ -103,17 +110,32 @@ var ExcludedPatterns = []string{
 	"/image/",
 }
 
-// exclusions is ExcludedPatterns with each entry's kind decided once rather
+// exclusions is a list of entries with each one's kind decided once rather
 // than re-derived per call: Excluded runs per file per scan, upwards of
 // 7000 times on a real config.
 type exclusions struct {
-	dirs     map[string]struct{} // "dir/"  - any segment
-	rootDirs map[string]struct{} // "/dir/" - first segment only
-	exact    map[string]struct{} // plain entries
-	globs    []string            // entries holding "*"
+	dirs      map[string]struct{} // "dir/"  - any segment
+	dirGlobs  []string            // "dir*/" - any segment, globbed
+	rootDirs  map[string]struct{} // "/dir/" - first segment only
+	pathDirs  []pathDir           // "a/b/", "/a*/" - a directory at that path from the root
+	exact     map[string]struct{} // plain entries: the basename or the full path
+	globs     []string            // "*.db" - the basename, globbed
+	pathGlobs []string            // "a/meter-*", "/notes.yaml" - the full path, globbed
+}
+
+// pathDir is one root-relative directory entry and how many segments it
+// spans, so a path is matched on exactly that many leading segments.
+type pathDir struct {
+	pattern  string
+	segments int
 }
 
 var excluded = compileExclusions(ExcludedPatterns)
+
+// userExcluded is the exclude_paths option compiled, nil when it is empty.
+// Set once in main before any goroutine starts; atomic so a test can swap
+// it under -race.
+var userExcluded atomic.Pointer[exclusions]
 
 func compileExclusions(entries []string) exclusions {
 	m := exclusions{
@@ -122,27 +144,104 @@ func compileExclusions(entries []string) exclusions {
 		exact:    make(map[string]struct{}, len(entries)),
 	}
 	for _, e := range entries {
+		anchored := strings.HasPrefix(e, "/")
+		dir := strings.HasSuffix(e, "/")
+		body := strings.Trim(e, "/")
+		nested := strings.Contains(body, "/")
+		glob := strings.ContainsAny(body, "*?[")
 		switch {
-		case strings.HasPrefix(e, "/"):
-			m.rootDirs[strings.Trim(e, "/")] = struct{}{}
-		case strings.HasSuffix(e, "/"):
-			m.dirs[strings.TrimSuffix(e, "/")] = struct{}{}
-		case strings.Contains(e, "*"):
-			m.globs = append(m.globs, e)
+		case dir && !nested && !anchored && !glob:
+			m.dirs[body] = struct{}{}
+		case dir && !nested && !anchored:
+			m.dirGlobs = append(m.dirGlobs, body)
+		case dir && !nested && !glob:
+			m.rootDirs[body] = struct{}{}
+		case dir:
+			m.pathDirs = append(m.pathDirs, pathDir{pattern: body, segments: strings.Count(body, "/") + 1})
+		case !anchored && !nested && !glob:
+			m.exact[body] = struct{}{}
+		case !anchored && !nested:
+			m.globs = append(m.globs, body)
 		default:
-			m.exact[e] = struct{}{}
+			m.pathGlobs = append(m.pathGlobs, body)
 		}
 	}
 	return m
 }
 
-// exactHit reports an exact-entry match, applying the one conditional
-// entry here so the table stays immutable and shared across goroutines.
-func (m exclusions) exactHit(name string, syncSecretsFile bool) bool {
-	if _, ok := m.exact[name]; !ok {
-		return false
+// match reports whether normalized, a cleaned forward-slash path, hits any
+// entry in m.
+func (m *exclusions) match(normalized string) bool {
+	// IndexByte rather than strings.Split: the slice Split returns was the
+	// only allocation left on this per-file path.
+	first, basename := normalized, normalized
+	if i := strings.IndexByte(normalized, '/'); i >= 0 {
+		first = normalized[:i]
+		basename = normalized[strings.LastIndexByte(normalized, '/')+1:]
 	}
-	return !syncSecretsFile || name != secretsFileEntry
+	if _, ok := m.rootDirs[first]; ok {
+		return true
+	}
+	for rest := normalized; rest != ""; {
+		seg := rest
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			seg, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = ""
+		}
+		if _, ok := m.dirs[seg]; ok {
+			return true
+		}
+		for _, entry := range m.dirGlobs {
+			if ok, _ := path.Match(entry, seg); ok {
+				return true
+			}
+		}
+	}
+	for _, d := range m.pathDirs {
+		if lead, ok := leadingSegments(normalized, d.segments); ok {
+			if hit, _ := path.Match(d.pattern, lead); hit {
+				return true
+			}
+		}
+	}
+	if _, ok := m.exact[basename]; ok {
+		return true
+	}
+	if _, ok := m.exact[normalized]; ok {
+		return true
+	}
+	for _, entry := range m.globs {
+		if ok, _ := path.Match(entry, basename); ok {
+			return true
+		}
+	}
+	for _, entry := range m.pathGlobs {
+		if ok, _ := path.Match(entry, normalized); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// leadingSegments returns the first n segments of p, or false when p has
+// fewer.
+func leadingSegments(p string, n int) (string, bool) {
+	end := 0
+	for k := 0; k < n; k++ {
+		if k > 0 {
+			end++ // past the '/' the previous round stopped at
+		}
+		j := strings.IndexByte(p[end:], '/')
+		if j < 0 {
+			if k == n-1 {
+				return p, true
+			}
+			return "", false
+		}
+		end += j
+	}
+	return p[:end], true
 }
 
 // SecretPatterns are filename patterns that make GuardSecretsAt refuse to
@@ -150,10 +249,12 @@ func (m exclusions) exactHit(name string, syncSecretsFile bool) bool {
 // secret-shaped file being tracked in git is itself the problem.
 var SecretPatterns = []string{
 	"secrets.yaml",
-	// Both spellings, since HA accepts both and sopscrypt.IsSecretsFile
-	// treats them as one. Without this, an import with encryption off
-	// pushes a live secrets.yml in the clear.
+	// Both spellings, since HA accepts both. Without this, an import pushes
+	// a live secrets.yml in the clear.
 	"secrets.yml",
+	// Zigbee2MQTT's secrets file, in both spellings.
+	"secret.yaml",
+	"secret.yml",
 	"*.pem",
 	"*.key",
 	"id_rsa*",
@@ -164,16 +265,20 @@ var SecretPatterns = []string{
 }
 
 // Excluded reports whether p, a repo/config-relative path (forward- or
-// backslash separated), matches an ExcludedPatterns entry:
+// backslash separated), matches an ExcludedPatterns or exclude_paths
+// entry, or is a secrets file (IsSecretsFile). Entry syntax:
 //
 //   - "dir/" matches any segment, basename included, at any depth.
 //   - "/dir/" matches only a path whose FIRST segment is that name.
+//   - "a/b/" (a slash inside) is the directory at that path from the root,
+//     and everything under it.
 //   - "*.db" globs the basename only.
 //   - A plain entry matches the basename or the full path exactly.
+//   - "a/meter-*" or "/notes.yaml" (a slash inside, or a leading one)
+//     matches the full path from the root, globbed.
 //
-// With SetEncryptionEnabled(true), secrets.yaml is NOT excluded: it is
-// ciphertext by the time it reaches the worktree. Every other entry is
-// runtime state and stays excluded unconditionally.
+// "*", "?" and "[...]" glob within one segment, as path.Match does. The
+// built-in entries use only the first, second, fourth and fifth forms.
 func Excluded(p string) bool {
 	normalized := strings.TrimLeft(strings.ReplaceAll(p, "\\", "/"), "/")
 	// Clean first, or "sub/../gitops/foo.yaml" dodges the root-anchored
@@ -183,41 +288,93 @@ func Excluded(p string) bool {
 	if normalized == ".." || strings.HasPrefix(normalized, "../") {
 		return true
 	}
-
-	// IndexByte rather than strings.Split: the slice Split returns was the
-	// only allocation left on this per-file path.
-	first, basename := normalized, normalized
-	if i := strings.IndexByte(normalized, '/'); i >= 0 {
-		first = normalized[:i]
-		basename = normalized[strings.LastIndexByte(normalized, '/')+1:]
-	}
-	if _, ok := excluded.rootDirs[first]; ok {
+	if IsSecretsFile(normalized) || excluded.match(normalized) {
 		return true
 	}
-	for rest := normalized; rest != ""; {
-		seg := rest
-		if i := strings.IndexByte(rest, '/'); i >= 0 {
-			seg, rest = rest[:i], rest[i+1:]
-		} else {
-			rest = ""
-		}
-		if _, ok := excluded.dirs[seg]; ok {
-			return true
-		}
-	}
-
-	// Exact before glob, so a path already caught by a directory entry
-	// (".ssh/secrets.yaml") stays excluded whatever the encryption setting.
-	syncSecretsFile := EncryptionEnabled()
-	if excluded.exactHit(basename, syncSecretsFile) || excluded.exactHit(normalized, syncSecretsFile) {
+	if user := userExcluded.Load(); user != nil && user.match(normalized) {
 		return true
-	}
-	for _, entry := range excluded.globs {
-		if ok, _ := path.Match(entry, basename); ok {
-			return true
-		}
 	}
 	return false
+}
+
+// UserExcluded reports whether p matches an exclude_paths entry alone. The
+// stash a rollback restores from predates the option, so RollbackFrom asks
+// this to keep its hands off what the user has since declared someone
+// else's.
+func UserExcluded(p string) bool {
+	user := userExcluded.Load()
+	if user == nil {
+		return false
+	}
+	normalized := path.Clean(strings.TrimLeft(strings.ReplaceAll(p, "\\", "/"), "/"))
+	return user.match(normalized)
+}
+
+// Bounds on the exclude_paths option, generous for a list typed by hand.
+const (
+	maxExcludeEntries   = 100
+	maxExcludeEntryLen  = 256
+	excludeEntryExample = "wmbusmeters/etc/wmbusmeters.d/"
+)
+
+// SetUserExclusions validates the exclude_paths option and installs it
+// beside ExcludedPatterns. The error names the first bad entry and why;
+// main treats it as fatal, since syncing with an exclusion silently
+// dropped would write or delete exactly what the user asked to protect.
+func SetUserExclusions(entries []string) error {
+	if len(entries) > maxExcludeEntries {
+		return fmt.Errorf("exclude_paths: %d entries, at most %d are allowed", len(entries), maxExcludeEntries)
+	}
+	for i, e := range entries {
+		if err := validateExcludeEntry(e); err != nil {
+			return fmt.Errorf("exclude_paths entry %d (%q): %w", i+1, e, err)
+		}
+	}
+	if len(entries) == 0 {
+		userExcluded.Store(nil)
+		return nil
+	}
+	compiled := compileExclusions(entries)
+	userExcluded.Store(&compiled)
+	return nil
+}
+
+// validateExcludeEntry checks one exclude_paths entry against the syntax
+// Excluded documents.
+func validateExcludeEntry(e string) error {
+	switch {
+	case strings.TrimSpace(e) == "":
+		return errors.New("is empty")
+	case strings.TrimSpace(e) != e:
+		return errors.New("has leading or trailing spaces")
+	case len(e) > maxExcludeEntryLen:
+		return fmt.Errorf("is longer than %d characters", maxExcludeEntryLen)
+	case strings.ContainsRune(e, '\\'):
+		return errors.New("uses a backslash; separate directories with /")
+	case strings.Contains(e, "**"):
+		return fmt.Errorf("uses **, which is not supported; a trailing / covers a whole directory, e.g. %s", excludeEntryExample)
+	}
+	for _, r := range e {
+		if r < ' ' || r == 0x7f {
+			return errors.New("contains a control character")
+		}
+	}
+	body := strings.Trim(e, "/")
+	if body == "" {
+		return errors.New("names the whole config directory")
+	}
+	for _, seg := range strings.Split(body, "/") {
+		switch seg {
+		case "":
+			return errors.New("has an empty path segment (//)")
+		case ".", "..":
+			return fmt.Errorf("has a %q segment; write the path from the config directory, e.g. %s", seg, excludeEntryExample)
+		}
+	}
+	if _, err := path.Match(body, ""); err != nil {
+		return errors.New("is not a valid pattern (an unclosed [ ?)")
+	}
+	return nil
 }
 
 // matchesSecretPattern checks p against SecretPatterns case-insensitively,
@@ -239,17 +396,6 @@ func matchesSecretPattern(p string) bool {
 		}
 	}
 	return false
-}
-
-// secretShapedDisallowed is matchesSecretPattern, except a secrets.yaml or
-// .yml passes when encryption is on (it reaches the worktree as ciphertext).
-// Nothing else in SecretPatterns ever passes; where the question is "secret-
-// shaped at all" rather than "may this be handled", use the raw check.
-func secretShapedDisallowed(p string) bool {
-	if !matchesSecretPattern(p) {
-		return false
-	}
-	return !EncryptionEnabled() || !sopscrypt.IsSecretsFile(p)
 }
 
 // SecretsTrackedError is returned by GuardSecretsAt when tracked files match
@@ -341,11 +487,6 @@ type GitSync struct {
 	// transfer - the whole history, for a first clone - rather than local
 	// work. New sets DefaultNetworkTimeout; zero falls back to Timeout.
 	NetworkTimeout time.Duration
-
-	// Crypter encrypts secrets into the worktree and back out. nil (no age
-	// key) is fine: every call site is the nil-safe g.Crypter.Enabled().
-	// Set alongside SetEncryptionEnabled - same option, checked together.
-	Crypter *sopscrypt.Crypter
 
 	// gitConfigGlobal is a per-workdir git config file, so core.autocrlf
 	// and safe.directory never touch the real ~/.gitconfig.
@@ -667,61 +808,48 @@ func (g *GitSync) TrackedFiles(ctx context.Context, sha string) ([]string, error
 	return files, nil
 }
 
-// GuardSecretsAt errors if any entry in files is a secret-shaped path in
-// the tree at sha - call it with TrackedFilesRaw's output before any diff or
-// apply. With encryption on, a secrets.yaml/.yml passes only if its blob
-// really is sops-encrypted, read via "git show" BEFORE any checkout so a
-// plaintext secret never reaches disk; anything else still fails outright.
+// GuardSecretsAt errors if the tree at sha must not be synced at all - call
+// it with TrackedFilesRaw's output before any checkout or diff:
 //
-// Plaintext-with-a-key and encrypted-without-one return plain errors rather
-// than *SecretsTrackedError: the fixes differ ("get this out of git" versus
-// "encrypt it" versus "set age_key"), so the types must too.
+//   - a tracked path matching SecretPatterns is a *SecretsTrackedError;
+//   - a tracked file carrying SOPS metadata is a *SopsTrackedError, since
+//     this version no longer decrypts and would otherwise apply ciphertext
+//     as config (see sops.go).
+//
+// Both at once come back joined (errors.Join), each still reachable with
+// errors.As. A secrets file that is also SOPS-encrypted is reported as
+// SOPS only, since that error says how to get it out. Blobs are read
+// through the object database, so nothing reaches disk first.
 func (g *GitSync) GuardSecretsAt(ctx context.Context, sha string, files []string) error {
-	encrypting := EncryptionEnabled() && g.Crypter.Enabled()
+	sopsFiles, err := g.sopsFilesAt(ctx, sha, files)
+	if err != nil {
+		return err
+	}
+	isSops := make(map[string]bool, len(sopsFiles))
+	for _, f := range sopsFiles {
+		isSops[f] = true
+	}
 	var offenders []string
 	for _, f := range files {
-		if !matchesSecretPattern(f) {
-			continue
+		if matchesSecretPattern(f) && !isSops[f] {
+			offenders = append(offenders, f)
 		}
-		if encrypting && sopscrypt.IsSecretsFile(f) {
-			encrypted, err := g.blobIsEncrypted(ctx, sha, f)
-			if err != nil {
-				return err
-			}
-			if encrypted {
-				continue
-			}
-			return fmt.Errorf(
-				"tracked %s is not SOPS-encrypted - re-run Import to encrypt it, or encrypt it with sops locally", f)
-		}
-		// Refused either way, but an encrypted secrets.yaml means a missing
-		// age_key rather than a leak. Best-effort, since the blob read only
-		// changes the wording: a failure leaves the original refusal.
-		if sopscrypt.IsSecretsFile(f) {
-			if encrypted, err := g.blobIsEncrypted(ctx, sha, f); err == nil && encrypted {
-				return fmt.Errorf(
-					"tracked %s is SOPS-encrypted but no age_key is configured - set the age_key option to the key it was encrypted to", f)
-			}
-		}
-		offenders = append(offenders, f)
 	}
-	if len(offenders) == 0 {
+	var errs []error
+	if len(offenders) > 0 {
+		sort.Strings(offenders)
+		errs = append(errs, &SecretsTrackedError{Files: offenders})
+	}
+	if len(sopsFiles) > 0 {
+		errs = append(errs, &SopsTrackedError{Files: sopsFiles})
+	}
+	switch len(errs) {
+	case 0:
 		return nil
+	case 1:
+		return errs[0]
 	}
-	sort.Strings(offenders)
-	return &SecretsTrackedError{Files: offenders}
-}
-
-// blobIsEncrypted reports whether the blob at path in sha is a sops
-// document. Read via "git show" because the guard runs before Checkout,
-// which is the point: a plaintext secret is detected without hitting disk,
-// and only the boolean leaves this function.
-func (g *GitSync) blobIsEncrypted(ctx context.Context, sha, path string) (bool, error) {
-	result, err := g.runGit(ctx, []string{"show", sha + ":" + path}, "", nil)
-	if err != nil {
-		return false, err
-	}
-	return sopscrypt.IsEncrypted([]byte(result.Stdout)), nil
+	return errors.Join(errs...)
 }
 
 // currentOrigin returns the URL configured for the origin remote, or "" if

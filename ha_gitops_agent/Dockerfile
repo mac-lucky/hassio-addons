@@ -8,7 +8,7 @@ ARG BUILD_FROM
 
 # Keep in sync with config.yaml's version (which has a comment pointing back
 # here) - stamped into the binary as main.version below.
-ARG BUILD_VERSION=0.8.4
+ARG BUILD_VERSION=0.9.0
 
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG BUILD_VERSION
@@ -29,10 +29,6 @@ LABEL org.opencontainers.image.title="GitOps Agent" \
       org.opencontainers.image.description="Sync Home Assistant YAML config from a git repository, with dry-run diff, validate-then-apply, and rollback." \
       org.opencontainers.image.source="https://github.com/mac-lucky/hassio-addons"
 
-# sops is what encrypts and decrypts secret values (see internal/sopscrypt).
-# Only used when age_key is configured, but it has to be in the image either
-# way: the agent probes for it at startup and refuses to run with a key it
-# cannot act on.
 # apk upgrade first: the digest-pinned base can lag Alpine package fixes, and
 # upgrading at build picks them up without waiting for a base-image rebuild.
 # The base image pins every package it installed in /etc/apk/world
@@ -40,7 +36,7 @@ LABEL org.opencontainers.image.title="GitOps Agent" \
 # left the OpenSSL and curl fixes on the shelf through two releases. Drop the
 # pins first; the base image's versions are a build snapshot, not a
 # compatibility requirement.
-RUN sed -i 's/=.*$//' /etc/apk/world && apk upgrade --no-cache && apk add --no-cache git ca-certificates sops
+RUN sed -i 's/=.*$//' /etc/apk/world && apk upgrade --no-cache && apk add --no-cache git ca-certificates
 
 COPY --from=builder /ha-gitops-agent /ha-gitops-agent
 

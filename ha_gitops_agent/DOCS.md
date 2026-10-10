@@ -62,10 +62,14 @@ diagnostic tools, support bundles. To keep the token off that surface,
 set the option to `secret://<name>` instead of the literal value and
 put the real token under that key in your live
 `/homeassistant/secrets.yaml`, the same file Home Assistant's own
-`!secret` reads. The reference is resolved once at startup; a name
-that does not resolve stops the add-on instead of being used
-literally, and a changed secret is picked up on the next add-on
-restart. `age_key` and `webhook_secret` accept the same form.
+`!secret` reads. The reference is resolved once at startup, and a
+changed secret is picked up on the next add-on restart. A name that
+does not resolve yet - `secrets.yaml` missing, or without that key - is
+never used literally: the agent waits instead, retrying every 10
+seconds, and its page says which key it is waiting for (see "Secrets"
+below). A malformed reference (`secret://` with no name, or a space in
+it) stops the add-on, since no wait fixes a typo. `webhook_secret`
+accepts the same form.
 
 ### `interval_minutes`
 
@@ -153,33 +157,39 @@ What to do after a successful apply:
 - `off`: apply files but do not reload or restart anything; you
   trigger that yourself.
 
-### `age_key`
+### `exclude_paths`
 
-Empty by default, which keeps secrets out of git entirely - the
-behavior every earlier version had, and still the right choice if you
-do not want secret material in your repository at all.
+Empty by default. Extra paths the agent never syncs in either direction
+and never deletes, on top of the built-in list in "What is never
+touched" below. Use it for files another app writes with secrets inside
+- wmbusmeters, for one, writes each meter's decryption key from its own
+options into `wmbusmeters/etc/wmbusmeters.d/`:
 
-Set it to an age private key (`AGE-SECRET-KEY-1...`) and the agent
-encrypts secret values with SOPS before they are pushed, then decrypts
-them again when applying. `secrets.yaml` stops being an excluded file
-and becomes an ordinary synced one. See "Secret encryption (SOPS and
-age)" below for exactly what is encrypted, how to generate the key, and
-what happens if you lose it.
+```yaml
+exclude_paths:
+  - wmbusmeters/etc/wmbusmeters.d/
+  - node-red/flows_cred.json
+```
 
-The key is held the same way `git_token` is: in the add-on's options,
-never written into the repository, never logged, and never passed to
-`sops` on a command line. Only the derived public recipient (`age1...`)
-is ever printed or committed. If the key is malformed, or the `sops`
-binary is missing, the add-on fails to start rather than quietly
-syncing without encryption.
+Every entry is relative to `/homeassistant`, written with `/`:
 
-Because add-on options are readable over the Supervisor API (see
-`git_token` above), this is the option most worth writing as
-`secret://<name>`, with the real `AGE-SECRET-KEY-1...` line under that
-key in the live `secrets.yaml`. That file is plaintext on the machine -
-encryption only applies to the copy pushed to git - so the key resolves
-from it without any circularity, and the API then only ever sees the
-pointer.
+- `name/` - a directory of that name at any depth, and everything in it.
+- `/name/` - only the top-level directory of that name.
+- `a/b/` (a `/` inside) - the directory at exactly that path, and
+  everything in it.
+- `file.yaml` - a file of that name at any depth.
+- `a/b/file.yaml`, or `/file.yaml` - exactly that path.
+- `*.secret.yaml` - any file whose name matches, at any depth.
+- `a/b/meter-*` - names matching the pattern inside exactly that
+  directory. `*`, `?` and `[...]` match within one path segment; `**` is
+  not supported - end the entry with `/` to cover a whole directory.
+
+An excluded file is never applied, diffed, captured, imported, committed
+back, parked on a conflict branch or deleted - including one an earlier
+apply wrote, so adding an entry never removes anything from the box. An
+entry that is empty, climbs out with `..`, uses `\`, or is otherwise
+malformed stops the add-on at startup with a message naming it; at most
+100 entries of up to 256 characters each.
 
 ### `auto_update_addons`
 
@@ -1029,9 +1039,8 @@ are all legal in `secrets.yaml`) is refused by name rather than turned
 into whatever text happens to sit after the tag.
 
 **What the repository holds is the reference.** The value never enters
-the repository, so the repository copy of `secrets.yaml` can stay
-encrypted (see "Secret encryption (SOPS and age)" below) and the manifest
-that uses it needs no encryption at all. It does not enter `state.json`
+the repository - `secrets.yaml` itself is never synced (see "Secrets"
+below). It does not enter `state.json`
 either: what is stored under `integration_data` for a rollback replay is
 the reference as written, and it is resolved again - against the file as
 it stands at that moment - if that rollback ever runs. The per-apply
@@ -1064,11 +1073,7 @@ converge it.
 **Rotating a secret is a change.** These layers compare a fingerprint of
 the data they last applied, and that fingerprint is taken after
 resolution - so editing `secrets.yaml` alone, with no manifest change at
-all, is drift. If the file itself is one the agent syncs (an encrypted
-`secrets.yaml` in the repository), that takes two cycles rather than one:
-the first writes the new file into the live config, and the manifest
-layers - which read the live file, not the repository - see the new value
-on the cycle after. A subentry converges onto the new value through an
+all, is drift, picked up on the next cycle. A subentry converges onto the new value through an
 ordinary reconfigure. An integration cannot (Home Assistant has no way
 to edit a config entry's data - see "Ownership (integrations)" below), so
 it is reported the same way any other `data` edit is: remove it from the
@@ -1725,10 +1730,12 @@ Four limits, none of them incidental:
   the branch on that basis would be wrong, so the agent requires that its
   own last apply wrote the file before it will remove it from git.
 
-Encrypted files are handled the same as everywhere else: a captured
-`secrets.yaml` is encrypted before it is committed, and the comparison
-looks at what a file MEANS rather than its bytes, so SOPS re-encrypting
-identical content is not mistaken for an edit.
+Nor are secrets. Secrets files and `exclude_paths` are never compared
+at all, and a live edit that writes a password, token or key out in full
+is held back rather than pushed - see "Secrets" below. A held-back file
+is not applied over either: the edit stays on the box, the "Held back
+from git" card names it, and it is captured as soon as the value is
+replaced with a `!secret` reference.
 
 ## Importing an existing config
 
@@ -1782,10 +1789,11 @@ Two buttons, both manual, neither ever triggered by the interval:
 Every regular file under `/homeassistant`, except:
 
 - everything in the "What is never touched" list above (`.storage/`,
-  `secrets.yaml`, `*.db*`, `*.log`, `backups/`, `deps/`, `tts/`,
-  `.ssh/`, `.cloud/`, `.git/`, and a root-level `gitops/`)
-- anything matching the secret patterns: `secrets.yml`, `*.pem`,
-  `*.key`, `id_rsa*`, `id_ed25519*`, `.env*`
+  `secrets.yaml` and the other secrets files at any depth, `*.db*`,
+  `*.log`, `backups/`, `deps/`, `tts/`, `.ssh/`, `.cloud/`, `.git/`, a
+  root-level `gitops/`, and your `exclude_paths`)
+- anything matching the secret patterns: `*.pem`, `*.key`, `id_rsa*`,
+  `id_ed25519*`, `.env*`
 - symlinks and any other non-regular entry - a symlink is never
   followed, so a `notes.yaml` pointing at something outside your config
   can never be captured under an innocuous name, and a symlinked
@@ -1794,15 +1802,6 @@ Every regular file under `/homeassistant`, except:
   is not already tracked (`git add` still stages a change to a tracked
   file even if a rule would now ignore it)
 
-**With `age_key` set, `secrets.yaml` is captured too**, encrypted
-before it is staged - it is the one path the first two exclusions stop
-applying to, and the import writes the managed `.sops.yaml` alongside
-it. Everything else on both lists is passed over exactly as before.
-An import with a key configured also encrypts the secret-shaped values
-in every other YAML, JSON and dotenv file it captures, and fails
-without importing anything if one of them cannot be encrypted safely -
-see "Secret encryption (SOPS and age)" above.
-
 **That last one is the tuning knob.** If an import captures something
 you do not want tracked, add it to the repository's `.gitignore` and
 run the import again - there is no separate option for this, and there
@@ -1810,6 +1809,16 @@ does not need to be. The one exception is seeding a branch that does
 not exist yet: that starts from an empty tree, so there is no
 `.gitignore` in it to honor. Push one to the branch first if you need
 it, or import, review, and adjust.
+
+**A file holding a secret in full is held back.** A YAML, JSON or
+extensionless `KEY=value` file with a value under a secret-shaped key
+(`password`, `token`, `api_key`, `*_secret`, ...) that is not a
+reference is left out of the commit, and the rest of the import still
+lands. Each one is named by its key path - never its value - in the
+activity feed and on the import's history row, which reads "partial".
+Replace the value with a `!secret` reference, or list the file in
+`exclude_paths` if another app writes it, and import again. See
+"Secrets" below.
 
 ### Size limits
 
@@ -2280,9 +2289,9 @@ At the end of every reconcile cycle that ran to completion, so a version
 that changed is normally recorded within one `interval_minutes`. That is
 the usual case, not a guarantee: a cycle that stopped early records
 nothing, and nothing is recorded at all until a cycle completes. Stopping
-early is not only about an unreachable repository - a tracked plaintext
-secret, a file that could not be decrypted and a manifest that will not
-load each end the cycle with the repository working perfectly well.
+early is not only about an unreachable repository - a tracked secrets
+file, a tracked SOPS-encrypted file and a manifest that will not load
+each end the cycle with the repository working perfectly well.
 Whatever ended it is reported in the usual place, and the record resumes
 with the first cycle that gets all the way through.
 
@@ -2332,335 +2341,146 @@ cycle for as long as it lasts. It never sets the sync state to "error"
 and never fails the reconcile: which versions are installed says nothing
 about whether the config matches the repository.
 
-## Secret encryption (SOPS and age)
+## Secrets
 
-Off unless `age_key` is set. With a key configured, the agent encrypts
-secret values with [SOPS](https://github.com/getsops/sops) before they
-enter the git worktree, and decrypts them again on the way back into
-your config.
+Secrets never pass through git. They live in 1Password (or wherever you
+keep them) and reach Home Assistant through `secrets.yaml`, which
+something on the box renders - the 1Password Secrets app in this
+repository, or any other tool - and this agent never touches. Your
+config refers to them by name: `!secret wifi_password` in Home Assistant
+and ESPHome YAML, `'!secret mqtt_password'` (or `'!secret.yaml
+mqtt_password'`) in Zigbee2MQTT's `configuration.yaml`.
 
-**The live side is always plaintext.** Home Assistant reads
-`/homeassistant` exactly as it always did; nothing there is ever
-encrypted at rest. The ciphertext exists only in the repository, and
-only for the values that need it.
+### Secrets files are never synced
 
-### Values, not whole files
+`secrets.yaml` and `secrets.yml` (Home Assistant, and ESPHome's
+`esphome/secrets.yaml`) and `secret.yaml` / `secret.yml` (Zigbee2MQTT's)
+are never applied, diffed, captured, imported, committed back, parked
+on a conflict branch or deleted - at any depth and in any letter case.
+A repository that tracks one anyway is refused outright until it is
+removed, the same as a private key or a `.env` file.
 
-An encrypted config file is still a readable, reviewable config file.
-Only the values behind secret-shaped keys become `ENC[...]` strings -
-the structure, the comments and every ordinary value stay in the clear,
-so a pull request against your config repository is still worth
-reading:
+That includes a `secrets.yaml` a version before 0.9.0 applied and
+recorded as its own in `state.json`: it is dropped from that record on
+startup, so removing it from the repository never removes it from the
+box, and a rollback from an older stash leaves the live secrets files
+alone.
 
-```yaml
-mqtt:
-  broker: 192.168.1.10
-  port: 1883
-  password: ENC[AES256_GCM,data:Uy4v...,type:str]
-```
+Files another app writes with secrets inside - wmbusmeters' meter
+definitions, Node-RED's `flows_cred.json` - belong in `exclude_paths`,
+which gives them the same treatment.
 
-The ordinary values can also be edited directly, in a pull request or
-any text editor, without going through `sops`: the file's integrity
-check (its MAC) covers only the encrypted values, so changing
-`broker:` leaves it decrypting fine. A file encrypted by an add-on
-version from before this was the case carries a check over every
-value, and keeps it until it is next encrypted from scratch; edit
-those through `sops` (see "Editing secrets by hand").
+### `secret://` in options and manifests
 
-`secrets.yaml` is the one exception, and it goes the other way: every
-value in it is encrypted, because every value in it is a secret by
-definition. It is also the file that stops being excluded when
-encryption is on - with no `age_key` it is never synced in either
-direction, and with one it syncs like any other config file.
+`git_token`, `webhook_secret`, and the data in
+`gitops/integrations.yaml`, `gitops/subentries.yaml` and
+`gitops/addons.yaml` accept `secret://<name>`, read from the live
+`/homeassistant/secrets.yaml` (see `git_token` and "Referencing secrets"
+above). The options are read once at startup. On a fresh box the app
+that renders `secrets.yaml` may start after this one, so a reference the
+file cannot answer yet - the file missing, or the key not in it - makes
+the agent wait rather than exit: its page shows "Waiting for
+secrets.yaml" and the key it needs, it tries again every 10 seconds, the
+add-on log repeats the reason once a minute, and it starts as soon as
+the key resolves. Nothing is synced in the meantime.
 
-### Which files are covered
+### Held back from git
 
-Three formats, because those are the three SOPS can encrypt one value
-at a time:
-
-- **YAML** - `*.yaml` and `*.yml`.
-- **JSON** - `*.json`. Google service account keys (a `private_key`
-  holding a PEM block) and Zigbee coordinator backups (`key` fields)
-  both live in these.
-- **dotenv** - `KEY=value` files with **no extension at all**, such as
-  the meter definitions wmbusmeters keeps in
-  `wmbusmeters/etc/wmbusmeters.d/`, which hold a wM-Bus AES key on a
-  `key=` line.
-
-Anything else - a `.py`, an image, a database - is never encrypted and
-never touched.
-
-The dotenv rule is deliberately narrow, and a file qualifies only if
-**all** of the following hold:
-
-1. its name has no extension,
-2. every non-blank, non-`#` line is a `KEY=value` assignment,
-3. at least one of those keys is secret-shaped by the rule below.
-
-The reason for the narrowness is what happens when the guess is wrong.
-SOPS picks how to read a file from its extension, and a file it cannot
-place falls back to the **binary** store: the entire file is base64'd
-into one opaque `data` field and the per-value rule is discarded. That
-turns a reviewable config file into an unreadable blob. Its matching is
-also case-sensitive, so a file saved as `config.JSON` is one it cannot
-place.
-
-The agent therefore never lets SOPS guess: it works out the format
-itself and names it on every call, in both directions. A file whose
-format it cannot establish is left alone rather than encrypted, and an
-extensionless file has to look like a secrets-bearing dotenv file in
-its own content before it is treated as one. A `.env` file is
-not covered here at all: those are refused outright as secret-shaped
-paths, encryption or not, along with `*.pem`, `*.key` and `id_rsa*`.
-
-### Which keys count as secrets
-
-A mapping key anywhere in a YAML or JSON file, at any depth - or the
-key half of a dotenv assignment - whose name is one of `password`,
-`passwd`, `pwd`, `secret`, `secrets`, `token`, `credential`,
-`credentials`, `auth`, `authorization`, `psk`, `key`, `keys`, `apikey`
-or `api_key`.
-
-A key also matches when it ends in `password`, `passwd`, `pwd`,
-`secret`, `token`, `key`, `keys`, `credential`, `credentials`, `psk`
-or `auth` as a full, underscore-separated suffix - so
-`mqtt_password`, `client_secret` and `network_key` all match. Note the
-suffix list is shorter than the whole-key list above: `client_secrets`
-and `x_authorization` do **not** match, because their suffixes
-(`secrets`, `authorization`) are only recognized as whole keys. If you
-use a name like that, rename it or move the value into
-`secrets.yaml`.
-
-The exact rule, which is also what gets written into `.sops.yaml`:
+Nothing the agent pushes - a capture, a commit-back branch, an import, a
+conflict copy - may carry a secret written out in full. A file is held
+back when a key matching
 
 ```
-(?i)^(password|passwd|pwd|secret|secrets|token|credential|credentials|auth|authorization|psk|keys?|api_?key|.*_(password|passwd|pwd|secret|token|keys?|credential|credentials|psk|auth))$
+password, passwd, pwd, secret, secrets, token, credential(s), auth,
+authorization, psk, key, keys, api_key, apikey
 ```
 
-Whole-key matching, not substring matching, is deliberate: `monkey`
-and `keyboard` are not secrets, and a rule that treated them as ones
-would encrypt half a config.
+or ending in `_password`, `_secret`, `_token`, `_key`, `_psk` and the
+like, holds a literal value. `pin` is deliberately not on the list. This
+is checked for YAML and JSON files (at any depth, list entries
+included) and for extensionless `KEY=value` files; other files are not
+inspected. A value is NOT literal when it is a reference or holds
+nothing:
 
-`pin` is deliberately absent, in both forms. In this domain a "pin" is
-a GPIO number - an ESPHome config is full of `pin: GPIO4`, `cs_pin`
-and `i2s_bclk_pin` - and encrypting hardware wiring would make those
-files unreadable for no gain. Put a real PIN code in `secrets.yaml`,
-where every value is encrypted whatever its key is called.
+- a tag: `!secret wifi_password`, `!env_var TOKEN`, `!include key.txt`
+- Zigbee2MQTT's string forms: `'!secret name'`, `'!secret.yaml name'`
+- empty, `null`, or a boolean (`auth: true`, `token: off`)
 
-A matching key only triggers encryption when its value is real secret
-material - a plain scalar, or a list of them. A `password: !secret
-mqtt_pw` is a reference, not a secret, and is left alone; so is a
-`auth:` that opens a nested block rather than holding a value.
+A YAML or JSON file that does not parse is judged line by line and held
+back if any secret-shaped key has a value after it.
 
-### Files the agent refuses to encrypt
-
-Some files hold a secret that SOPS cannot encrypt without breaking
-something. Each is refused outright, naming the file and the fix,
-rather than being encrypted anyway or committed in the clear.
-
-The common one is a file that holds an inline secret **and** a Home
-Assistant custom tag (`!secret`, `!include`,
-`!include_dir_merge_list`, `!input`, or any other single-`!` tag):
-
-```
-configuration.yaml holds a secret value inline alongside a Home
-Assistant custom tag (!secret, !include..., !input), which SOPS cannot
-encrypt without destroying the tag: move that value into secrets.yaml
-and reference it with !secret
-```
-
-This is not caution for its own sake. SOPS rewrites the whole document
-when it encrypts, and it does not round-trip custom tags: a `!secret
-mqtt_pw` node comes back as an ordinary encrypted string with the tag
-gone, which breaks the config the next time Home Assistant loads it.
-Encrypting anyway would corrupt your config; skipping the file would
-push the secret in the clear. Neither is a choice to make silently, so
-the operation fails and tells you the fix - move that one value into
-`secrets.yaml` and reference it with `!secret`.
-
-The same refusal, with the same fix, covers three more shapes:
-
-- **A top-level list.** `automations.yaml` is always one, and SOPS
-  only encrypts a document whose root is a mapping.
-- **An unquoted `yes`, `no`, `on` or `off` anywhere in a file that is
-  encrypted key-by-key.** SOPS re-writes the whole document, quoting
-  those, and Home Assistant then reads a string where it read a
-  boolean - a config change you never made. Quote the value yourself
-  and it is fine.
-- **A literal top-level `sops:` key**, which SOPS reserves for its own
-  metadata.
-
-A file that does not parse as YAML is refused too if anything in it
-looks secret-shaped, since the agent can neither encrypt it nor clear
-it for the remote.
-
-JSON and dotenv files have their own short lists, for the same reason -
-each is a shape SOPS rejects:
-
-- **A JSON file whose top level is not an object.** SOPS only encrypts
-  a JSON document that starts with `{`. Wrap an array in an object and
-  it is fine.
-- **A JSON file with a top-level `"sops"` key**, or a dotenv file with
-  a key starting with `sops_`. SOPS keeps its metadata there, and in a
-  format that cannot nest - dotenv - it uses the whole `sops_` prefix.
-  A file that already has one would also be mistaken for an
-  already-encrypted file, and committed untouched. Rename the key.
-- **A file that does not parse as the format its name claims** - a
-  `.json` that is really YAML, say - if anything in it looks
-  secret-shaped.
-
-### What an encrypted file's diff looks like
-
-Diffs on the dashboard, on `GET /status.json` and on
-`sensor.gitops_agent_status` have their secret values masked before
-they are published. For an encrypted YAML file that means a real
-unified diff with the secret values replaced by `*****`, so an ordinary
-edit next to a secret is still reviewable.
-
-For an encrypted JSON or dotenv file the whole diff collapses to
-`encrypted values changed (hidden)` instead. The masking pass reads
-YAML and only YAML, and running it over a different grammar would mean
-deciding which lines are safe to publish using rules for a language the
-file is not written in. Hiding the diff is the safe answer; the change
-is still reported, just without its contents.
-
-The same masking applies to a file that is not encrypted but holds
-secret values - a plaintext-tracked file with a password typed into it
-in the File editor - and to any file being deleted, whose diff quotes
-the plaintext live copy. When such a diff cannot be masked line by line,
-it collapses to `diff hidden: the file holds secret values` rather than
-to the encrypted wording.
-
-### The managed `.sops.yaml`
-
-The agent writes a `.sops.yaml` at the repository root carrying its own
-recipient and one rule per covered path: `secrets.yaml` whole, other
-YAML files per value, JSON files per value. It exists so that `sops
-secrets.yaml` in your own clone gives you exactly the treatment the
-agent applies, rather than something subtly different.
-
-**dotenv files have no rule, and cannot have one.** A creation rule is
-matched on the path, and these files have no extension to match; a rule
-broad enough to catch them would also make a bare `sops encrypt
-meter-0001` succeed by binary-encrypting the whole file, since nothing
-in a `.sops.yaml` can set the input type. Without a rule that command
-fails with "no matching creation rules found", which is the answer you
-want. To edit one by hand, name the format and the rules yourself:
-
-```
-sops decrypt --input-type dotenv --output-type dotenv \
-  wmbusmeters/etc/wmbusmeters.d/meter-0001
-
-sops --mac-only-encrypted encrypt --in-place \
-  --input-type dotenv --output-type dotenv \
-  --age age1... --encrypted-regex '(?i)^(password|...|api_?key|...)$' \
-  wmbusmeters/etc/wmbusmeters.d/meter-0001
-```
-
-The recipient is the `age:` value in the managed `.sops.yaml`, and the
-regex is its `encrypted_regex`. Leaving out `--input-type dotenv` on
-either call is the mistake to avoid: on decrypt it fails loudly, but on
-encrypt it silently produces a whole-file binary blob.
-`--mac-only-encrypted` is what the agent uses too (see "Values, not
-whole files"); it is a global option, so it goes before `encrypt`, and
-it needs sops 3.9.0 or newer.
-
-Two things follow from it being managed:
-
-- **Its `creation_rules` are regenerated.** Edit them and the next
-  import or drift commit puts them back. Anything else you add to the
-  file is left alone.
-- **The agent's own calls do not consult it.** Every `sops` call the
-  agent makes carries its rules on the command line *and* runs from an
-  empty directory outside the checkout, so no `.sops.yaml` in the
-  repository - not the managed one, and not one added at any depth by
-  you, by a merge, or by another tool - can change what the agent
-  encrypts or who it encrypts to. Both halves matter: `sops` finds its
-  config by searching upward from its working directory, and a rule
-  file reachable that way could otherwise switch encryption off for a
-  path while still producing a file that looks encrypted.
-
-The file is excluded from sync, so it is never written into
-`/homeassistant` and never shows up as drift.
-
-### Generating the key
-
-Any age implementation will do; `age-keygen` is the usual one:
-
-```
-age-keygen -o gitops-agent-key.txt
-```
-
-That writes a public recipient (`age1...`) and a private identity
-(`AGE-SECRET-KEY-1...`). Paste the private identity into `age_key`.
-The public half needs no configuration - the agent derives it.
-
-**Keep a copy of the private key somewhere outside Home Assistant.**
-If you lose it, the encrypted values in your repository cannot be
-recovered by anyone, including you. It is the only thing that can read
-them. A password manager entry or an offline copy is enough; what you
-must not rely on is the add-on's own options being the only copy.
-
-### Editing secrets by hand
-
-With the managed `.sops.yaml` in place and your private key available
-to `sops` (usually via `SOPS_AGE_KEY_FILE` pointing at the file
-`age-keygen` wrote), an ordinary clone edits like any other. Use sops
-3.9.0 or newer: the managed rules set `mac_only_encrypted`, and an older
-sops can neither honor that when encrypting nor verify a file written
-with it, so it refuses to decrypt one.
-
-```
-sops secrets.yaml       # opens decrypted, re-encrypts on save
-sops decrypt secrets.yaml
-```
-
-Commit and push the result. The agent decrypts it on the next cycle
-and applies the plaintext to `/homeassistant`.
-
-### When the key is wrong or missing
-
-Both fail loudly, and nothing is applied:
-
-- **No `age_key`, encrypted content in the repository.** The cycle
-  stops with "repository contains SOPS-encrypted files but no age_key
-  is configured". The agent will not compare, and will not write,
-  content it cannot read - copying `ENC[...]` strings into your config
-  would be worse than doing nothing.
-- **The wrong `age_key`.** Decryption fails, the cycle stops, and the
-  error names the file. Nothing partial is applied: the alternative
-  would be a config where the files the agent understood were updated
-  and the ones it did not were quietly left behind.
-
-A tracked `secrets.yaml` that turns out **not** to be encrypted is
-refused too, before anything is checked out - the agent reads the blob
-out of the object database to decide, so a plaintext secret in the
-repository is never written to disk on its way to being rejected.
+A held-back file is left out and the rest goes ahead. It is named by
+path and key path - `esphome/garage.yaml (wifi.password)`, never the
+value - in the activity feed and, for an import, on its history row,
+which reads "partial". A held-back capture also shows on the "Held back
+from git" card and is kept out of the apply, so the live edit is not
+overwritten while it waits; the card clears on the next check after the
+value is replaced with a reference or the file is listed in
+`exclude_paths`.
 
 ### What the dashboard shows
 
-The pending diff for an encrypted file is masked before it is
-published. Both sides are masked, not just the repository's, because
-the live side holds the same secrets: every secret value is replaced
-with `*****`, and if masking cannot be done confidently the file's
-diff collapses to `encrypted values changed (hidden)` (`diff hidden:
-the file holds secret values` for a plaintext file). The same masked
-text is what reaches `GET /status.json` and the
-`sensor.gitops_agent_status` attributes.
+A pending diff is masked before it is published whenever either side
+holds a literal secret: every secret value is replaced with `*****`, and
+when masking cannot be done confidently - and for JSON and
+extensionless files, always - the whole diff collapses to `diff hidden:
+the file holds secret values`. The same masked text is what reaches
+`GET /status.json` and the `sensor.gitops_agent_status` attributes.
+
+### Coming from SOPS (0.8.x)
+
+Versions before 0.9.0 could encrypt values with SOPS and an age key.
+This one does neither, and the `age_key` option is gone. A repository
+that still tracks a file carrying SOPS metadata - an
+`ENC[AES256_GCM,...]` value, a top-level `sops:` block with a `mac` or
+`lastmodified`, or `sops_mac=` / `sops_lastmodified=` lines - stops
+syncing: nothing is applied, captured or deleted, and the dashboard's
+error names the files. To move off it, in this order:
+
+1. Pause the agent.
+2. Clear the `age_key` option and save. An option the schema no longer
+   has is not removed by Supervisor: it warns about it at start but keeps
+   it in its storage and in every backup, and returns it to any add-on
+   with the manager role. If it held a literal key rather than a
+   `secret://` reference, treat everything it ever encrypted in the git
+   history as readable by whoever has one of those backups.
+3. Update to 0.9.0.
+4. Set `exclude_paths` for files that leave git but must stay on the box,
+   such as `wmbusmeters/etc/wmbusmeters.d/`. Without it, the commit that
+   removes them from the repository deletes them here as well.
+5. Make sure the secrets files are rendered by something else first - the
+   1Password Secrets app writes `secrets.yaml`, and `esphome/secrets.yaml`
+   and `zigbee2mqtt/secret.yaml` if you use them.
+6. Push the commit that replaces every SOPS value with a `!secret`
+   reference and removes `secrets.yaml`, every other SOPS-encrypted file
+   and `.sops.yaml` from the repository.
+7. Resume the agent.
+
+With `capture_live_changes` on, that first cycle needs one more rule. A
+file 0.8.x applied from SOPS ciphertext has that ciphertext as its merge
+base, while live holds what 0.8.x decrypted, so the two differ whoever
+changed what. Such a base counts as no base at all: the repository wins,
+exactly as it did before capture existed, the commit is applied - files
+it removes are deleted, unless `exclude_paths` covers them - and nothing
+is captured or parked as a conflict for those files.
+
+A leftover `.sops.yaml` alone does not stop anything; it is never
+written into `/homeassistant`.
 
 ### What is still plaintext
 
-- **`/homeassistant`**, always - see above.
+- **`/homeassistant`**, always: Home Assistant reads `secrets.yaml` as
+  plaintext, and whatever renders it writes it that way.
 - **The pre-apply backups under `/data/backup/<timestamp>/`.** They
   are copies of your live files, taken before they are overwritten, so
-  Rollback can restore exactly what was there. That includes a
-  plaintext `secrets.yaml`. `/data` is this add-on's own Supervisor
-  volume, not shared with anything else, and it is the same place the
-  private key itself lives.
+  Rollback can restore exactly what was there. A secrets file is never
+  among them now, but a stash written by a version before 0.9.0 may
+  hold one. `/data` is this add-on's own Supervisor volume, not shared
+  with anything else.
 - **`gitops/` manifests.** The registry, device, dashboard, add-on
   option, integration, subentry and HACS manifests are agent input rather than
-  Home Assistant config, and this version does not encrypt them. Do not
-  put a secret in one - use a `secret://<name>` reference instead, which
+  Home Assistant config, and they are pushed and read as they are. Do
+  not put a secret in one - use a `secret://<name>` reference instead, which
   the three manifests carrying data payloads support (see "Referencing
   secrets" above). `gitops/hacs.yaml` has no data payload at all: an id, a
   repository, a category and a version are public by construction.
@@ -2799,20 +2619,15 @@ text is what reaches `GET /status.json` and the
   the live tree is bigger than its limits. It also never adds the
   imported paths to the agent's own manifest, so importing a file never
   grants the agent permission to delete it from live later.
-- **Secrets are never synced in plaintext, and their presence is
-  rejected.** With no `age_key` configured, secrets are not synced at
-  all: if the source repository tracks anything that looks like one
-  (`secrets.yaml`, private keys, `.env`, etc.) the agent refuses to
-  sync rather than risk exposing or overwriting it, and an import
-  passes those paths over instead of pushing them.
-
-  With an `age_key` configured, exactly one of them earns a different
-  answer: a `secrets.yaml` (or `secrets.yml`) that is genuinely
-  SOPS-encrypted is synced like any other file. A plaintext one is
-  still refused, and so is everything else on that list - a `*.pem`, a
-  `*.key`, an `id_rsa`, a `.env` is raw key material with no reason to
-  be in a config repository, encrypted or not. See "Secret encryption
-  (SOPS and age)" above.
+- **Secrets never pass through git.** Secrets files are not synced at
+  all, in either direction, at any depth. If the repository tracks
+  anything that looks like one (`secrets.yaml`, `secret.yaml`, private
+  keys, `.env`, etc.), or any SOPS-encrypted file, the agent refuses to
+  sync rather than risk exposing or overwriting it, and an import passes
+  those paths over instead of pushing them. Nothing the agent pushes -
+  capture, commit-back, import, a conflict copy - may carry a password,
+  token or key written out in full: such a file is held back and named.
+  See "Secrets" above.
 
 ## What is never touched
 
@@ -2821,11 +2636,11 @@ comparison and every apply, in both directions:
 
 - `.storage/` (Home Assistant's internal registries)
 - `.cloud/`
-- `secrets.yaml` - **unless `age_key` is set**, which is the one entry
-  on this list encryption changes: it then syncs like any other config
-  file, as ciphertext in git and plaintext live. Everything else here
-  is excluded unconditionally.
-- `.sops.yaml` (the agent's own managed sops config - repository
+- `secrets.yaml`, `secrets.yml`, `secret.yaml` and `secret.yml` at any
+  depth and in any letter case - Home Assistant's, ESPHome's and
+  Zigbee2MQTT's secrets files, which something else renders (see
+  "Secrets" above)
+- `.sops.yaml` (sops tooling config left from before 0.9.0 - repository
   tooling, never Home Assistant config)
 - `*.db`, `*.db-*`, `*.db.*` (the recorder database, its WAL/SHM
   sidecars, and suffixed copies such as a Zigbee2MQTT `database.db.backup`)
@@ -2846,9 +2661,10 @@ comparison and every apply, in both directions:
 - `image/` at the config root only - Home Assistant's uploaded-image
   store. A `www/image/` folder of your own is yours and keeps syncing.
 
-Everything on that list is machine-written state rather than
-configuration: it comes back on its own, and syncing it costs a diff
-every time Home Assistant touches it.
+Apart from the secrets files, everything on that list is machine-written
+state rather than configuration: it comes back on its own, and syncing it
+costs a diff every time Home Assistant touches it. Your own
+`exclude_paths` entries join the list on the same terms.
 
 ### What an import seeds into `.gitignore`
 

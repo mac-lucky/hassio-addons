@@ -36,9 +36,9 @@ func dirs(t *testing.T) (repoRoot, configRoot string) {
 
 func TestAddDetected(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
-	write(t, repoRoot, "new.yaml", []byte("key: value\n"))
+	write(t, repoRoot, "new.yaml", []byte("name: value\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"new.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"new.yaml"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -47,8 +47,8 @@ func TestAddDetected(t *testing.T) {
 	if c.Path != "new.yaml" || c.Kind != "add" {
 		t.Errorf("change = %+v", c)
 	}
-	if !strings.Contains(c.DiffText, "+key: value") {
-		t.Errorf("diff_text = %q, want it to contain %q", c.DiffText, "+key: value")
+	if !strings.Contains(c.DiffText, "+name: value") {
+		t.Errorf("diff_text = %q, want it to contain %q", c.DiffText, "+name: value")
 	}
 	if !strings.Contains(c.DiffText, "config/new.yaml") || !strings.Contains(c.DiffText, "repo/new.yaml") {
 		t.Errorf("diff_text = %q, want config/repo headers", c.DiffText)
@@ -65,7 +65,7 @@ func TestUpdateDetected(t *testing.T) {
 	write(t, configRoot, ".storage/core.entity_registry", []byte("{}"))
 	write(t, repoRoot, "automations.yaml", []byte("- id: demo\n  alias: Demo\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -90,7 +90,7 @@ func TestNoChangeWhenIdentical(t *testing.T) {
 	write(t, repoRoot, "same.yaml", []byte("a: 1\n"))
 	write(t, configRoot, "same.yaml", []byte("a: 1\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"same.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"same.yaml"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none", changes)
@@ -104,7 +104,7 @@ func TestDeleteOnlyForPrevManifest(t *testing.T) {
 	// In config but never applied by us and not tracked -> never deleted.
 	write(t, configRoot, "untouched_by_us.yaml", []byte("user_owned: true\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, nil, []string{"gone.yaml"}, nil)
+	changes, _ := Compute(repoRoot, configRoot, nil, []string{"gone.yaml"})
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -117,7 +117,7 @@ func TestDeleteOnlyForPrevManifest(t *testing.T) {
 func TestDeleteSkippedIfAlreadyGone(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 
-	changes, _, _ := Compute(repoRoot, configRoot, nil, []string{"already_removed.yaml"}, nil)
+	changes, _ := Compute(repoRoot, configRoot, nil, []string{"already_removed.yaml"})
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none", changes)
@@ -135,10 +135,10 @@ func TestExcludedPathsNeverProduced(t *testing.T) {
 	// Would be a "delete" if not excluded.
 	write(t, configRoot, ".storage/old.json", []byte("{}"))
 
-	changes, _, _ := Compute(
+	changes, _ := Compute(
 		repoRoot, configRoot,
 		[]string{".storage/core.json", "notes.db"},
-		[]string{".storage/old.json"}, nil,
+		[]string{".storage/old.json"},
 	)
 
 	if len(changes) != 0 {
@@ -151,7 +151,7 @@ func TestBinarySummary(t *testing.T) {
 	write(t, configRoot, "blob.bin", append([]byte("old"), append([]byte{0}, []byte("data")...)...))
 	write(t, repoRoot, "blob.bin", append([]byte("new"), append([]byte{0}, []byte("data-longer")...)...))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"blob.bin"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"blob.bin"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -183,7 +183,7 @@ func TestTruncationMarkerOnHugeDiff(t *testing.T) {
 	write(t, configRoot, "huge.yaml", []byte(before.String()))
 	write(t, repoRoot, "huge.yaml", []byte(after.String()))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"huge.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"huge.yaml"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -206,10 +206,10 @@ func TestDeterministicOrdering(t *testing.T) {
 	write(t, repoRoot, "a_update.yaml", []byte("v: 2\n"))
 	write(t, configRoot, "m_delete.yaml", []byte("leftover: true\n"))
 
-	changes, _, _ := Compute(
+	changes, _ := Compute(
 		repoRoot, configRoot,
 		[]string{"z_add.yaml", "a_update.yaml"},
-		[]string{"m_delete.yaml"}, nil,
+		[]string{"m_delete.yaml"},
 	)
 
 	want := []struct{ kind, path string }{
@@ -231,7 +231,7 @@ func TestMissingRepoFileDoesNotCrash(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 	// "ghost.yaml" is claimed tracked but was never actually written.
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"ghost.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"ghost.yaml"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none", changes)
@@ -253,7 +253,7 @@ func TestUnreadableConfigFileDoesNotCrash(t *testing.T) {
 	}
 	defer func() { _ = os.Chmod(locked, 0o600) }()
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"locked.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"locked.yaml"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none", changes)
@@ -276,7 +276,7 @@ func TestTrackedSymlinkNeverRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, skipped, _ := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil, nil)
+	changes, skipped := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none (tracked symlink must be refused, never diffed)", changes)
@@ -302,7 +302,7 @@ func TestConfigSideSymlinkNeverRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, skipped, _ := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil, nil)
+	changes, skipped := Compute(repoRoot, configRoot, []string{"automations.yaml"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none (config-side symlink must be refused, never diffed)", changes)
@@ -318,7 +318,7 @@ func TestExcludedDotDotPathNeverProducesDelete(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 	write(t, configRoot, "gitops/registries.yaml", []byte("floors: []\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, nil, []string{"sub/../gitops/registries.yaml"}, nil)
+	changes, _ := Compute(repoRoot, configRoot, nil, []string{"sub/../gitops/registries.yaml"})
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none (dotdot path into gitops/ must stay excluded)", changes)
@@ -340,7 +340,7 @@ func TestTrackedSymlinkedParentDirNeverRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, skipped, _ := Compute(repoRoot, configRoot, []string{"sub/automations.yaml"}, nil, nil)
+	changes, skipped := Compute(repoRoot, configRoot, []string{"sub/automations.yaml"}, nil)
 
 	for _, c := range changes {
 		if strings.Contains(c.DiffText, "SUPERSECRETTOKENVALUE") {
@@ -371,7 +371,7 @@ func TestConfigSideSymlinkedParentDirNeverRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changes, skipped, _ := Compute(repoRoot, configRoot, []string{"sub/automations.yaml"}, nil, nil)
+	changes, skipped := Compute(repoRoot, configRoot, []string{"sub/automations.yaml"}, nil)
 
 	for _, c := range changes {
 		if strings.Contains(c.DiffText, "SUPERSECRETTOKENVALUE") {
@@ -392,7 +392,7 @@ func TestConfigSideSymlinkedParentDirNeverRead(t *testing.T) {
 func TestOrdinaryMissingFileNeverAppearsInSkippedContainment(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 
-	_, skipped, _ := Compute(repoRoot, configRoot, []string{"ghost.yaml"}, nil, nil)
+	_, skipped := Compute(repoRoot, configRoot, []string{"ghost.yaml"}, nil)
 
 	if len(skipped) != 0 {
 		t.Errorf("skippedContainment = %+v, want none for an ordinary missing file", skipped)
@@ -428,7 +428,7 @@ func TestLargeFileUpdateReportsSummaryWithoutFullRead(t *testing.T) {
 	write(t, configRoot, "big.dat", bytesOf('a', 40))
 	write(t, repoRoot, "big.dat", bytesOf('b', 55))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"big.dat"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"big.dat"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -451,7 +451,7 @@ func TestLargeFileIdenticalProducesNoChangeWithoutFullRead(t *testing.T) {
 	write(t, repoRoot, "same_big.dat", data)
 	write(t, configRoot, "same_big.dat", data)
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"same_big.dat"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"same_big.dat"}, nil)
 
 	if len(changes) != 0 {
 		t.Fatalf("changes = %+v, want none", changes)
@@ -465,7 +465,7 @@ func TestLargeFileAddReportsSummaryWithoutFullRead(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 	write(t, repoRoot, "new_big.dat", bytesOf('z', 30))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"new_big.dat"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"new_big.dat"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -486,7 +486,7 @@ func TestLargeFileDeleteReportsSummaryWithoutFullRead(t *testing.T) {
 	repoRoot, configRoot := dirs(t)
 	write(t, configRoot, "old_big.dat", bytesOf('y', 30))
 
-	changes, _, _ := Compute(repoRoot, configRoot, nil, []string{"old_big.dat"}, nil)
+	changes, _ := Compute(repoRoot, configRoot, nil, []string{"old_big.dat"})
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))
@@ -507,7 +507,7 @@ func TestSmallFileBelowThresholdStillUsesFullDiffPath(t *testing.T) {
 	write(t, configRoot, "small.yaml", []byte("a: 1\n"))
 	write(t, repoRoot, "small.yaml", []byte("a: 2\n"))
 
-	changes, _, _ := Compute(repoRoot, configRoot, []string{"small.yaml"}, nil, nil)
+	changes, _ := Compute(repoRoot, configRoot, []string{"small.yaml"}, nil)
 
 	if len(changes) != 1 {
 		t.Fatalf("len(changes) = %d, want 1", len(changes))

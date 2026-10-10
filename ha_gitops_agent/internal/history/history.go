@@ -19,7 +19,8 @@ const (
 )
 
 // Record outcomes: reconcile in_sync/drift/error, apply adds ok/partial/
-// rolled_back, rollback and import ok/error. Partial: files landed anyway.
+// rolled_back, rollback ok/error, import ok/partial/error. Partial: files
+// landed anyway (an import's: without the files it held back).
 const (
 	OutcomeOK         = "ok"
 	OutcomeInSync     = "in_sync"

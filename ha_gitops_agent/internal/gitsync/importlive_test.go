@@ -587,3 +587,99 @@ func gitShowFormat(t *testing.T, bare, ref, format string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// Secrets files at any depth, and exclude_paths entries, never reach the
+// repository from an import.
+func TestImportSkipsNestedSecretsFilesAndUserExclusions(t *testing.T) {
+	withUserExclusions(t, "wmbusmeters/etc/wmbusmeters.d/")
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "repo")
+	commitFile(t, work, "README.md", "readme\n", "init")
+
+	configRoot := filepath.Join(tmp, "config")
+	for _, p := range []string{
+		"configuration.yaml", "esphome/secrets.yaml", "zigbee2mqtt/secret.yaml", "zigbee2mqtt/secret.yml",
+		"wmbusmeters/etc/wmbusmeters.d/meter-1",
+	} {
+		writeLiveText(t, configRoot, p, "name: x\n")
+	}
+
+	gs := importGitSync(t, bare, filepath.Join(tmp, "workdir"))
+	if _, err := gs.Import(context.Background(), configRoot, generousLimits(), fixedImportTime); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	for _, p := range []string{"esphome/secrets.yaml", "zigbee2mqtt/secret.yaml", "zigbee2mqtt/secret.yml", "wmbusmeters/etc/wmbusmeters.d/meter-1"} {
+		if _, ok := showAtRef(t, bare, "main", p); ok {
+			t.Errorf("%s reached the repository, want it filtered out", p)
+		}
+	}
+	if _, ok := showAtRef(t, bare, "main", "configuration.yaml"); !ok {
+		t.Error("the ordinary file did not land")
+	}
+}
+
+// A file with a literal secret is held back, every one of them reported
+// by key path, and the rest of the import still lands.
+func TestImportHoldsBackLiteralSecrets(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "repo")
+	commitFile(t, work, "README.md", "readme\n", "init")
+
+	configRoot := filepath.Join(tmp, "config")
+	writeLiveText(t, configRoot, "configuration.yaml", "homeassistant:\n  name: Home\n")
+	writeLiveText(t, configRoot, "esphome/node.yaml", "wifi:\n  password: LEAKME1\n")
+	writeLiveText(t, configRoot, "esphome/ok.yaml", "wifi:\n  password: !secret wifi_password\n")
+	writeLiveText(t, configRoot, "custom/app.json", `{"api_key": "LEAKME2"}`)
+	writeLiveText(t, configRoot, "wmbusmeters/meter-1", "name=water\nkey=LEAKME3\n")
+	writeLiveText(t, configRoot, "zigbee2mqtt/configuration.yaml", "mqtt:\n  password: '!secret password'\n")
+
+	gs := importGitSync(t, bare, filepath.Join(tmp, "workdir"))
+	res, err := gs.Import(context.Background(), configRoot, generousLimits(), fixedImportTime)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if res.Files != 3 {
+		t.Errorf("Files = %d, want 3 (the held-back files are not counted)", res.Files)
+	}
+	var held []string
+	for _, h := range res.HeldBack {
+		held = append(held, h.String())
+	}
+	want := []string{"custom/app.json (api_key)", "esphome/node.yaml (wifi.password)", "wmbusmeters/meter-1 (key)"}
+	if strings.Join(held, "|") != strings.Join(want, "|") {
+		t.Errorf("HeldBack = %v, want %v", held, want)
+	}
+	for _, p := range []string{"esphome/node.yaml", "custom/app.json", "wmbusmeters/meter-1"} {
+		if _, ok := showAtRef(t, bare, "main", p); ok {
+			t.Errorf("%s reached the repository, want it held back", p)
+		}
+	}
+	for _, p := range []string{"configuration.yaml", "esphome/ok.yaml", "zigbee2mqtt/configuration.yaml"} {
+		if _, ok := showAtRef(t, bare, "main", p); !ok {
+			t.Errorf("%s did not land", p)
+		}
+	}
+}
+
+// With only held-back files new, nothing is committed and the error names
+// them.
+func TestImportWithOnlyHeldBackFilesCommitsNothing(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "repo")
+	commitFile(t, work, "configuration.yaml", "a: 1\n", "init")
+	// Or the import would seed one and have something to commit after all.
+	commitFile(t, work, GitignoreFile, "*.bak\n", "ignore rules")
+
+	configRoot := filepath.Join(tmp, "config")
+	writeLiveText(t, configRoot, "configuration.yaml", "a: 1\n")
+	writeLiveText(t, configRoot, "packages/mqtt.yaml", "mqtt:\n  password: LEAKME\n")
+
+	gs := importGitSync(t, bare, filepath.Join(tmp, "workdir"))
+	_, err := gs.Import(context.Background(), configRoot, generousLimits(), fixedImportTime)
+	if err == nil {
+		t.Fatal("Import() error = nil, want nothing to import")
+	}
+	if !strings.Contains(err.Error(), "packages/mqtt.yaml (mqtt.password)") || strings.Contains(err.Error(), "LEAKME") {
+		t.Errorf("error = %q, want the held-back file named without its value", err)
+	}
+}

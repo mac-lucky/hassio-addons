@@ -204,7 +204,7 @@ func ScanLive(configRoot string, limits ImportLimits) (ImportPlan, error) {
 				plan.SkippedExcluded++
 				return fs.SkipDir
 			}
-			if secretShapedDisallowed(rel) {
+			if matchesSecretPattern(rel) {
 				plan.SkippedSecret++
 				return fs.SkipDir
 			}
@@ -225,10 +225,10 @@ func ScanLive(configRoot string, limits ImportLimits) (ImportPlan, error) {
 			plan.SkippedExcluded++
 			return nil
 		}
-		// matchesSecretPattern, which this wraps, does no path.Clean and no
-		// backslash conversion; safe only because rel came from
-		// filepath.Rel plus ToSlash and is already clean.
-		if secretShapedDisallowed(rel) {
+		// matchesSecretPattern does no path.Clean and no backslash
+		// conversion; safe only because rel came from filepath.Rel plus
+		// ToSlash and is already clean.
+		if matchesSecretPattern(rel) {
 			plan.SkippedSecret++
 			return nil
 		}

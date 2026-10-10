@@ -9,7 +9,9 @@
       hx-target="#app"
       hx-swap="outerHTML"
       hx-sync="this:replace">
-{{if not .Status.Configured}}
+{{if .Status.WaitingForSecret}}
+{{template "_waiting.html" .}}
+{{else if not .Status.Configured}}
 {{template "_firstrun.html" .}}
 {{else}}
 
@@ -268,6 +270,26 @@ there is no restore point outside this add-on for that change.`)}}
   {{else}}
   <p class="meta-line">The live copies could not be pushed to a branch, but nothing was overwritten: both sides are still where they were.</p>
   {{end}}
+</section>
+{{end}}
+
+{{/* Files capture would not push: a literal value sits under a
+     secret-shaped key. Their own card for the conflicts' reason - only a
+     person clears them - and kept out of the apply like a conflict. */}}
+{{if .Status.HeldBack}}
+<section class="card">
+  <h2>Held back from git <span class="count">{{len .Status.HeldBack}}</span></h2>
+  <p class="meta-line">These files changed here, but each holds a value under a secret-shaped key (password, token, api_key, ...) written out in full, so the agent will not push them to your repository - and will not overwrite the live edit either. Move each value into secrets.yaml and reference it with <code>!secret</code>, or, for a file another add-on writes, list it in <code>exclude_paths</code>. It clears itself on the next check after that.</p>
+  <div class="changes">
+    {{range .Status.HeldBack}}
+    <div class="change change-error">
+      <div class="change-summary">
+        <span class="badge badge-error">held back</span>
+        <span class="path">{{printable .}}</span>
+      </div>
+    </div>
+    {{end}}
+  </div>
 </section>
 {{end}}
 

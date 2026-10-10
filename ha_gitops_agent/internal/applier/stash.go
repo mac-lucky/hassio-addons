@@ -137,11 +137,9 @@ func dirsToCreate(changes []Change, configRoot string) []string {
 
 // writeChanges copies add/update changes from repoRoot into configRoot and
 // removes files for delete changes, returning the paths touched in order.
-// The one direction cfg.TransformRepoFile applies to: git may track sops
-// ciphertext, and Home Assistant must read the plaintext behind it. A
-// transform failure errors rather than skipping the file, so Apply rolls
-// the whole batch back instead of leaving the config half-updated.
-func writeChanges(cfg Config, changes []Change, repoRoot, configRoot string) ([]string, error) {
+// A failed copy errors rather than skipping the file, so Apply rolls the
+// whole batch back instead of leaving the config half-updated.
+func writeChanges(changes []Change, repoRoot, configRoot string) ([]string, error) {
 	var changedPaths []string
 	for _, change := range changes {
 		dest := filepath.Join(configRoot, change.Path)
@@ -153,7 +151,7 @@ func writeChanges(cfg Config, changes []Change, repoRoot, configRoot string) ([]
 					return nil, err
 				}
 			}
-			if err := copyFileTransformed(src, dest, change.Path, cfg.TransformRepoFile); err != nil {
+			if err := copyFile(src, dest); err != nil {
 				return nil, err
 			}
 			changedPaths = append(changedPaths, change.Path)

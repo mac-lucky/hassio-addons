@@ -3,6 +3,7 @@ package recon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -334,5 +335,56 @@ func TestAutoCommitBackNeverWritesARefusalEventOnRepeatedCycles(t *testing.T) {
 				t.Errorf("commit_back_calls = %d, want %d", got, wantPushes)
 			}
 		})
+	}
+}
+
+// Held-back files are named on the feed after a commit-back that pushed
+// the rest.
+func TestCommitDriftBackReportsHeldBackFiles(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "a.yaml", Kind: "update"}, {Path: "b.yaml", Kind: "update"}}
+	fakes.git.commitBackHeldBack = []gitsync.HeldBack{{Path: "b.yaml", Keys: []string{"token"}}}
+	opts := baseOpts()
+	opts.CommitBack = true
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+
+	if _, err := r.CommitDriftBack(context.Background()); err != nil {
+		t.Fatalf("CommitDriftBack() error = %v", err)
+	}
+	if !hasEventContaining(r.Status().Events, "commit-back left out 1 file(s) holding a literal value under a secret-shaped key: b.yaml (token)") {
+		t.Errorf("events = %+v, want the held-back file named", r.Status().Events)
+	}
+}
+
+// When every file is held back the same drift set fails the same way
+// until someone edits it. The automatic half keeps trying - the edit that
+// fixes it changes content, not the drift set's paths - but says so once.
+func TestAutoCommitBackReportsAnAllHeldBackDriftSetOnce(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "b.yaml", Kind: "update"}}
+	fakes.git.commitBackErr = fmt.Errorf("gitsync: commit-back: nothing to commit: %w", gitsync.ErrAllHeldBack)
+	fakes.git.commitBackHeldBack = []gitsync.HeldBack{{Path: "b.yaml", Keys: []string{"token"}}}
+	opts := baseOpts()
+	opts.CommitBack = true
+	r := fakes.reconciler(opts)
+
+	r.ReconcileNow(context.Background())
+	r.ReconcileNow(context.Background())
+
+	if n := countEventsContaining(r.Status().Events, "commit-back skipped"); n != 1 {
+		t.Errorf("held-back commit-back logged %d times over two identical cycles, want once", n)
+	}
+	if fakes.applier.state.LastDriftBackHash != "" {
+		t.Error("a drift set that pushed nothing was recorded as committed back")
+	}
+
+	// The value is replaced with a reference: same paths, and now it pushes.
+	fakes.git.commitBackErr = nil
+	fakes.git.commitBackHeldBack = nil
+	r.ReconcileNow(context.Background())
+	if fakes.applier.state.LastDriftBranch == "" {
+		t.Error("the fixed drift set was never committed back")
 	}
 }

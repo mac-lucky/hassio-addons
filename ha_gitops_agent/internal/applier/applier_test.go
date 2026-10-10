@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 )
 
@@ -835,15 +837,14 @@ func newStash(t *testing.T, manifest string) string {
 }
 
 // A rollback restores what the manifest says the apply touched; an
-// exclusion pattern that changed between the two (age_key cleared, so
-// secrets.yaml became excluded) must not strand the restore - one refused
-// file would flip OK to false and skip the HA reload and every registry
-// rollback behind it.
+// exclusion pattern that changed between the two (an older binary's
+// pattern set) must not strand the restore - one refused file would flip
+// OK to false and skip the HA reload and every registry rollback behind it.
 func TestRollbackFromRestoresPathsExcludedSinceTheApply(t *testing.T) {
 	configRoot := t.TempDir()
-	writeText(t, filepath.Join(configRoot, "secrets.yaml"), "live\n")
-	stashDir := newStash(t, `{"files": {"secrets.yaml": "existed"}, "created_dirs": []}`)
-	writeText(t, filepath.Join(stashDir, "secrets.yaml"), "stashed\n")
+	writeText(t, filepath.Join(configRoot, "packages/old.yaml"), "live\n")
+	stashDir := newStash(t, `{"files": {"packages/old.yaml": "existed"}, "created_dirs": []}`)
+	writeText(t, filepath.Join(stashDir, "packages/old.yaml"), "stashed\n")
 
 	cfg := DefaultConfig()
 	cfg.IsExcluded = func(string) bool { return true }
@@ -852,8 +853,61 @@ func TestRollbackFromRestoresPathsExcludedSinceTheApply(t *testing.T) {
 	if !result.OK || !result.RolledBack {
 		t.Fatalf("result = %+v", result)
 	}
-	if got := readText(t, filepath.Join(configRoot, "secrets.yaml")); got != "stashed\n" {
-		t.Errorf("secrets.yaml = %q, want the stashed copy restored", got)
+	if got := readText(t, filepath.Join(configRoot, "packages/old.yaml")); got != "stashed\n" {
+		t.Errorf("packages/old.yaml = %q, want the stashed copy restored", got)
+	}
+}
+
+// Versions before 0.9.0 applied a decrypted secrets.yaml, so a stash they
+// wrote can name one, as "existed" or as "absent". Something else renders
+// that file now: a rollback restoring the stashed copy, or removing the
+// file, would undo it. Left alone, and not counted as a failure.
+func TestRollbackFromLeavesSecretsFilesAlone(t *testing.T) {
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(configRoot, "secrets.yaml"), "rendered\n")
+	writeText(t, filepath.Join(configRoot, "esphome/secrets.yaml"), "rendered\n")
+	writeText(t, filepath.Join(configRoot, "automations.yaml"), "live\n")
+	stashDir := newStash(t, `{"files": {"secrets.yaml": "existed", "esphome/secrets.yaml": "absent", "automations.yaml": "existed"}, "created_dirs": []}`)
+	writeText(t, filepath.Join(stashDir, "secrets.yaml"), "stale\n")
+	writeText(t, filepath.Join(stashDir, "automations.yaml"), "stashed\n")
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if !result.OK || !result.RolledBack {
+		t.Fatalf("result = %+v", result)
+	}
+	for _, p := range []string{"secrets.yaml", "esphome/secrets.yaml"} {
+		if got := readText(t, filepath.Join(configRoot, p)); got != "rendered\n" {
+			t.Errorf("%s = %q, want the rendered file left alone", p, got)
+		}
+	}
+	if got := readText(t, filepath.Join(configRoot, "automations.yaml")); got != "stashed\n" {
+		t.Errorf("automations.yaml = %q, want the ordinary file restored", got)
+	}
+	if !slices.Equal(result.Changed, []string{"automations.yaml"}) {
+		t.Errorf("Changed = %v, want only automations.yaml", result.Changed)
+	}
+}
+
+// An exclude_paths entry added since the apply hands the path to someone
+// else just as surely.
+func TestRollbackFromLeavesUserExcludedPathsAlone(t *testing.T) {
+	if err := gitsync.SetUserExclusions([]string{"wmbusmeters/"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gitsync.SetUserExclusions(nil) })
+
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(configRoot, "wmbusmeters/meter-1"), "generated\n")
+	stashDir := newStash(t, `{"files": {"wmbusmeters/meter-1": "absent"}, "created_dirs": []}`)
+
+	result := RollbackFrom(DefaultConfig(), stashDir, configRoot)
+
+	if !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := readText(t, filepath.Join(configRoot, "wmbusmeters/meter-1")); got != "generated\n" {
+		t.Errorf("meter-1 = %q, want it left alone", got)
 	}
 }
 
@@ -1056,6 +1110,71 @@ func TestStateLoadDropsUnsafeManifestEntries(t *testing.T) {
 
 	if len(state.Manifest) != 1 || state.Manifest[0] != "good.yaml" {
 		t.Errorf("manifest = %+v, want [good.yaml]", state.Manifest)
+	}
+}
+
+// A state.json written by 0.8.x with encryption on lists the secrets files
+// that version applied. They are forgotten on load, so nothing downstream
+// can plan their deletion once the repository stops tracking them, and
+// state.json is saved without them so that happens - and is logged - once.
+// A path exclude_paths now covers is forgotten the same way.
+func TestStateLoadForgetsUnmanagedPathsOnceAndSavesThat(t *testing.T) {
+	if err := gitsync.SetUserExclusions([]string{"wmbusmeters/"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gitsync.SetUserExclusions(nil) })
+	cfg := testConfig(t)
+	cfg.ConfigRoot = filepath.Join(t.TempDir(), "config")
+	writeText(t, cfg.StatePath, `{
+		"last_good_sha": "abc123",
+		"manifest": ["automations.yaml", "secrets.yaml", "esphome/secrets.yaml", "zigbee2mqtt/secret.yaml",
+			"wmbusmeters/etc/wmbusmeters.d/meter-0001", "esphome/node.yaml"]
+	}`)
+
+	state := StateLoad(cfg)
+
+	want := []string{"automations.yaml", "esphome/node.yaml"}
+	if !slices.Equal(state.Manifest, want) {
+		t.Errorf("manifest = %+v, want %v", state.Manifest, want)
+	}
+	var onDisk struct {
+		LastGoodSHA string   `json:"last_good_sha"`
+		Manifest    []string `json:"manifest"`
+	}
+	if err := json.Unmarshal([]byte(readText(t, cfg.StatePath)), &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(onDisk.Manifest, want) || onDisk.LastGoodSHA != "abc123" {
+		t.Errorf("state.json = %+v, want it saved with only %v and the rest kept", onDisk, want)
+	}
+
+	// Nothing left to forget, so the next load writes nothing.
+	before, err := os.Stat(cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	StateLoad(cfg)
+	if after, _ := os.Stat(cfg.StatePath); !after.ModTime().Equal(before.ModTime()) {
+		t.Error("a second load rewrote state.json")
+	}
+}
+
+// An unsafe entry is still refused rather than forgotten, and refusing
+// one does not rewrite the file: state.json is the user's to fix.
+func TestStateLoadDoesNotRewriteForAnUnsafeEntry(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ConfigRoot = filepath.Join(t.TempDir(), "config")
+	const raw = `{"manifest": ["good.yaml", "../outside.yaml"]}`
+	writeText(t, cfg.StatePath, raw)
+
+	state := StateLoad(cfg)
+
+	if !slices.Equal(state.Manifest, []string{"good.yaml"}) {
+		t.Errorf("manifest = %+v, want [good.yaml]", state.Manifest)
+	}
+	if got := readText(t, cfg.StatePath); got != raw {
+		t.Errorf("state.json = %q, want it left as written", got)
 	}
 }
 
@@ -2111,184 +2230,5 @@ func TestRollbackRemovesNestedEmptyDirsButKeepsPreexistingSiblings(t *testing.T)
 	}
 	if _, err := os.Stat(filepath.Join(configRoot, "packages", "keep.yaml")); err != nil {
 		t.Errorf("packages/keep.yaml should survive: %v", err)
-	}
-}
-
-// --- Config.TransformRepoFile: decrypt on the way into the config -------
-
-// decryptingTransform stands in for sops: "ENC[<x>]" becomes the plaintext
-// behind it, and every path it was handed is recorded so a test can prove
-// which direction it ran in.
-func decryptingTransform(seen *[]string) TransformRepoFileFunc {
-	return func(rel string, data []byte) ([]byte, error) {
-		if seen != nil {
-			*seen = append(*seen, rel)
-		}
-		text := string(data)
-		text = strings.ReplaceAll(text, "ENC[", "")
-		text = strings.ReplaceAll(text, "]", "")
-		return []byte(text), nil
-	}
-}
-
-func TestTransformAppliedToAddAndUpdatePreservingMode(t *testing.T) {
-	t.Setenv("SUPERVISOR_TOKEN", "test-token")
-	cfg := testConfig(t)
-	var seen []string
-	cfg.TransformRepoFile = decryptingTransform(&seen)
-	repoRoot := t.TempDir()
-	configRoot := t.TempDir()
-
-	if err := os.WriteFile(filepath.Join(repoRoot, "added.yaml"), []byte("password: ENC[added]\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	writeText(t, filepath.Join(repoRoot, "updated.yaml"), "password: ENC[updated]\n")
-	writeText(t, filepath.Join(configRoot, "updated.yaml"), "password: old\n")
-
-	changes := []Change{
-		{Path: "added.yaml", Kind: ChangeAdd},
-		{Path: "updated.yaml", Kind: ChangeUpdate},
-	}
-
-	result, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.OK || result.RolledBack {
-		t.Fatalf("result = %+v", result)
-	}
-	if got := readText(t, filepath.Join(configRoot, "added.yaml")); got != "password: added\n" {
-		t.Errorf("added.yaml = %q, want the transformed content", got)
-	}
-	if got := readText(t, filepath.Join(configRoot, "updated.yaml")); got != "password: updated\n" {
-		t.Errorf("updated.yaml = %q, want the transformed content", got)
-	}
-	if !reflect.DeepEqual(seen, []string{"added.yaml", "updated.yaml"}) {
-		t.Errorf("transform saw %+v, want both repo paths in change order", seen)
-	}
-	info, err := os.Stat(filepath.Join(configRoot, "added.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("added.yaml mode = %v, want the source file's 0600", info.Mode().Perm())
-	}
-}
-
-// TestTransformNeverTouchesTheStash: the stash is the live config as it
-// was, and the only thing a rollback restores from. Transforming on the way
-// in would make it a copy of the repository instead.
-func TestTransformNeverTouchesTheStash(t *testing.T) {
-	t.Setenv("SUPERVISOR_TOKEN", "test-token")
-	cfg := testConfig(t)
-	cfg.TransformRepoFile = decryptingTransform(nil)
-	repoRoot := t.TempDir()
-	configRoot := t.TempDir()
-	writeText(t, filepath.Join(repoRoot, "demo.yaml"), "password: ENC[new]\n")
-	writeText(t, filepath.Join(configRoot, "demo.yaml"), "password: ENC[live]\n")
-
-	changes := []Change{{Path: "demo.yaml", Kind: ChangeUpdate}}
-
-	result, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := readText(t, filepath.Join(result.StashDir, "demo.yaml")); got != "password: ENC[live]\n" {
-		t.Errorf("stashed copy = %q, want the live bytes verbatim", got)
-	}
-}
-
-// TestRollbackRestoresUntransformedStash covers the other direction of
-// the same rule: the restore replays the stash byte for byte.
-func TestRollbackRestoresUntransformedStash(t *testing.T) {
-	t.Setenv("SUPERVISOR_TOKEN", "test-token")
-	cfg := testConfig(t)
-	cfg.TransformRepoFile = decryptingTransform(nil)
-	repoRoot := t.TempDir()
-	configRoot := t.TempDir()
-	writeText(t, filepath.Join(repoRoot, "demo.yaml"), "password: ENC[new]\n")
-	writeText(t, filepath.Join(configRoot, "demo.yaml"), "password: ENC[live]\n")
-
-	changes := []Change{{Path: "demo.yaml", Kind: ChangeUpdate}}
-	client := &fakeClient{postResponses: map[string]jsonResponse{
-		"/core/api/config/core/check_config": {status: 200, body: map[string]any{"result": "invalid", "errors": "bad"}},
-	}}
-
-	result, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), client)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.RolledBack {
-		t.Fatalf("result = %+v, want a rollback", result)
-	}
-	if got := readText(t, filepath.Join(configRoot, "demo.yaml")); got != "password: ENC[live]\n" {
-		t.Errorf("restored demo.yaml = %q, want the original live bytes", got)
-	}
-}
-
-// TestTransformFailureMidBatchRollsBackWhatWasWritten: a file that cannot
-// be decrypted must not leave the config half-applied, or be written as
-// ciphertext.
-func TestTransformFailureMidBatchRollsBackWhatWasWritten(t *testing.T) {
-	t.Setenv("SUPERVISOR_TOKEN", "test-token")
-	cfg := testConfig(t)
-	cfg.TransformRepoFile = func(rel string, data []byte) ([]byte, error) {
-		if rel == "second.yaml" {
-			return nil, errors.New("sops decrypt failed (exit 1)")
-		}
-		return data, nil
-	}
-	repoRoot := t.TempDir()
-	configRoot := t.TempDir()
-	writeText(t, filepath.Join(repoRoot, "first.yaml"), "a: repo\n")
-	writeText(t, filepath.Join(configRoot, "first.yaml"), "a: live\n")
-	writeText(t, filepath.Join(repoRoot, "second.yaml"), "b: repo\n")
-	writeText(t, filepath.Join(configRoot, "second.yaml"), "b: live\n")
-
-	changes := []Change{
-		{Path: "first.yaml", Kind: ChangeUpdate},
-		{Path: "second.yaml", Kind: ChangeUpdate},
-	}
-
-	result, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.OK || !result.RolledBack {
-		t.Fatalf("result = %+v, want a rolled-back failure", result)
-	}
-	if !strings.Contains(result.Error, "sops decrypt failed") {
-		t.Errorf("error = %q, want the transform's own reason", result.Error)
-	}
-	if got := readText(t, filepath.Join(configRoot, "first.yaml")); got != "a: live\n" {
-		t.Errorf("first.yaml = %q, want it rolled back to the live bytes", got)
-	}
-	if got := readText(t, filepath.Join(configRoot, "second.yaml")); got != "b: live\n" {
-		t.Errorf("second.yaml = %q, want it untouched", got)
-	}
-	if got := readText(t, filepath.Join(result.StashDir, "first.yaml")); got != "a: live\n" {
-		t.Errorf("stash first.yaml = %q, want the stash intact after the rollback", got)
-	}
-	if len(result.Changed) != 0 {
-		t.Errorf("changed = %+v, want none", result.Changed)
-	}
-}
-
-// TestNilTransformIsAPlainCopy pins the default: everything about an
-// apply is byte-for-byte what it was before encryption existed.
-func TestNilTransformIsAPlainCopy(t *testing.T) {
-	t.Setenv("SUPERVISOR_TOKEN", "test-token")
-	cfg := testConfig(t)
-	repoRoot := t.TempDir()
-	configRoot := t.TempDir()
-	writeText(t, filepath.Join(repoRoot, "demo.yaml"), "password: ENC[still-here]\n")
-
-	changes := []Change{{Path: "demo.yaml", Kind: ChangeAdd}}
-
-	if _, err := Apply(context.Background(), cfg, changes, repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := readText(t, filepath.Join(configRoot, "demo.yaml")); got != "password: ENC[still-here]\n" {
-		t.Errorf("demo.yaml = %q, want the repo bytes copied verbatim", got)
 	}
 }

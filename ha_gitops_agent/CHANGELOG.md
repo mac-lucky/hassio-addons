@@ -8,6 +8,87 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.9.0] - 2026-10-10
+
+Secrets leave git entirely. The agent no longer encrypts or decrypts
+anything: secrets live in 1Password and reach Home Assistant through
+`secrets.yaml`, which something on the box renders (the new 1Password
+Secrets app in this repository, or any other tool) and this agent never
+touches. **BREAKING** for anyone who used `age_key`: a repository that
+still holds SOPS-encrypted files stops syncing until they are gone.
+
+To migrate, in this order:
+
+1. Pause the agent (the Pause button on its dashboard).
+2. Clear the `age_key` option and save. Removing it from the schema does
+   not remove it from Supervisor: it warns about the unknown option at
+   start but keeps it in its storage and in every backup, and hands it to
+   any add-on with the manager role. If it was a literal key rather than a
+   `secret://` reference, treat everything it ever encrypted in the git
+   history as readable by whoever has one of those backups.
+3. Update to 0.9.0.
+4. Set `exclude_paths` for files that leave git but must stay on the box,
+   such as `wmbusmeters/etc/wmbusmeters.d/` - otherwise the commit that
+   removes them from the repository deletes them here too.
+5. Make sure the secrets files are rendered by something else first: the
+   1Password Secrets app writes `secrets.yaml` (and `esphome/secrets.yaml`,
+   `zigbee2mqtt/secret.yaml` if you use them).
+6. Push the commit that replaces every SOPS value with a `!secret`
+   reference (Zigbee2MQTT: `'!secret key'`) and removes `secrets.yaml`,
+   every other SOPS-encrypted file and `.sops.yaml` from the repository.
+7. Resume the agent.
+
+On that first cycle, a file whose last applied copy was SOPS-encrypted
+follows the repository: the commit is applied, never captured as a live
+edit or held as a conflict, since the old ciphertext and the plaintext
+0.8.x wrote here differ whoever changed what.
+
+### Removed
+
+- **BREAKING:** SOPS and age support: the `age_key` option, encryption on
+  import, capture and commit-back, decryption on apply, the managed
+  `.sops.yaml` and the `sops` binary in the image. A repository that still
+  tracks a file carrying SOPS metadata (an `ENC[AES256_GCM,...]` value, a
+  `sops:` block, or `sops_mac=` / `sops_lastmodified=` lines) is a hard
+  stop like a tracked secrets file: nothing is applied, captured or
+  deleted, and the dashboard names the files and the way out.
+
+### Added
+
+- `exclude_paths` option: extra paths never synced in either direction
+  and never deleted, in the built-in exclusions' syntax (`dir/`, `/dir/`,
+  `*.ext`, an exact path, a `*` within the last segment). For files another
+  app writes with secrets inside, such as wmbusmeters' meter definitions
+  (`wmbusmeters/etc/wmbusmeters.d/`). An invalid entry stops the agent at
+  startup with a message naming it.
+- A "Held back from git" card on the dashboard. Capture, commit-back and
+  import never push a file that holds a value under a secret-shaped key
+  (`password`, `token`, `api_key`, `*_secret` and the like) written out in
+  full: it is held back, named by key path (never the value) on the card,
+  in the activity feed and, for an import, on its history row, and a
+  held-back capture is not overwritten by the next apply either. `!secret`,
+  `!env_var` and Zigbee2MQTT's `'!secret key'` strings are references and
+  pass. An import with files held back records a partial run.
+- A waiting page at startup: when a `secret://` option (`git_token`,
+  `webhook_secret`) names a key the live `secrets.yaml` does not have yet,
+  or the file does not exist yet, the agent shows which key it waits for
+  and retries every 10 seconds instead of exiting. On a fresh box the app
+  rendering `secrets.yaml` may start after this one.
+
+### Changed
+
+- Secrets files are never synced at any depth: `secrets.yaml`,
+  `secrets.yml` and Zigbee2MQTT's `secret.yaml` / `secret.yml`, in any
+  letter case. A tracked one is still a hard stop. A `secrets.yaml` an
+  older version applied and recorded in `state.json` is never deleted when
+  it leaves the repository, and a rollback from an older stash leaves the
+  live secrets files alone.
+- With `capture_live_changes` on, a file whose merge base is SOPS
+  ciphertext from 0.8.x has no usable base: the repository wins, as before
+  capture existed, and nothing is captured or parked for it.
+- A malformed `secret://` reference in the options is still fatal at
+  startup.
+
 ## [0.8.4] - 2026-10-08
 
 Rebuild only, no functional change.

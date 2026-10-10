@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 )
 
 // RollbackFrom restores configRoot from a stash directory written by Apply
@@ -54,6 +55,12 @@ func RollbackFrom(cfg Config, stashDir, configRoot string) Result {
 	var failures []string
 	for _, relPath := range relPaths {
 		status := files[relPath]
+		if rollbackSkips(relPath) {
+			// Not a failure: the file is someone else's now, and restoring
+			// it - or removing it, for "absent" - would undo their work.
+			slog.Info("applier: rollback_from leaving a file this agent no longer manages", "path", relPath)
+			continue
+		}
 		// Re-run at rollback time because the manifest could be stale or
 		// corrupt and a parent directory swapped for a symlink since the
 		// apply; also keeps the backupSrc join below inside the stash.
@@ -112,6 +119,15 @@ func RollbackFrom(cfg Config, stashDir, configRoot string) Result {
 		}
 	}
 	return Result{OK: true, Changed: restored, RolledBack: true, StashDir: stashDir}
+}
+
+// rollbackSkips reports whether a stash entry must be left alone on
+// restore although an apply once wrote it: a secrets file (versions before
+// 0.9.0 applied a decrypted secrets.yaml; something else renders it now)
+// or a path the exclude_paths option has since handed to someone else.
+// Narrower than guardChangePath on purpose - see guardPathContained.
+func rollbackSkips(relPath string) bool {
+	return gitsync.IsSecretsFile(relPath) || gitsync.UserExcluded(relPath)
 }
 
 // parseStashManifest decodes raw (a decoded manifest.json) into a files map

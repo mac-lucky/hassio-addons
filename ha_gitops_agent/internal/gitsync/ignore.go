@@ -52,8 +52,8 @@ appdaemon/compiled/
 `
 
 // ensureGitignore writes DefaultGitignore at the repository root when
-// nothing is there yet, and reports whether it wrote. Create-only, unlike
-// ensureSopsConfig: .gitignore is a starting point the user edits, and
+// nothing is there yet, and reports whether it wrote. Create-only:
+// .gitignore is a starting point the user edits, and
 // rewriting it would silently re-ignore what they un-ignored. Guarded and
 // unlinked first, since a tracked .gitignore may be a symlink.
 func (g *GitSync) ensureGitignore() (bool, error) {
@@ -82,7 +82,7 @@ func (g *GitSync) ensureGitignore() (bool, error) {
 // copies it over anyway and the bulk "git add" applies that content, so
 // filtering by anything else would disagree with what gets staged. A
 // repo-only .gitignore is not in the scan and keeps governing on its own.
-func (g *GitSync) copyIgnoresFromLive(ctx context.Context, files []string, configRoot string) error {
+func (g *GitSync) copyIgnoresFromLive(files []string, configRoot string) error {
 	for _, p := range gitignorePaths(files) {
 		// Repeated from stageImport's own loop, because this pass runs
 		// BEFORE it and writes into the worktree.
@@ -90,9 +90,8 @@ func (g *GitSync) copyIgnoresFromLive(ctx context.Context, files []string, confi
 			return err
 		}
 		// The main loop's own copy path, so the two cannot disagree about
-		// symlinks or encryption. Idempotent; the loop still does the
-		// counting.
-		if _, err := g.copyLiveIntoWorkdir(ctx, configRoot, p); err != nil {
+		// symlinks. Idempotent; the loop still does the counting.
+		if _, err := g.copyLiveIntoWorkdir(configRoot, p); err != nil {
 			return err
 		}
 	}
@@ -155,8 +154,7 @@ func (g *GitSync) ignoredSet(ctx context.Context, dir string, files []string) (m
 }
 
 // filterIgnored drops the paths the ignore rules in dir match. Import gets
-// this at staging anyway, but only after every file is read, encrypted and
-// written; asking up front also makes the imported-file tally count what
+// this at staging anyway, but only after every file is read and written; asking up front also makes the imported-file tally count what
 // was committed rather than what was copied.
 func (g *GitSync) filterIgnored(ctx context.Context, dir string, files []string) ([]string, error) {
 	if len(files) == 0 {
@@ -288,11 +286,11 @@ func writeUnderRoot(root, rel string, content []byte) error {
 	return nil
 }
 
-// refuseUnsyncablePath is the import path's refusal for a scanned file that
-// is excluded outright, or secret-shaped in a way encryption does not
-// cover. Named so its three call sites cannot drift apart.
+// refuseUnsyncablePath is the write path's refusal for a file that is
+// excluded or secret-shaped. Named so its three call sites cannot drift
+// apart.
 func refuseUnsyncablePath(p string) error {
-	if Excluded(p) || secretShapedDisallowed(p) {
+	if Excluded(p) || matchesSecretPattern(p) {
 		return fmt.Errorf("refusing to touch excluded/secret-shaped path: %s", p)
 	}
 	return nil

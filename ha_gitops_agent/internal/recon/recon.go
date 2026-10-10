@@ -219,6 +219,11 @@ type Reconciler struct {
 	conflicts          []string
 	lastConflictBranch string
 	lastConflictUTC    string
+	// heldBack is the files the last capture would not push, rendered
+	// "path (key, key)" and sorted, because they hold a literal value under
+	// a secret-shaped key. Written only by noteHeldBack; never persisted,
+	// the next cycle rebuilds it.
+	heldBack []string
 	// hacsUnavailable records that HACS is not installed - the one layer
 	// failure that skips its layer instead of ending the cycle (see
 	// planHacsLayer). Guarded on the transition, and a dashboard chip.
@@ -291,6 +296,11 @@ type Reconciler struct {
 	// mu.
 	leftBehindWarned []string
 
+	// autoCommitBackHeld is the held-back set the automatic commit-back last
+	// reported when it could push nothing else, "" otherwise; see
+	// commitDriftBackAs. Under opLock, like leftBehindWarned.
+	autoCommitBackHeld string
+
 	// checkLock is opLock's equivalent for CheckAddonUpdates alone - see
 	// that method for why the check needs a lock of its own.
 	checkLock sync.Mutex
@@ -334,21 +344,13 @@ func New(opts options.Options, deps Deps) *Reconciler {
 	}
 
 	if r.git == nil {
-		g := gitsync.New(opts, gitsync.DefaultWorkdir)
-		g.Crypter = deps.Crypter
-		r.git = newRealGit(g)
+		r.git = newRealGit(gitsync.New(opts, gitsync.DefaultWorkdir))
 	}
-	// Both seams below decrypt through this, built from r.git's worktree so
-	// the path handed to sops is the one those bytes came from. nil without
-	// an age key, which keeps differ.Compute's refusal reachable.
-	transform := repoDecryptTransform(deps.Crypter, r.git.Workdir())
 	if r.differ == nil {
-		r.differ = realDiffer{transform: transform}
+		r.differ = realDiffer{}
 	}
 	if r.applier == nil {
-		cfg := applier.DefaultConfig()
-		cfg.TransformRepoFile = applierRepoTransform(transform)
-		r.applier = &realApplier{cfg: cfg}
+		r.applier = &realApplier{cfg: applier.DefaultConfig()}
 	}
 	if r.snapshot == nil {
 		r.snapshot = realSnapshot{}
@@ -955,6 +957,8 @@ func (r *Reconciler) Status() Status {
 	copy(blocked, r.blocked)
 	conflicts := make([]string, len(r.conflicts))
 	copy(conflicts, r.conflicts)
+	heldBack := make([]string, len(r.heldBack))
+	copy(heldBack, r.heldBack)
 	lastConflictBranch := r.lastConflictBranch
 	lastConflictUTC := r.lastConflictUTC
 	lastCaptureSHA := r.lastCaptureSHA
@@ -1019,6 +1023,7 @@ func (r *Reconciler) Status() Status {
 		Conflicts:           conflicts,
 		ConflictBranch:      lastConflictBranch,
 		ConflictUTC:         lastConflictUTC,
+		HeldBack:            heldBack,
 		LastImportSHA:       lastImportSHA,
 		LastImportSHAShort:  history.ShortSHA(lastImportSHA),
 		LastImportUTC:       lastImportUTC,
@@ -1350,7 +1355,7 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 		// Through failCycle like every other cycle-ending failure: this one
 		// stops before checkout, and nothing about the stale plan should
 		// stay actionable while a hard stop stands.
-		return r.failCycle(run, fmt.Errorf("refusing to sync: secrets tracked in repository: %w", err))
+		return r.failCycle(run, guardRefusal(err))
 	}
 
 	tracked, err := r.git.TrackedFiles(ctx, sha)
@@ -1372,14 +1377,8 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 	// layers read come from the checkout, not from this plan.
 	var changes []differ.Change
 	if r.opts.ReconcileYAMLFiles {
-		var skippedContainment, decryptFailures []string
-		changes, skippedContainment, decryptFailures = r.differ.Compute(r.git.Workdir(), ConfigRoot, tracked, state.Manifest)
-		if len(decryptFailures) > 0 {
-			// A file that could not be decrypted ends the cycle: writing
-			// ciphertext into the config or skipping the file silently are
-			// both worse than saying which file and why.
-			return r.failCycle(run, fmt.Errorf("refusing to sync: %s", strings.Join(decryptFailures, "; ")))
-		}
+		var skippedContainment []string
+		changes, skippedContainment = r.differ.Compute(r.git.Workdir(), ConfigRoot, tracked, state.Manifest)
 		if len(skippedContainment) > 0 {
 			// Invisible otherwise - differ.Compute only slog.Warns per path.
 			// A path that is non-regular or escapes its root is plausible
@@ -1557,6 +1556,26 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 	r.maybeRecordAddonVersions(ctx)
 
 	return changes
+}
+
+// guardRefusal words GuardSecretsAt's hard stop for lastError and the
+// history row. A tracked secrets file keeps its long-standing "secrets
+// tracked in repository:" prefix; a SOPS refusal carries its own wording,
+// way out included. Both can arrive together (errors.Join).
+func guardRefusal(err error) error {
+	var parts []string
+	var secrets *gitsync.SecretsTrackedError
+	if errors.As(err, &secrets) {
+		parts = append(parts, "secrets tracked in repository: "+secrets.Error())
+	}
+	var sops *gitsync.SopsTrackedError
+	if errors.As(err, &sops) {
+		parts = append(parts, sops.Error())
+	}
+	if len(parts) == 0 {
+		parts = append(parts, err.Error())
+	}
+	return fmt.Errorf("refusing to sync: %s", strings.Join(parts, "; "))
 }
 
 // planRegistryLayer plans the floor/area/label/helper layer, the device

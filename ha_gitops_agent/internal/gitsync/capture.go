@@ -52,6 +52,11 @@ type CaptureResult struct {
 	// caller keeps them out of its apply, and its next cycle classifies them
 	// against the new tip (typically as a conflict).
 	Refused []string
+	// HeldBack is the asked-for files NOT captured because they hold a
+	// literal value under a secret-shaped key. Set with or without a commit.
+	// The caller keeps them out of its apply too - the live edit is still
+	// the one to keep - and reports them until the file changes.
+	HeldBack []HeldBack
 }
 
 // CaptureFiles commits the CURRENT LIVE state of every path in files onto
@@ -64,14 +69,13 @@ type CaptureResult struct {
 // review, this one moves opts.Branch itself.
 //
 // Staging is stageDrift's, unchanged and deliberately not reimplemented:
-// each path is re-read under configRoot, encrypted in place when SOPS calls
-// for it, refused if it is excluded or secret-shaped (refuseUnsyncablePath),
-// resolved through guardDriftPath at both ends so a symlink cannot make it
-// read or write outside its root, skipped rather than fatal when gitignored,
-// and staged as a REMOVAL only when it is genuinely absent - fs.ErrNotExist
-// alone, via liveFileIsGone, never a file that merely could not be read. The
-// managed .sops.yaml rides along in the pathspec, so a commit carrying a
-// newly encrypted secrets.yaml also carries the config to decrypt it.
+// each path is re-read under configRoot, held back when it carries a
+// literal secret (CaptureResult.HeldBack), refused if it is excluded or
+// secret-shaped (refuseUnsyncablePath), resolved through guardDriftPath at
+// both ends so a symlink cannot make it read or write outside its root,
+// skipped rather than fatal when gitignored, and staged as a REMOVAL only
+// when it is genuinely absent - fs.ErrNotExist alone, via liveFileIsGone,
+// never a file that merely could not be read.
 //
 // Exactly the staged paths are committed, enforced at the COMMIT ("--only --
 // <paths...>") rather than trusted to the staging, for recordFileAt's
@@ -209,16 +213,16 @@ func (g *GitSync) captureFilesAt(ctx context.Context, tip string, files []DriftF
 		// Nothing capturable after the per-path guards had their say. Not an
 		// error: the caller has nothing to record, and the paths it asked
 		// about stay drift it will be shown again next cycle.
-		return CaptureResult{BaseSHA: tip}, nil
+		return CaptureResult{BaseSHA: tip, HeldBack: staged.HeldBack}, nil
 	}
 
-	args := append([]string{"commit", "--quiet", "-m", CaptureCommitMessage, "--only", "--"}, staged.pathspec()...)
+	args := append([]string{"commit", "--quiet", "-m", CaptureCommitMessage, "--only", "--"}, staged.Paths...)
 	if _, err := g.runGit(ctx, args, "", commitIdentityEnv()); err != nil {
 		if isNothingToCommitError(err) {
 			// Staged content turned out identical to the tip - a mode change,
 			// say. Reporting a commit that did not happen would have the
 			// caller record a merge base that does not exist.
-			return CaptureResult{BaseSHA: tip}, nil
+			return CaptureResult{BaseSHA: tip, HeldBack: staged.HeldBack}, nil
 		}
 		return CaptureResult{}, err
 	}
@@ -237,5 +241,5 @@ func (g *GitSync) captureFilesAt(ctx context.Context, tip string, files []DriftF
 		return CaptureResult{}, err
 	}
 
-	return CaptureResult{CommitSHA: commitSHA, BaseSHA: tip, Paths: staged.Paths}, nil
+	return CaptureResult{CommitSHA: commitSHA, BaseSHA: tip, Paths: staged.Paths, HeldBack: staged.HeldBack}, nil
 }

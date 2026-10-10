@@ -68,12 +68,6 @@ profile ha_gitops_agent flags=(attach_disconnected,mediate_deleted) {
   # openssl, zlib, ...) resolvable too.
   /usr/bin/git rix,
   /usr/libexec/git-core{,/**} rix,
-  # sops encrypts and decrypts secret values (see internal/sopscrypt). Like
-  # git, it is dynamically linked against musl and covered by the library
-  # rules below. It only ever reads and rewrites files under /data/repo,
-  # including the temporary file --in-place writes next to its target, and
-  # both are already covered by the /data grant above.
-  /usr/bin/sops rix,
   /lib/ld-musl-*.so* mr,
   /usr/lib/*.so* mr,
 
@@ -83,12 +77,14 @@ profile ha_gitops_agent flags=(attach_disconnected,mediate_deleted) {
   # rules cover the bare directory too, so listing .storage's contents
   # is blocked, not just reading/writing what's inside it.
   #
-  # secrets.yaml is deliberately NOT denied here any more: with an age_key
-  # configured the agent reads it to encrypt it on the way into git, and
-  # writes it back on apply. What keeps it out of the repository when no
-  # key is configured is gitsync's own rules (ExcludedPatterns and
-  # SecretPatterns), not this profile - and those still refuse it in the
-  # clear.
+  # The secrets files (secrets.yaml, and Zigbee2MQTT's secret.yaml) are
+  # rendered by another add-on and never synced, so the agent never writes
+  # one. It still READS the top-level secrets.yaml, which answers the
+  # secret:// references in its options and manifests, so only writing is
+  # denied. gitsync's own rules (ExcludedPatterns, SecretPatterns) are what
+  # keep them out of the repository; this is the backstop for the box.
   deny /homeassistant/.storage{,/**} rw,
   deny /homeassistant/.cloud{,/**} rw,
+  deny /homeassistant/secret{,s}.y{,a}ml w,
+  deny /homeassistant/**/secret{,s}.y{,a}ml w,
 }

@@ -19,9 +19,8 @@ import (
 //     rejected the call returns OK=false with no stash.
 //  2. Stash a copy of every file about to be touched (add, update, delete)
 //     under cfg.BackupRoot/<utc-ts>/, preserving relative paths.
-//  3. Copy adds/updates from repoRoot through cfg.TransformRepoFile
-//     (decryption) and remove deletes. A transform failure rolls back the
-//     stash exactly as a failed write does.
+//  3. Copy adds/updates from repoRoot and remove deletes. A failed write
+//     rolls back the stash.
 //  4. POST <cfg.Supervisor>/core/api/config/core/check_config with the
 //     Supervisor token.
 //  5. Invalid config: restore the stash, remove newly added files, return
@@ -91,7 +90,7 @@ func Apply(
 		return Result{}, fmt.Errorf("applier: stashing files: %w", err)
 	}
 
-	changedPaths, writeErr := writeChanges(cfg, changes, repoRoot, configRoot)
+	changedPaths, writeErr := writeChanges(changes, repoRoot, configRoot)
 	if writeErr != nil {
 		errMsg, rbOK := rollbackAfterFailure(cfg, stashDir, configRoot, fmt.Sprintf("failed writing changes: %v", writeErr))
 		return Result{OK: false, Error: joinNotes(skipNote, errMsg), RolledBack: rbOK, StashDir: stashDir}, nil

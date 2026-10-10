@@ -56,12 +56,6 @@ type Config struct {
 	// touching any path. Overridable so tests can inject a trivial stub
 	// instead of depending on internal/gitsync's actual algorithm.
 	IsExcluded IsExcludedFunc
-
-	// TransformRepoFile is applied to a repository file's bytes on the way
-	// into the live config and nowhere else - not to the pre-apply stash
-	// (live bytes, which must round-trip unchanged) and not to a rollback
-	// restore, which replays that stash verbatim. nil means copy as-is.
-	TransformRepoFile TransformRepoFileFunc
 }
 
 // DefaultConfig returns the production Config: /homeassistant,

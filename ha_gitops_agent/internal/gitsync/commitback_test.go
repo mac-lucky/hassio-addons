@@ -2,9 +2,11 @@ package gitsync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -72,7 +74,7 @@ func TestCommitBackCreatesBranchAndPushesWithoutTouchingConfiguredBranch(t *test
 		t.Fatal(err)
 	}
 
-	branch, err := gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	branch, _, err := gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err != nil {
 		t.Fatalf("CommitBack: %v", err)
 	}
@@ -130,7 +132,7 @@ func TestCommitBackStagesDeletionForFileGoneFromLive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	branch, err := gs.CommitBack(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "delete"}}, configRoot, sha, fixedDriftTime)
+	branch, _, err := gs.CommitBack(ctx, []DriftFile{{Path: "scripts.yaml", Kind: "delete"}}, configRoot, sha, fixedDriftTime)
 	if err != nil {
 		t.Fatalf("CommitBack: %v", err)
 	}
@@ -168,7 +170,7 @@ func TestCommitBackNothingToStageReturnsErrorAndPushesNoBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Neither tracked nor live: nothing to stage in either direction.
-	_, err = gs.CommitBack(ctx, []DriftFile{{Path: "never-existed.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	_, _, err = gs.CommitBack(ctx, []DriftFile{{Path: "never-existed.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a \"nothing to stage\" error")
 	}
@@ -186,10 +188,10 @@ func TestCommitBackRejectsEmptyFilesOrBaseSHA(t *testing.T) {
 	gs := New(makeOpts("file:///unused"), t.TempDir())
 	ctx := context.Background()
 
-	if _, err := gs.CommitBack(ctx, nil, "/unused", "deadbeef", fixedDriftTime); err == nil {
+	if _, _, err := gs.CommitBack(ctx, nil, "/unused", "deadbeef", fixedDriftTime); err == nil {
 		t.Error("CommitBack() with no files: error = nil, want an error")
 	}
-	if _, err := gs.CommitBack(ctx, []DriftFile{{Path: "x.yaml", Kind: "update"}}, "/unused", "", fixedDriftTime); err == nil {
+	if _, _, err := gs.CommitBack(ctx, []DriftFile{{Path: "x.yaml", Kind: "update"}}, "/unused", "", fixedDriftTime); err == nil {
 		t.Error("CommitBack() with no baseSHA: error = nil, want an error")
 	}
 }
@@ -215,7 +217,7 @@ func TestCommitBackPushUsesCredentialEnvNeverArgv(t *testing.T) {
 	fr := &fakeRunner{}
 	gs.Runner = fr
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, strings.Repeat("a", 40), fixedDriftTime)
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, strings.Repeat("a", 40), fixedDriftTime)
 	if err != nil {
 		t.Fatalf("CommitBack: %v", err)
 	}
@@ -285,7 +287,7 @@ func TestCommitBackRejectsPathTraversal(t *testing.T) {
 	}
 
 	for _, p := range []string{"../outside.yaml", "/etc/passwd", "sub/../../outside.yaml"} {
-		_, err := gs.CommitBack(ctx, []DriftFile{{Path: p, Kind: "update"}}, configRoot, sha, fixedDriftTime)
+		_, _, err := gs.CommitBack(ctx, []DriftFile{{Path: p, Kind: "update"}}, configRoot, sha, fixedDriftTime)
 		if err == nil {
 			t.Errorf("CommitBack(%q) error = nil, want a path-traversal refusal", p)
 			continue
@@ -331,7 +333,7 @@ func TestStageDriftRejectsLiveSymlinkEscapingConfigRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	_, _, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a symlink-escape refusal")
 	}
@@ -376,7 +378,7 @@ func TestStageDriftRejectsLiveSymlinkToExcludedNameInBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	_, _, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a refusal for a symlink resolving to a secret-shaped path")
 	}
@@ -426,7 +428,7 @@ func TestStageDriftRejectsRepoSymlinkEscapingWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	_, _, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a symlink-escape refusal on the repo/workdir side")
 	}
@@ -467,7 +469,7 @@ func TestStageDriftFiltersExcludedAndSecretNamesEvenWhenPassedExplicitly(t *test
 	}
 
 	for _, p := range []string{"secrets.yaml", ".ssh/id_rsa"} {
-		_, err := gs.CommitBack(ctx, []DriftFile{{Path: p, Kind: "update"}}, configRoot, sha, fixedDriftTime)
+		_, _, err := gs.CommitBack(ctx, []DriftFile{{Path: p, Kind: "update"}}, configRoot, sha, fixedDriftTime)
 		if err == nil {
 			t.Errorf("CommitBack(%q) error = nil, want an excluded/secret-shaped refusal", p)
 			continue
@@ -514,7 +516,7 @@ func TestCommitBackCapturesAddKindPathMissingFromLiveAsADeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	branch, err := gs.CommitBack(ctx, []DriftFile{
+	branch, _, err := gs.CommitBack(ctx, []DriftFile{
 		{Path: "automations.yaml", Kind: "update"},
 		{Path: "new_from_repo.yaml", Kind: "add"},
 	}, configRoot, sha, fixedDriftTime)
@@ -573,7 +575,7 @@ func TestCommitBackSkipsGitignoredPathAndStillCommitsOthers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	branch, err := gs.CommitBack(ctx, []DriftFile{
+	branch, _, err := gs.CommitBack(ctx, []DriftFile{
 		{Path: "automations.yaml", Kind: "update"},
 		{Path: "ignored.yaml", Kind: "add"},
 	}, configRoot, sha, fixedDriftTime)
@@ -650,7 +652,7 @@ func TestCommitBackGitignoredPathAloneIsSkippedNotFatal(t *testing.T) {
 
 	// The only drifted path fails its "add" with git's real ignore text.
 	// It must be skipped, landing on the clean "nothing to stage" refusal.
-	_, err := gs.CommitBack(context.Background(), []DriftFile{{Path: "ignored.yaml", Kind: "update"}}, configRoot, "deadbeef", fixedDriftTime)
+	_, _, err := gs.CommitBack(context.Background(), []DriftFile{{Path: "ignored.yaml", Kind: "update"}}, configRoot, "deadbeef", fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a \"nothing to stage\" refusal")
 	}
@@ -685,7 +687,7 @@ func TestCommitBackGitignoredPathSkippedButOthersStillLand(t *testing.T) {
 		}
 	}
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{
 		{Path: "ignored.yaml", Kind: "update"},
 		{Path: "automations.yaml", Kind: "update"},
 	}, configRoot, "deadbeef", fixedDriftTime)
@@ -736,7 +738,7 @@ func TestCommitBackNothingToCommitIsACleanError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	_, _, err = gs.CommitBack(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err == nil {
 		t.Fatal("CommitBack() error = nil, want a clean \"nothing to commit\" error")
 	}
@@ -806,7 +808,7 @@ func TestCommitBackCapturesLiveDeletionOfTrackedFileReportedAsAdd(t *testing.T) 
 	const card = "www/community/gitops-e2e-fake-card/gitops-e2e-fake-card.js"
 	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{card: "console.log('card');\n"})
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{{Path: card, Kind: "add"}}, configRoot, sha, fixedDriftTime)
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{{Path: card, Kind: "add"}}, configRoot, sha, fixedDriftTime)
 	if err != nil {
 		t.Fatalf("CommitBack: %v", err)
 	}
@@ -839,7 +841,7 @@ func TestCommitBackKeepsPathWhoseLiveFileExistsButCannotBeStatted(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{
 		{Path: "locked/still-there.yaml", Kind: "add"},
 		{Path: "automations.yaml", Kind: "update"},
 	}, configRoot, sha, fixedDriftTime)
@@ -868,7 +870,7 @@ func TestCommitBackCapturesDeletionAndContentDriftInOneCommit(t *testing.T) {
 	liveEdit := "- id: demo\n  alias: Hand-edited live\n"
 	writeLiveFile(t, configRoot, "automations.yaml", liveEdit)
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{
 		{Path: "scripts.yaml", Kind: "add"},
 		{Path: "automations.yaml", Kind: "update"},
 	}, configRoot, sha, fixedDriftTime)
@@ -891,7 +893,7 @@ func TestCommitBackDeletionOfUntrackedPathDoesNotSinkTheRest(t *testing.T) {
 	liveEdit := "- id: demo\n  alias: Hand-edited live\n"
 	writeLiveFile(t, configRoot, "automations.yaml", liveEdit)
 
-	branch, err := gs.CommitBack(context.Background(), []DriftFile{
+	branch, _, err := gs.CommitBack(context.Background(), []DriftFile{
 		{Path: "never-tracked.yaml", Kind: "add"},
 		{Path: "automations.yaml", Kind: "update"},
 	}, configRoot, sha, fixedDriftTime)
@@ -931,7 +933,7 @@ func TestParkConflictsPreservesLiveCopiesWithoutTouchingTheTrackedBranch(t *test
 	const liveContent = "- id: demo\n  alias: Edited in the HA UI\n"
 	writeLiveFile(t, configRoot, "automations.yaml", liveContent)
 
-	branch, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	branch, _, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
 	if err != nil {
 		t.Fatalf("ParkConflicts: %v", err)
 	}
@@ -967,10 +969,10 @@ func TestParkConflictsRefusesWithNothingToPark(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 
-	if _, err := gs.ParkConflicts(ctx, nil, filepath.Join(tmp, "homeassistant"), sha, fixedDriftTime); err == nil {
+	if _, _, err := gs.ParkConflicts(ctx, nil, filepath.Join(tmp, "homeassistant"), sha, fixedDriftTime); err == nil {
 		t.Error("ParkConflicts(nil) error = nil, want a refusal")
 	}
-	if _, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "a.yaml"}}, filepath.Join(tmp, "homeassistant"), "", fixedDriftTime); err == nil {
+	if _, _, err := gs.ParkConflicts(ctx, []DriftFile{{Path: "a.yaml"}}, filepath.Join(tmp, "homeassistant"), "", fixedDriftTime); err == nil {
 		t.Error("ParkConflicts with no base error = nil, want a refusal")
 	}
 	for _, name := range listRemoteBranches(t, bare) {
@@ -990,4 +992,71 @@ func equalArgs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// headSHA reads a ref's commit straight out of the bare remote.
+func headSHA(t *testing.T, bare, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir="+bare, "rev-parse", ref) // #nosec G204 -- fixed "git" binary; args are test-controlled fixture values
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse %s: %v", ref, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Commit-back holds a literal secret back like capture does; a branch
+// whose every file was held back is not pushed, and the error says why.
+func TestCommitBackHoldsBackLiteralSecrets(t *testing.T) {
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{
+		"automations.yaml":   "- id: demo\n",
+		"configuration.yaml": "http:\n  server_port: 8123\n",
+	})
+	ctx := context.Background()
+	writeLiveFile(t, configRoot, "automations.yaml", "- id: edited\n")
+	writeLiveFile(t, configRoot, "configuration.yaml", "http:\n  server_port: 8123\nweather:\n  api_key: LEAKME\n")
+
+	branch, held, err := gs.CommitBack(ctx, []DriftFile{
+		{Path: "automations.yaml", Kind: "update"},
+		{Path: "configuration.yaml", Kind: "update"},
+	}, configRoot, sha, fixedDriftTime)
+	if err != nil {
+		t.Fatalf("CommitBack: %v", err)
+	}
+	if len(held) != 1 || held[0].Path != "configuration.yaml" || !slices.Equal(held[0].Keys, []string{"weather.api_key"}) {
+		t.Errorf("held back = %+v, want configuration.yaml (weather.api_key)", held)
+	}
+	if got, _ := showAtRef(t, bare, branch, "configuration.yaml"); strings.Contains(got, "LEAKME") {
+		t.Fatalf("the drift branch carries the secret: %q", got)
+	}
+
+	_, held, err = gs.CommitBack(ctx, []DriftFile{{Path: "configuration.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime.Add(time.Second))
+	if !errors.Is(err, ErrAllHeldBack) {
+		t.Fatalf("CommitBack() error = %v, want ErrAllHeldBack", err)
+	}
+	if strings.Contains(err.Error(), "LEAKME") || !strings.Contains(err.Error(), "weather.api_key") {
+		t.Errorf("error = %q, want the key path named and the value absent", err)
+	}
+	if len(held) != 1 {
+		t.Errorf("held back = %+v, want one", held)
+	}
+}
+
+// Parking a conflict copy holds a literal secret back too, and with
+// nothing else to park it pushes nothing and reports no failure: the
+// conflict verdict stands either way.
+func TestParkConflictsHoldsBackLiteralSecrets(t *testing.T) {
+	gs, _, _, configRoot, sha := driftClone(t, map[string]string{"configuration.yaml": "a: 1\n"})
+	writeLiveFile(t, configRoot, "configuration.yaml", "a: 2\npassword: LEAKME\n")
+
+	branch, held, err := gs.ParkConflicts(context.Background(), []DriftFile{{Path: "configuration.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	if err != nil {
+		t.Fatalf("ParkConflicts: %v", err)
+	}
+	if branch != "" {
+		t.Errorf("branch = %q, want none pushed", branch)
+	}
+	if len(held) != 1 || held[0].Path != "configuration.yaml" {
+		t.Errorf("held back = %+v, want configuration.yaml", held)
+	}
 }

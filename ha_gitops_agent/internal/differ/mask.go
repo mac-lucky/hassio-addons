@@ -1,43 +1,27 @@
 package differ
 
 import (
-	"errors"
+	"path"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/sopscrypt"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretshape"
 )
-
-// RepoTransform sops-decrypts one repository file's bytes (rel is
-// repo-relative). encrypted=true routes the comparison through
-// yamlSemanticallyEqual and maskedDiff; an error makes Compute report the
-// path rather than call a repository it cannot read in sync.
-type RepoTransform func(rel string, data []byte) (out []byte, encrypted bool, err error)
 
 // maskMarker replaces every secret value in a published diff. Fixed-width
 // so it leaks nothing about the value it hides, not even its length.
 const maskMarker = "*****"
 
-// encryptedSummary is the whole-file DiffText when no real diff of an
-// encrypted file can be published safely. Not "", which reads as a phantom
-// no-op on the page.
-const encryptedSummary = "encrypted values changed (hidden)"
-
-// secretSummary is encryptedSummary for a file that is NOT encrypted but
-// holds secret values - a plaintext-tracked file with a password typed into
-// it, secrets.yaml, or a JSON/dotenv file with a secret-shaped key. Saying
-// "encrypted" there would send people looking for sops or an age key that
-// has nothing to do with it.
+// secretSummary is the whole-file DiffText when no real diff of a file
+// holding secret values can be published safely. Not "", which reads as a
+// phantom no-op on the page.
 const secretSummary = "diff hidden: the file holds secret values"
 
-// noAgeKeyReason is the decryptFailure reason for repository content that
-// is sops ciphertext when no decryption is available at all.
-const noAgeKeyReason = "repository contains SOPS-encrypted files but no age_key is configured"
-
-// secretKeyRe is sopscrypt's own rule, so the keys masked out of a diff
-// are by construction the keys sops was told to encrypt.
-var secretKeyRe = regexp.MustCompile(sopscrypt.SecretKeyRegex)
+// secretKeyRe is internal/secretshape's rule, so the keys masked out of a
+// diff are by construction the keys a capture refuses to push.
+var secretKeyRe = regexp.MustCompile(secretshape.KeyRegex)
 
 // mappingLineRe matches a block-style "key: value", "- key: value"
 // included; groups are lead, key, inline value. Tabs are excluded so
@@ -52,61 +36,61 @@ var seqItemRe = regexp.MustCompile(`^( *-)(?: +(.*))?$`)
 // flow syntax (see lineMayHideSecret). Group 1 is the key, unquoted.
 var flowKeyRe = regexp.MustCompile(`['"]?([A-Za-z0-9_.-]+)['"]? *:`)
 
-// applyRepoTransform runs transform over one file. With no transform,
-// encrypted content is an error: passing ciphertext through would let the
-// applier write ENC[...] strings into /homeassistant.
-func applyRepoTransform(transform RepoTransform, rel string, data []byte) (out []byte, encrypted bool, err error) {
-	if transform == nil {
-		if sopscrypt.IsEncrypted(data) {
-			return nil, false, errors.New(noAgeKeyReason)
+// holdsSecrets reports whether either side of a diff carries a literal
+// value under a secret-shaped key, which is when its diff is masked before
+// publishing. Both sides: the "-" lines quote the live file and the "+"
+// lines the repository, and a secret typed into either is still a secret.
+func holdsSecrets(p string, sides ...[]byte) bool {
+	for _, data := range sides {
+		if len(data) > 0 && len(secretshape.Literals(p, data)) > 0 {
+			return true
 		}
-		return data, false, nil
 	}
-	return transform(rel, data)
+	return false
 }
 
-// yamlSemanticallyEqual reports whether the decrypted repo copy and the
-// live file say the same thing, ignoring formatting sops rewrites. Shared
-// with gitsync's import, so the two layers cannot disagree.
-func yamlSemanticallyEqual(a, b []byte) bool {
-	return sopscrypt.SemanticallyEqual(a, b)
+// isYAMLFile reports whether p is a YAML file by extension, the only kind
+// maskSecrets can read.
+func isYAMLFile(p string) bool {
+	ext := strings.ToLower(path.Ext(strings.ReplaceAll(p, `\`, "/")))
+	return ext == ".yaml" || ext == ".yml"
 }
 
 // maskedDiff is makeDiff for a secret-bearing file: BOTH sides are masked
 // before the diff, since DiffText is published verbatim and a unified diff
 // quotes context from both. Only YAML reaches maskSecrets - JSON and
-// dotenv fail closed rather than be classified by YAML rules. summary is
-// what stands in for the whole diff when none can be shown
-// (encryptedSummary or secretSummary, see diffTextFor).
-func maskedDiff(beforeBytes, afterBytes []byte, path, summary string) string {
-	if !sopscrypt.IsYAMLFile(path) {
-		return summary
+// extensionless files fail closed to secretSummary rather than be
+// classified by YAML rules.
+func maskedDiff(beforeBytes, afterBytes []byte, path string) string {
+	if !isYAMLFile(path) {
+		return secretSummary
 	}
 	before, beforeOK := maskSecrets(beforeBytes, path)
 	after, afterOK := maskSecrets(afterBytes, path)
 	if !beforeOK || !afterOK {
-		return summary
+		return secretSummary
 	}
 	if before == after {
-		return summary
+		return secretSummary
 	}
 	text := makeDiff([]byte(before), []byte(after), path)
 	if text == "" {
-		return summary
+		return secretSummary
 	}
 	return text
 }
 
 // maskSecrets rewrites YAML with secret values replaced by maskMarker;
 // ok=false is the fail-closed exit for any line it cannot prove safe.
-// Secret follows sopscrypt (every value in secrets.yaml, SecretKeyRegex
-// elsewhere), and a secret key's whole block collapses to one marker.
+// Every value of a secrets file is secret (none should reach a diff, they
+// are excluded, but this does not rely on it), and elsewhere every value
+// of a KeyRegex key; a secret key's whole block collapses to one marker.
 func maskSecrets(data []byte, relPath string) (masked string, ok bool) {
 	if looksBinary(data) || !utf8.Valid(data) {
 		return "", false
 	}
 
-	maskEveryValue := sopscrypt.IsSecretsFile(relPath)
+	maskEveryValue := gitsync.IsSecretsFile(relPath)
 	lines := splitLinesKeepEnds(string(data))
 	var out strings.Builder
 	// contBase is the column the last classified line started at; anything
@@ -128,9 +112,8 @@ func maskSecrets(data []byte, relPath string) (masked string, ok bool) {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "#") {
-			// sops encrypts comments in secrets.yaml, so publishing one
-			// leaks what the file was encrypted to hide. Elsewhere they are
-			// plaintext in the repo too.
+			// A comment in a secrets file can carry a secret as easily as
+			// a value. Elsewhere comments are ordinary config.
 			if maskEveryValue {
 				out.WriteString(strings.Repeat(" ", leadingSpaces(body)) + "#" + maskMarker + ending)
 				continue
@@ -228,7 +211,7 @@ func lineMayHideSecret(line string) bool {
 }
 
 // unquoteKey strips quotes off a mapping key, or a quoted "password"
-// would miss the anchored SecretKeyRegex and publish in the clear.
+// would miss the anchored KeyRegex and publish in the clear.
 // Escapes are not decoded; keyIsUnreadable fails those closed instead.
 func unquoteKey(key string) string {
 	if len(key) >= 2 && (key[0] == '"' || key[0] == '\'') && key[len(key)-1] == key[0] {
@@ -238,7 +221,7 @@ func unquoteKey(key string) string {
 }
 
 // keyIsUnreadable reports whether a key carries an escape this pass does
-// not decode, so its real name cannot be checked against SecretKeyRegex.
+// not decode, so its real name cannot be checked against KeyRegex.
 func keyIsUnreadable(key string) bool {
 	return strings.Contains(key, `\`)
 }

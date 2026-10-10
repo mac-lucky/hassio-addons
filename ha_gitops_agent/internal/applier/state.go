@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 )
 
 // State is the agent's persisted sync state, loaded from and saved to
@@ -174,6 +175,12 @@ type State struct {
 // not parse. Entries guardChangePath would reject, or of the wrong shape,
 // are dropped one by one and logged rather than resetting the whole field,
 // so a poisoned state.json cannot become an unsafe delete or a Plan panic.
+//
+// A path list entry the agent no longer manages at all - a secrets file an
+// older version applied, a path exclude_paths now covers - is forgotten
+// rather than refused, and state.json is saved again without it, so that
+// happens (and is logged) once instead of on every load. The first load is
+// recon.New's, before anything else can be writing the file.
 func StateLoad(cfg Config) State {
 	defaults := State{
 		Manifest: []string{}, RegistryManaged: map[string]string{},
@@ -206,7 +213,8 @@ func StateLoad(cfg Config) State {
 	if v, ok := raw["last_apply_utc"]; ok {
 		state.LastApplyUTC = asString(v)
 	}
-	state.Manifest = sanitizePathList(cfg, raw["manifest"], "manifest")
+	var forgot, forgotNow bool
+	state.Manifest, forgot = sanitizePathList(cfg, raw["manifest"], "manifest")
 	state.RegistryManaged = sanitizeManagedMap(raw["registry_managed"], "registry_managed")
 	state.EntityOriginals = sanitizeFieldOriginals(raw["entity_originals"], "entity_originals")
 	state.DashboardManaged = sanitizeManagedMap(raw["dashboard_managed"], "dashboard_managed")
@@ -239,8 +247,10 @@ func StateLoad(cfg Config) State {
 	// gates whether a path may be applied and the other names paths a
 	// capture writes into a commit, so a hand-edited "../outside.txt" has to
 	// be dropped here exactly as Manifest's is.
-	state.ConflictedPaths = sanitizePathList(cfg, raw["conflicted_paths"], "conflicted_paths")
-	state.LastCapturePaths = sanitizePathList(cfg, raw["last_capture_paths"], "last_capture_paths")
+	state.ConflictedPaths, forgotNow = sanitizePathList(cfg, raw["conflicted_paths"], "conflicted_paths")
+	forgot = forgot || forgotNow
+	state.LastCapturePaths, forgotNow = sanitizePathList(cfg, raw["last_capture_paths"], "last_capture_paths")
+	forgot = forgot || forgotNow
 	if v, ok := raw["last_conflict_branch"]; ok {
 		state.LastConflictBranch = asString(v)
 	}
@@ -258,6 +268,11 @@ func StateLoad(cfg Config) State {
 	}
 	if v, ok := raw["last_stash_summary"]; ok {
 		state.LastStashSummary = asString(v)
+	}
+	if forgot {
+		if err := StateSave(cfg, state); err != nil {
+			slog.Warn("applier: state_load could not save state.json without the forgotten entries; they are dropped again on every load", "error", err)
+		}
 	}
 	return state
 }
@@ -280,26 +295,54 @@ func asString(v any) string {
 // delete change reaching outside cfg.ConfigRoot, as a path an apply is told
 // to skip, or as one a capture would write into a commit. field names the
 // log messages after the raw JSON key.
-func sanitizePathList(cfg Config, raw any, field string) []string {
+//
+// forgot reports an entry dropped because the agent no longer manages that
+// path at all (forgottenReason), not because it is unsafe.
+func sanitizePathList(cfg Config, raw any, field string) (clean []string, forgot bool) {
 	list, ok := raw.([]any)
 	if !ok {
-		return []string{}
+		return []string{}, false
 	}
 
 	configRootReal := fsx.Realpath(cfg.ConfigRoot)
-	clean := []string{}
+	clean = []string{}
 	for _, entryRaw := range list {
 		entry, ok := entryRaw.(string)
 		if !ok || entry == "" {
 			continue
 		}
 		if err := guardChangePath(cfg, entry, configRootReal); err != nil {
+			if reason := forgottenReason(entry); reason != "" {
+				slog.Info(fmt.Sprintf("applier: forgetting %s from %s; %s", entry, pathListLabels[field], reason))
+				forgot = true
+				continue
+			}
 			slog.Warn("applier: state_load dropping unsafe "+field+" entry", "entry", entry)
 			continue
 		}
 		clean = append(clean, entry)
 	}
-	return clean
+	return clean, forgot
+}
+
+// pathListLabels names each sanitized path list the way a log line reads.
+var pathListLabels = map[string]string{
+	"manifest":           "the applied files",
+	"conflicted_paths":   "the conflicted paths",
+	"last_capture_paths": "the captured paths",
+}
+
+// forgottenReason is why a recorded path is no longer the agent's to
+// manage, or "" when it still would be but for being unsafe: a secrets
+// file, which versions before 0.9.0 applied, or an exclude_paths entry.
+func forgottenReason(entry string) string {
+	switch {
+	case gitsync.IsSecretsFile(entry):
+		return "this version never manages secrets files"
+	case gitsync.UserExcluded(entry):
+		return "exclude_paths covers it"
+	}
+	return ""
 }
 
 // sanitizeManagedMap reduces a corrupt "<rtype>:<manifest id>" -> live id

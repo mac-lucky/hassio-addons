@@ -776,6 +776,9 @@ h1 {
 
 .firstrun-note strong { color: var(--orange-fg); }
 
+/* The startup waiting card's reason, between the intro and the note. */
+.firstrun .warning-text { margin-bottom: 16px; }
+
 @media (max-width: 480px) {
   body { padding: 20px 14px 40px; }
   .card { padding: 14px; }

@@ -16,6 +16,10 @@ const (
 	// StateUnseeded is a remote with no such branch yet: nothing to compare
 	// against, so none of the states above applies and it is not a failure.
 	StateUnseeded = "unseeded"
+	// StateWaiting is the agent at startup, waiting for a secret:// option
+	// to resolve (see Status.WaitingForSecret). No Reconciler exists yet,
+	// so only the waiting page in internal/web ever shows it.
+	StateWaiting = "waiting"
 )
 
 // RollbackPreviewNothing marks an apply whose layers kept no stash.
@@ -273,6 +277,16 @@ type Status struct {
 	Conflicts      []string `json:"conflicts"`
 	ConflictBranch string   `json:"conflict_branch"`
 	ConflictUTC    string   `json:"conflict_utc"`
+	// HeldBack is the files capture would not push because they hold a
+	// literal value under a secret-shaped key, as "path (key, key)" -
+	// key paths, never values. Sorted, rebuilt every cycle. Like a
+	// conflict, each stays out of the apply until someone edits it.
+	HeldBack []string `json:"held_back"`
+	// WaitingForSecret is why the agent has not started yet: a secret://
+	// option that the live secrets.yaml cannot answer, as "git_token:
+	// secrets.yaml has no key 'github_token'". "" once it runs. Only the
+	// startup waiting page sets it.
+	WaitingForSecret string `json:"waiting_for_secret"`
 	// ImportEnabled mirrors opts.AllowImport, so the web UI can decide
 	// whether to show the import buttons at all.
 	ImportEnabled bool `json:"import_enabled"`

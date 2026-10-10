@@ -502,3 +502,36 @@ func TestTheImportRecordFlagStaysDownWhenTheSaveWorks(t *testing.T) {
 		t.Error("ImportRecordFailing = true after a save that worked")
 	}
 }
+
+// An import that held files back still lands, but says so: on the feed, in
+// the summary, and on its history row as a partial run naming each file by
+// key path.
+func TestImportLiveReportsHeldBackFiles(t *testing.T) {
+	f := newReconcilerFakes()
+	f.git.importResult = gitsync.ImportResult{
+		CommitSHA: "abc1234def", Files: 3, Bytes: 4096,
+		HeldBack: []gitsync.HeldBack{{Path: "esphome/node.yaml", Keys: []string{"wifi.password", "ota.password"}}},
+	}
+	r := f.reconciler(importOpts())
+
+	summary, err := r.ImportLive(context.Background())
+	if err != nil {
+		t.Fatalf("ImportLive: %v", err)
+	}
+	const named = "esphome/node.yaml (wifi.password, ota.password)"
+	if len(summary.HeldBack) != 1 || summary.HeldBack[0] != named {
+		t.Errorf("summary.HeldBack = %v, want [%s]", summary.HeldBack, named)
+	}
+	if !hasEventContaining(r.Status().Events, "import held back 1 file(s) holding a literal value under a secret-shaped key: "+named) {
+		t.Errorf("events = %+v, want the held-back file named", r.Status().Events)
+	}
+	var imported []string
+	for _, rec := range f.history.records() {
+		if rec.Kind == "import" {
+			imported = append(imported, rec.Outcome+": "+rec.Error)
+		}
+	}
+	if len(imported) != 1 || !strings.HasPrefix(imported[0], "partial: held back 1 file(s)") || !strings.Contains(imported[0], named) {
+		t.Errorf("import history = %v, want one partial row naming %s", imported, named)
+	}
+}

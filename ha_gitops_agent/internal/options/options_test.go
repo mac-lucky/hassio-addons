@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref/secrettest"
 )
 
@@ -41,7 +42,7 @@ func fakeOptionsFile(t *testing.T, dir string) string {
 		"commit_back":                  false,
 		"allow_import":                 false,
 		"webhook_secret":               "",
-		"age_key":                      "",
+		"exclude_paths":                []any{"wmbusmeters/etc/wmbusmeters.d/"},
 		"auto_update_addons":           []any{},
 		"auto_update_interval_minutes": 360,
 		"track_addon_versions":         false,
@@ -78,7 +79,7 @@ func TestLoadFullOptionsFile(t *testing.T) {
 		CommitBack:                false,
 		AllowImport:               false,
 		WebhookSecret:             "",
-		AgeKey:                    "",
+		ExcludePaths:              []string{"wmbusmeters/etc/wmbusmeters.d/"},
 		AutoUpdateAddons:          nil,
 		AutoUpdateIntervalMinutes: 360,
 		TrackAddonVersions:        false,
@@ -118,7 +119,6 @@ func TestLoadMinimalOptionsFallsBackToDefaults(t *testing.T) {
 		CommitBack:                false,
 		AllowImport:               false,
 		WebhookSecret:             "",
-		AgeKey:                    "",
 		AutoUpdateAddons:          nil,
 		AutoUpdateIntervalMinutes: 360,
 		TrackAddonVersions:        false,
@@ -318,32 +318,39 @@ func TestLoadWebhookSecretDefaultsToEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadAgeKeyRoundTrips(t *testing.T) {
-	// An age identity is checksummed, so any whitespace normalization or
-	// case folding here turns a valid key into a startup failure.
-	const key = "AGE-SECRET-KEY-1ZVEXNYJ990KE6NVCUYJE0YS5XHLTEY4ALPTT7P3AX3CM56ZDYNXQVEX4EM"
+// exclude_paths is kept exactly as written - empty entries and stray
+// spaces included - so the validator in gitsync can name a bad entry
+// rather than this loader quietly dropping it.
+func TestLoadExcludePathsVerbatim(t *testing.T) {
 	dir := t.TempDir()
-	path := writeOptions(t, dir, map[string]any{"age_key": key})
+	path := writeOptions(t, dir, map[string]any{"exclude_paths": []any{"a/", "", " b ", "a/"}})
 
 	opts, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if opts.AgeKey != key {
-		t.Errorf("AgeKey = %q, want the configured key verbatim", opts.AgeKey)
+	if want := []string{"a/", "", " b ", "a/"}; !reflect.DeepEqual(opts.ExcludePaths, want) {
+		t.Errorf("ExcludePaths = %q, want %q", opts.ExcludePaths, want)
+	}
+
+	path = writeOptions(t, t.TempDir(), map[string]any{})
+	if opts, _ := Load(path); opts.ExcludePaths != nil {
+		t.Errorf("ExcludePaths = %q with the option absent, want nil", opts.ExcludePaths)
 	}
 }
 
-func TestLoadAgeKeyDefaultsToEmpty(t *testing.T) {
+// An options.json from before 0.9.0 may still carry age_key: Supervisor
+// warns about an option the schema no longer has but keeps it. It is
+// ignored here.
+func TestLoadIgnoresTheRemovedAgeKeyOption(t *testing.T) {
 	dir := t.TempDir()
-	path := writeOptions(t, dir, map[string]any{})
-
+	path := writeOptions(t, dir, map[string]any{"age_key": "AGE-SECRET-KEY-1EXAMPLE", "repo_url": "https://x.invalid/r.git"})
 	opts, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if opts.AgeKey != "" {
-		t.Errorf("AgeKey = %q, want empty (default) - no key means encryption stays off", opts.AgeKey)
+	if opts.RepoURL != "https://x.invalid/r.git" {
+		t.Errorf("RepoURL = %q", opts.RepoURL)
 	}
 }
 
@@ -687,8 +694,7 @@ func TestResolveSecretRefsResolvesCredentialOptions(t *testing.T) {
 	resolver := secrettest.From(t, "forge_token: "+secrettest.Resolved+"\n")
 	opts := Options{
 		GitToken:      "secret://forge_token",
-		AgeKey:        "AGE-SECRET-KEY-1LITERAL",
-		WebhookSecret: "",
+		WebhookSecret: "a-literal-webhook-secret",
 	}
 
 	if err := opts.ResolveSecretRefs(resolver); err != nil {
@@ -697,31 +703,53 @@ func TestResolveSecretRefsResolvesCredentialOptions(t *testing.T) {
 	if opts.GitToken != secrettest.Resolved {
 		t.Errorf("GitToken = %q, want the resolved secret", opts.GitToken)
 	}
-	// Literals and empty values pass through untouched, so existing
-	// installs keep working.
-	if opts.AgeKey != "AGE-SECRET-KEY-1LITERAL" {
-		t.Errorf("AgeKey = %q, want the literal untouched", opts.AgeKey)
-	}
-	if opts.WebhookSecret != "" {
-		t.Errorf("WebhookSecret = %q, want empty untouched", opts.WebhookSecret)
+	// Literals pass through untouched, so existing installs keep working.
+	if opts.WebhookSecret != "a-literal-webhook-secret" {
+		t.Errorf("WebhookSecret = %q, want the literal untouched", opts.WebhookSecret)
 	}
 }
 
-// A reference that cannot resolve must be fatal, never passed through as
-// the literal: "secret://typo" used as a token reads as a wrong password
-// at the forge, not as the configuration mistake it is.
-func TestResolveSecretRefsFailsClosed(t *testing.T) {
-	resolver := secrettest.From(t, "")
+// A well-formed reference the file cannot answer YET is a
+// *PendingSecretError naming the option and the key, which startup waits
+// out; nothing is changed meanwhile. It is never passed through as the
+// literal: "secret://typo" used as a token reads as a wrong password at the
+// forge, not as the configuration mistake it is.
+func TestResolveSecretRefsReportsAPendingReference(t *testing.T) {
+	resolver := secrettest.From(t, "other: x\n")
 
-	missing := Options{GitToken: "secret://no_such_key"}
-	if err := missing.ResolveSecretRefs(resolver); err == nil {
-		t.Error("err = nil for a reference to a missing key")
-	} else if !strings.Contains(err.Error(), "git_token") {
-		t.Errorf("err = %v, want it to name the option", err)
+	opts := Options{GitToken: "secret://forge_token", WebhookSecret: "secret://other"}
+	err := opts.ResolveSecretRefs(resolver)
+	var pending *PendingSecretError
+	if !errors.As(err, &pending) {
+		t.Fatalf("err = %v, want *PendingSecretError", err)
+	}
+	if pending.Option != "git_token" || pending.Name != "forge_token" {
+		t.Errorf("pending = %+v, want git_token / forge_token", pending)
+	}
+	if opts.GitToken != "secret://forge_token" || opts.WebhookSecret != "secret://other" {
+		t.Errorf("opts changed on failure: %+v", opts)
 	}
 
-	malformed := Options{AgeKey: "secret://"}
-	if err := malformed.ResolveSecretRefs(resolver); err == nil {
-		t.Error("err = nil for a malformed reference")
+	// A missing file is pending too: the add-on that renders it may not
+	// have run yet.
+	missing := Options{WebhookSecret: "secret://hook"}
+	if err := missing.ResolveSecretRefs(secretref.NewResolver(t.TempDir())); !errors.As(err, &pending) {
+		t.Errorf("err = %v for a missing secrets.yaml, want *PendingSecretError", err)
+	}
+}
+
+// A malformed reference cannot be fixed by waiting, so it is a plain error.
+func TestResolveSecretRefsFailsClosedOnAMalformedReference(t *testing.T) {
+	resolver := secrettest.From(t, "")
+	for _, value := range []string{"secret://", "secret://has space"} {
+		opts := Options{GitToken: value}
+		err := opts.ResolveSecretRefs(resolver)
+		var pending *PendingSecretError
+		if err == nil || errors.As(err, &pending) {
+			t.Errorf("err = %v for %q, want a plain (fatal) error", err, value)
+		}
+		if err != nil && !strings.Contains(err.Error(), "git_token") {
+			t.Errorf("err = %v, want it to name the option", err)
+		}
 	}
 }

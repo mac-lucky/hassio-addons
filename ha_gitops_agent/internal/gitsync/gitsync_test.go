@@ -111,21 +111,115 @@ func TestExcludedFailsClosedOnPathsThatClimbAboveRoot(t *testing.T) {
 	}
 }
 
-// Encryption switches off the secrets.yaml entry, making the config-root
-// file syncable; it does not make .storage/ or .ssh/ syncable.
-func TestExcludedDirectoryEntriesOutrankTheConditionalSecretsEntry(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		SetEncryptionEnabled(on)
-		for _, p := range []string{".storage/secrets.yaml", ".ssh/secrets.yaml", "sub/.cloud/secrets.yaml"} {
-			if !Excluded(p) {
-				t.Errorf("Excluded(%q) = false with encryption=%v, want true", p, on)
-			}
+// Secrets files are never synced at any depth, in either spelling, as
+// Zigbee2MQTT's secret.yaml too, whatever the case of the name.
+func TestExcludedSecretsFilesAtAnyDepth(t *testing.T) {
+	for _, p := range []string{
+		"secrets.yaml", "secrets.yml", "secret.yaml", "secret.yml",
+		"esphome/secrets.yaml", "zigbee2mqtt/secret.yaml", "a/b/c/secret.yml",
+		"Secrets.YAML", "zigbee2mqtt\\secret.yaml", ".storage/secrets.yaml",
+	} {
+		if !Excluded(p) {
+			t.Errorf("Excluded(%q) = false, want true", p)
 		}
-		if got := Excluded("secrets.yaml"); got == on {
-			t.Errorf("Excluded(\"secrets.yaml\") = %v with encryption=%v, want %v", got, on, !on)
+		if !matchesSecretPattern(strings.ReplaceAll(p, "\\", "/")) {
+			t.Errorf("matchesSecretPattern(%q) = false, want true: a tracked one must stay a hard stop", p)
 		}
 	}
-	SetEncryptionEnabled(false)
+	for _, p := range []string{"secrets.yaml.example", "my_secrets.yaml", "esphome/secret_sauce.yaml", "secretsyaml"} {
+		if Excluded(p) {
+			t.Errorf("Excluded(%q) = true, want false", p)
+		}
+	}
+}
+
+// withUserExclusions installs exclude_paths entries for one test.
+func withUserExclusions(t *testing.T, entries ...string) {
+	t.Helper()
+	if err := SetUserExclusions(entries); err != nil {
+		t.Fatalf("SetUserExclusions(%q): %v", entries, err)
+	}
+	t.Cleanup(func() { _ = SetUserExclusions(nil) })
+}
+
+func TestUserExclusionsMatchLikeTheBuiltInOnes(t *testing.T) {
+	withUserExclusions(t,
+		"wmbusmeters/etc/wmbusmeters.d/", // a directory at that path
+		"node-red/flows_cred.json",       // one exact path
+		"*.secret.yaml",                  // a basename glob
+		"cache/",                         // a directory name at any depth
+		"/notes.yaml",                    // root only
+		"custom/meters/meter-*",          // a trailing * on the last segment
+		"/www/private*/",                 // a root-relative directory glob
+	)
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"wmbusmeters/etc/wmbusmeters.d", true},
+		{"wmbusmeters/etc/wmbusmeters.d/meter-1", true},
+		{"wmbusmeters/etc/wmbusmeters.d/sub/x", true},
+		{"wmbusmeters/etc/wmbusmeters.conf", false},
+		{"other/wmbusmeters/etc/wmbusmeters.d/meter-1", false},
+		{"node-red/flows_cred.json", true},
+		{"node-red/flows.json", false},
+		{"esphome/wifi.secret.yaml", true},
+		{"a/cache/b.yaml", true},
+		{"notes.yaml", true},
+		{"docs/notes.yaml", false},
+		{"custom/meters/meter-17", true},
+		{"custom/meters/sub/meter-17", false},
+		{"custom/meters/other", false},
+		{"www/private_photos/a.jpg", true},
+		{"www/public/a.jpg", false},
+		{"automations.yaml", false},
+	}
+	for _, c := range cases {
+		if got := Excluded(c.path); got != c.want {
+			t.Errorf("Excluded(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	if !UserExcluded("wmbusmeters/etc/wmbusmeters.d/meter-1") {
+		t.Error("UserExcluded(meter-1) = false, want true")
+	}
+	if UserExcluded(".storage/core.config") {
+		t.Error("UserExcluded(.storage/...) = true, want false: only exclude_paths entries count")
+	}
+
+	if err := SetUserExclusions(nil); err != nil {
+		t.Fatalf("SetUserExclusions(nil): %v", err)
+	}
+	if Excluded("node-red/flows_cred.json") {
+		t.Error("an emptied exclude_paths still excludes")
+	}
+}
+
+func TestSetUserExclusionsRefusesBadEntries(t *testing.T) {
+	t.Cleanup(func() { _ = SetUserExclusions(nil) })
+	for _, entry := range []string{
+		"", "   ", " leading", "trailing ", "/", "//", "../outside", "a/../b", "./a", "a//b",
+		"a\\b", "**/x", "a/[b", "tab\there", strings.Repeat("a", 300),
+	} {
+		err := SetUserExclusions([]string{"fine/", entry})
+		if err == nil {
+			t.Errorf("SetUserExclusions(%q) error = nil, want a refusal", entry)
+			continue
+		}
+		if !strings.Contains(err.Error(), "exclude_paths entry 2") {
+			t.Errorf("SetUserExclusions(%q) error = %v, want it to name entry 2", entry, err)
+		}
+	}
+	many := make([]string, maxExcludeEntries+1)
+	for i := range many {
+		many[i] = "x/"
+	}
+	if err := SetUserExclusions(many); err == nil {
+		t.Error("SetUserExclusions accepted more than the maximum number of entries")
+	}
+	// A refused list installs nothing.
+	if Excluded("fine/x") {
+		t.Error("a refused list was installed anyway")
+	}
 }
 
 func TestExcludedAndSecretPatternsAreNonempty(t *testing.T) {
@@ -135,8 +229,10 @@ func TestExcludedAndSecretPatternsAreNonempty(t *testing.T) {
 	if !contains(ExcludedPatterns, "secrets.yaml") {
 		t.Error("ExcludedPatterns missing \"secrets.yaml\"")
 	}
-	if !contains(SecretPatterns, "secrets.yaml") {
-		t.Error("SecretPatterns missing \"secrets.yaml\"")
+	for _, name := range secretsFileNames {
+		if !contains(SecretPatterns, name) || !contains(ExcludedPatterns, name) {
+			t.Errorf("%q missing from SecretPatterns or ExcludedPatterns", name)
+		}
 	}
 }
 
@@ -150,20 +246,22 @@ func contains(list []string, s string) bool {
 }
 
 func TestGuardSecretsRaisesOnTrackedSecretFiles(t *testing.T) {
-	gs := New(makeOpts("file:///unused"), t.TempDir())
+	f := newRecordFixture(t)
 
 	cases := [][]string{
 		{"secrets.yaml"},
 		{"config/secrets.yaml"},
+		{"esphome/secrets.yaml"},
+		{"zigbee2mqtt/secret.yaml"},
 		{".ssh/id_rsa"},
 		{"id_rsa"},
 		{".env"},
 		{"SECRETS.YAML"}, // case-insensitive
 	}
-	// With encryption off, GuardSecretsAt answers from the path list alone
-	// and never resolves the sha.
+	// The path rule answers from the list alone; the tree at sha holds no
+	// SOPS content, so that half finds nothing.
 	for _, files := range cases {
-		err := gs.GuardSecretsAt(context.Background(), "unused-sha", files)
+		err := f.gs.GuardSecretsAt(context.Background(), f.sha, files)
 		var target *SecretsTrackedError
 		if !errors.As(err, &target) {
 			t.Errorf("GuardSecretsAt(%v) error = %v, want *SecretsTrackedError", files, err)
@@ -186,8 +284,8 @@ func TestSecretsTrackedErrorMessageIsJustTheFileList(t *testing.T) {
 }
 
 func TestGuardSecretsDoesNotRaiseOnNormalFiles(t *testing.T) {
-	gs := New(makeOpts("file:///unused"), t.TempDir())
-	err := gs.GuardSecretsAt(context.Background(), "unused-sha", []string{"automations.yaml", "packages/demo.yaml"})
+	f := newRecordFixture(t)
+	err := f.gs.GuardSecretsAt(context.Background(), f.sha, []string{"automations.yaml", "packages/demo.yaml"})
 	if err != nil {
 		t.Errorf("GuardSecretsAt() error = %v, want nil", err)
 	}
