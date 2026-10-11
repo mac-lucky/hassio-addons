@@ -32,6 +32,9 @@ configuration:
   exclude_paths:
     name: Excluded paths
     description: Extra paths the agent never syncs in either direction and never deletes, on top of its built-in list (secrets files, .storage, databases, logs and so on). Each entry is relative to /homeassistant - a directory ending in / (wmbusmeters/etc/wmbusmeters.d/), a file (node-red/flows_cred.json), or a pattern (*.secret.yaml, or meter-* at the end of a path). Use it for files another app writes with secrets inside. An invalid entry stops the agent at startup with a message naming it.
+  ignore_keys:
+    name: Ignored keys
+    description: Keys inside a synced YAML file that belong to the app writing that file, so git does not manage them. Each entry is the file relative to /homeassistant, a colon, and the key path joined with dots - zigbee2mqtt/configuration.yaml:mqtt.password - one entry per key. The file is compared as YAML 1.2 data without those keys (so the app reformatting it is not drift either), an apply keeps their live values, and anything pushed to git keeps the repository's, so a password the app writes into its own file never reaches git and never holds the file back. Use it when an app with YAML 1.2 rules writes a value it was given into its own config, as Zigbee2MQTT does with the MQTT login - not for files Home Assistant or ESPHome read. An invalid entry stops the agent at startup with a message naming its position.
   auto_update_addons:
     name: Auto-update apps
     description: Slugs of installed apps this agent is allowed to update on its own whenever the Supervisor reports an update for them. Leave the list empty to disable auto-updates entirely; the agent never updates itself, whatever the list says. An app's slug is the last part of its page URL in Home Assistant, for example a0d7b954_esphome in /hassio/addon/a0d7b954_esphome/info.

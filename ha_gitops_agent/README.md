@@ -16,7 +16,9 @@ Secrets never pass through git. `secrets.yaml` (and Zigbee2MQTT's
 `secret.yaml`) is never synced in either direction; render it on the box
 with the 1Password Secrets app or another tool, and reference its keys
 with `!secret`. A file holding a password, token or key written out in
-full is held back rather than pushed.
+full is held back rather than pushed. When the app that writes a file
+puts such a value there itself, as Zigbee2MQTT does with its MQTT login,
+list the key in `ignore_keys` and git leaves that key to the app.
 
 ## Install
 

@@ -274,12 +274,13 @@ there is no restore point outside this add-on for that change.`)}}
 {{end}}
 
 {{/* Files capture would not push: a literal value sits under a
-     secret-shaped key. Their own card for the conflicts' reason - only a
-     person clears them - and kept out of the apply like a conflict. */}}
+     secret-shaped key, or the file's ignore_keys could not be set aside.
+     Their own card for the conflicts' reason - only a person clears them -
+     and kept out of the apply like a conflict. */}}
 {{if .Status.HeldBack}}
 <section class="card">
   <h2>Held back from git <span class="count">{{len .Status.HeldBack}}</span></h2>
-  <p class="meta-line">These files changed here, but each holds a value under a secret-shaped key (password, token, api_key, ...) written out in full, so the agent will not push them to your repository - and will not overwrite the live edit either. Move each value into secrets.yaml and reference it with <code>!secret</code>, or, for a file another add-on writes, list it in <code>exclude_paths</code>. It clears itself on the next check after that.</p>
+  <p class="meta-line">These files changed here, but the agent will not push them to your repository as they are - and will not overwrite the live edit either. Most hold a value under a secret-shaped key (password, token, api_key, ...) written out in full: move each value into secrets.yaml and reference it with <code>!secret</code>, or, for a file another add-on writes, list the key in <code>ignore_keys</code> when that add-on puts the value there itself, or the whole file in <code>exclude_paths</code>. One named with "ignore_keys could not be set aside" has entries the agent could not apply: make it a single YAML document with no repeated key, merge key, anchor or alias on an ignored key's path. It clears itself on the next check after that.</p>
   <div class="changes">
     {{range .Status.HeldBack}}
     <div class="change change-error">

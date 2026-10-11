@@ -8,6 +8,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.9.1] - 2026-10-11
+
+### Added
+
+- `ignore_keys` option: keys inside a synced YAML file that belong to the
+  app writing it, one `<file>:<dotted.key.path>` entry per key
+  (`zigbee2mqtt/configuration.yaml:mqtt.password`). Zigbee2MQTT writes the
+  MQTT login it gets from the add-on's environment into its own
+  configuration.yaml on every settings write, so that file showed drift
+  forever and every capture of it was held back for the literal password.
+  Such a file is now compared as YAML 1.2 data without the listed keys
+  (so the app's own formatting and number spellings are not drift either),
+  an apply keeps their live values, anything pushed to git keeps the
+  repository's, and no diff shows them. A file whose listed keys cannot be
+  set aside - it does not parse, or a key on the path repeats, merges or
+  goes through an alias - is held back from git rather than pushed, and
+  its diff is hidden. An invalid entry stops the agent at startup with a
+  message naming its position, and an entry for a file the repository does
+  not track is reported once in the activity feed.
+
+### Changed
+
+- The "Held back from git" card, its events and its advice now cover a
+  file held back because its `ignore_keys` could not be set aside, and
+  point at `ignore_keys` for a value the app writing a file puts there
+  itself. The capture event now reads "N file(s) holding a literal value
+  ..." like the commit-back and import ones.
+
 ## [0.9.0] - 2026-10-10
 
 Secrets leave git entirely. The agent no longer encrypts or decrypts

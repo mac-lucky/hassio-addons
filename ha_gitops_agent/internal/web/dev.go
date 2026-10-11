@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/history"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/recon"
 )
@@ -110,9 +111,8 @@ func devHeldBackStatus() recon.Status {
 	}
 	status.Events = append(status.Events, recon.Event{
 		TS: "2026-08-02T07:35:02+00:00",
-		Message: "not captured, 2 file(s) hold a literal value under a secret-shaped key: " +
-			strings.Join(status.HeldBack, ", ") + " - move each value into secrets.yaml and reference it with !secret, " +
-			"or list the file in exclude_paths",
+		Message: "not captured, 2 file(s) holding a literal value under a secret-shaped key: " +
+			strings.Join(status.HeldBack, ", ") + " - " + gitsync.HeldBackAdvice,
 	})
 	return status
 }

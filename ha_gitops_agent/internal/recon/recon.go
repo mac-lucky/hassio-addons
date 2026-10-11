@@ -221,8 +221,9 @@ type Reconciler struct {
 	lastConflictUTC    string
 	// heldBack is the files the last capture would not push, rendered
 	// "path (key, key)" and sorted, because they hold a literal value under
-	// a secret-shaped key. Written only by noteHeldBack; never persisted,
-	// the next cycle rebuilds it.
+	// a secret-shaped key or their ignore_keys could not be set aside
+	// ("path (key, key; reason)"). Written only by noteHeldBack; never
+	// persisted, the next cycle rebuilds it.
 	heldBack []string
 	// hacsUnavailable records that HACS is not installed - the one layer
 	// failure that skips its layer instead of ending the cycle (see
@@ -295,6 +296,11 @@ type Reconciler struct {
 	// Read and written only by reconcile cycles, under opLock rather than
 	// mu.
 	leftBehindWarned []string
+
+	// ignoredUntrackedWarned is the last set of ignore_keys files
+	// warnIgnoredKeysUntracked reported. Under opLock, like
+	// leftBehindWarned.
+	ignoredUntrackedWarned []string
 
 	// autoCommitBackHeld is the held-back set the automatic commit-back last
 	// reported when it could push nothing else, "" otherwise; see
@@ -1389,6 +1395,7 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 				"skipped %d non-regular/escaping path(s): %s", len(skippedContainment), strings.Join(skippedContainment, ", ")))
 		}
 		r.warnLeftBehind(ctx, state, sha, tracked)
+		r.warnIgnoredKeysUntracked(tracked)
 	}
 
 	var registryOps []registries.RegOp

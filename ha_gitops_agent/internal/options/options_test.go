@@ -43,6 +43,7 @@ func fakeOptionsFile(t *testing.T, dir string) string {
 		"allow_import":                 false,
 		"webhook_secret":               "",
 		"exclude_paths":                []any{"wmbusmeters/etc/wmbusmeters.d/"},
+		"ignore_keys":                  []any{"zigbee2mqtt/configuration.yaml:mqtt.password"},
 		"auto_update_addons":           []any{},
 		"auto_update_interval_minutes": 360,
 		"track_addon_versions":         false,
@@ -80,6 +81,7 @@ func TestLoadFullOptionsFile(t *testing.T) {
 		AllowImport:               false,
 		WebhookSecret:             "",
 		ExcludePaths:              []string{"wmbusmeters/etc/wmbusmeters.d/"},
+		IgnoreKeys:                []string{"zigbee2mqtt/configuration.yaml:mqtt.password"},
 		AutoUpdateAddons:          nil,
 		AutoUpdateIntervalMinutes: 360,
 		TrackAddonVersions:        false,
@@ -336,6 +338,26 @@ func TestLoadExcludePathsVerbatim(t *testing.T) {
 	path = writeOptions(t, t.TempDir(), map[string]any{})
 	if opts, _ := Load(path); opts.ExcludePaths != nil {
 		t.Errorf("ExcludePaths = %q with the option absent, want nil", opts.ExcludePaths)
+	}
+}
+
+// ignore_keys is kept as written too, for the same reason: the validator
+// names a bad entry by its position, so none may be dropped or moved here.
+func TestLoadIgnoreKeysVerbatim(t *testing.T) {
+	entries := []any{"z2m/configuration.yaml:mqtt.password", "", " a.yaml:b ", 5.0}
+	path := writeOptions(t, t.TempDir(), map[string]any{"ignore_keys": entries})
+
+	opts, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := []string{"z2m/configuration.yaml:mqtt.password", "", " a.yaml:b ", "5"}; !reflect.DeepEqual(opts.IgnoreKeys, want) {
+		t.Errorf("IgnoreKeys = %q, want %q", opts.IgnoreKeys, want)
+	}
+
+	path = writeOptions(t, t.TempDir(), map[string]any{"ignore_keys": "not a list"})
+	if opts, _ := Load(path); opts.IgnoreKeys != nil {
+		t.Errorf("IgnoreKeys = %q for a value that is not a list, want nil", opts.IgnoreKeys)
 	}
 }
 

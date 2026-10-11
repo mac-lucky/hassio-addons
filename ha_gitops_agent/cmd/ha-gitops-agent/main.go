@@ -104,6 +104,18 @@ func run() int {
 	if len(opts.ExcludePaths) > 0 {
 		slog.Info("extra exclusions configured", "exclude_paths", strings.Join(opts.ExcludePaths, ", "))
 	}
+	// After the exclusions, which it is checked against, and for their
+	// reason: an entry dropped would let an apply strip what the app wrote
+	// and a capture push it to git.
+	if err := gitsync.SetIgnoredKeys(opts.IgnoreKeys); err != nil {
+		slog.Error("fatal: the ignore_keys option is invalid", "error", err)
+		return 1
+	}
+	if len(opts.IgnoreKeys) > 0 {
+		// The count and the files only: an entry is typed by hand, and a
+		// value pasted into one must not reach the log.
+		slog.Info("ignored keys configured", "entries", len(opts.IgnoreKeys), "files", strings.Join(gitsync.IgnoredKeyFiles(), ", "))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

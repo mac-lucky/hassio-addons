@@ -124,8 +124,8 @@ func (r *Reconciler) commitDriftBackAs(ctx context.Context, changes []differ.Cha
 	r.withMu(func() { r.lastDriftBranch = branch })
 	r.logEvent("committed drift back to branch " + branch)
 	if len(heldBack) > 0 {
-		r.logWarn(fmt.Sprintf("commit-back left out %d file(s) holding a literal value under a secret-shaped key: %s - %s",
-			len(heldBack), gitsync.HeldBackSummary(heldBack), gitsync.HeldBackAdvice))
+		r.logWarn(fmt.Sprintf("commit-back left out %d file(s) %s: %s - %s",
+			len(heldBack), gitsync.HeldBackCause(heldBack), gitsync.HeldBackSummary(heldBack), gitsync.HeldBackAdviceFor(heldBack)))
 	}
 	r.pushStatus()
 	return branch, nil

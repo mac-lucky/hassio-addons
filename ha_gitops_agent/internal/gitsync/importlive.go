@@ -156,7 +156,7 @@ func (g *GitSync) Import(ctx context.Context, configRoot string, limits ImportLi
 	if clean {
 		if len(staged.heldBack) > 0 {
 			return ImportResult{}, fmt.Errorf("gitsync: import: nothing to import: everything else already matches, and %d file(s) were held back - %s: %s",
-				len(staged.heldBack), HeldBackSummary(staged.heldBack), HeldBackAdvice)
+				len(staged.heldBack), HeldBackSummary(staged.heldBack), HeldBackAdviceFor(staged.heldBack))
 		}
 		return ImportResult{}, fmt.Errorf("gitsync: import: nothing to import (the repository already matches the live config, or every scanned path is gitignored)")
 	}

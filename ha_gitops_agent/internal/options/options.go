@@ -50,6 +50,12 @@ type Options struct {
 	// included, so gitsync.SetUserExclusions can refuse a bad one by name
 	// rather than this loader dropping it unseen.
 	ExcludePaths []string
+	// IgnoreKeys are "<file>:<dotted.key.path>" entries naming mapping keys
+	// inside a synced YAML file that belong to the app writing it, so git
+	// does not manage them: a comparison sets them aside, an apply keeps
+	// the live value and every write to git keeps the repository's. Kept
+	// verbatim, like ExcludePaths, for gitsync.SetIgnoredKeys to validate.
+	IgnoreKeys []string
 	// AutoUpdateAddons lists the installed add-ons this agent may update
 	// once Supervisor reports an update for them; empty turns the whole
 	// capability off. Entries are Supervisor slugs, not display names. The
@@ -228,6 +234,7 @@ func Load(path string) (Options, error) {
 		AllowImport:               truthy(raw["allow_import"], false),
 		WebhookSecret:             asString(raw["webhook_secret"], ""),
 		ExcludePaths:              asPathList(raw["exclude_paths"]),
+		IgnoreKeys:                asPathList(raw["ignore_keys"]),
 		AutoUpdateAddons:          asStringSlice(raw["auto_update_addons"]),
 		AutoUpdateIntervalMinutes: autoUpdateIntervalMinutes,
 		TrackAddonVersions:        truthy(raw["track_addon_versions"], false),

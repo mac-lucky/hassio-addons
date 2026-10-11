@@ -516,8 +516,8 @@ func (r *Reconciler) captureLiveChanges(
 		msg := fmt.Sprintf("conflict on %d path(s), left untouched in both directions: %s",
 			len(routing.conflicts), strings.Join(next.ConflictedPaths, ", "))
 		if len(parkHeld) > 0 {
-			msg += fmt.Sprintf("; no copy pushed of %s, which hold a literal value under a secret-shaped key",
-				gitsync.HeldBackSummary(parkHeld))
+			msg += fmt.Sprintf("; no copy pushed of %s, %s",
+				gitsync.HeldBackSummary(parkHeld), gitsync.HeldBackCause(parkHeld))
 		}
 		r.logWarn(msg)
 	}
@@ -652,8 +652,9 @@ func dropConflicted(changes []differ.Change, conflicted []string) []differ.Chang
 	return kept
 }
 
-// noteHeldBack records the files capture would not push because they hold
-// a literal value under a secret-shaped key, for the dashboard, and puts
+// noteHeldBack records the files capture would not push - a literal value
+// under a secret-shaped key, or ignore_keys that could not be set aside -
+// for the dashboard, and puts
 // one event on the feed whenever that set changes - capture runs every
 // cycle, and the same files are held back every cycle until someone edits
 // them. nil clears it quietly.
@@ -669,8 +670,8 @@ func (r *Reconciler) noteHeldBack(items []gitsync.HeldBack) {
 		r.heldBack = rendered
 	})
 	if changed && len(rendered) > 0 {
-		r.logWarn(fmt.Sprintf("not captured, %d file(s) hold a literal value under a secret-shaped key: %s - %s",
-			len(rendered), strings.Join(rendered, ", "), gitsync.HeldBackAdvice))
+		r.logWarn(fmt.Sprintf("not captured, %d file(s) %s: %s - %s",
+			len(rendered), gitsync.HeldBackCause(items), strings.Join(rendered, ", "), gitsync.HeldBackAdviceFor(items)))
 	}
 }
 

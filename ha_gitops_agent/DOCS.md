@@ -191,6 +191,36 @@ entry that is empty, climbs out with `..`, uses `\`, or is otherwise
 malformed stops the add-on at startup with a message naming it; at most
 100 entries of up to 256 characters each.
 
+### `ignore_keys`
+
+Empty by default. Keys inside a synced YAML file that belong to the app
+writing that file, so git does not manage them. Where `exclude_paths`
+hands a whole file to another app, this hands it single keys and keeps
+syncing the rest of the file. Each entry is the file relative to
+`/homeassistant`, a `:`, then the key path through nested mappings
+joined with `.` - one entry per key:
+
+```yaml
+ignore_keys:
+  - zigbee2mqtt/configuration.yaml:mqtt.server
+  - zigbee2mqtt/configuration.yaml:mqtt.user
+  - zigbee2mqtt/configuration.yaml:mqtt.password
+```
+
+See "Keys an app writes into its own file" below for when to use it and
+exactly what it changes. An entry naming a file that is not `.yaml` or
+`.yml`, a pattern, a secrets file or a path that `exclude_paths` or the
+built-in list already excludes, or one with an absolute path, a `..` or
+empty path segment, an empty key segment (`mqtt..password`), a list
+index (`devices[0]`), a space, `:` or `=` in the key (a value pasted
+after it; a YAML key that itself holds a `:` cannot be listed), or a control or invisible formatting character anywhere, stops the
+add-on at startup with a message naming the entry's position (never its
+text), as does any other malformed entry; at most 100 entries of up to
+256 characters each. The startup log names how many entries there are
+and their files, not the entries. An entry whose file the repository does
+not track - a `.yml` written for a `.yaml`, or a file since removed - does
+nothing, and the activity feed says so once, naming the file.
+
 ### `auto_update_addons`
 
 Empty by default, which means off: the agent never installs an update
@@ -1735,7 +1765,83 @@ at all, and a live edit that writes a password, token or key out in full
 is held back rather than pushed - see "Secrets" below. A held-back file
 is not applied over either: the edit stays on the box, the "Held back
 from git" card names it, and it is captured as soon as the value is
-replaced with a `!secret` reference.
+replaced with a `!secret` reference. When it is the app itself that
+writes the value there, every time, list the key in `ignore_keys`
+instead - see "Keys an app writes into its own file" below.
+
+## Keys an app writes into its own file
+
+Some apps write values they were given into their own config file.
+Zigbee2MQTT is the usual one: the add-on hands it the MQTT login from
+Mosquitto as `ZIGBEE2MQTT_CONFIG_MQTT_*` environment variables, and every
+settings write - a device renamed, a setting changed in its UI - persists
+`mqtt.server`, `mqtt.user` and `mqtt.password` into
+`zigbee2mqtt/configuration.yaml`, over any `'!secret'` reference you had
+there. Git must never hold that password, and the app will always write
+it back, so without help the file drifts after every write, and with
+capture on it is held back for the literal password - together with every
+real edit you make to it.
+
+List those keys in `ignore_keys` (the example under the option above is
+exactly this case) and, for that file only:
+
+- **Comparing.** The two copies are compared as YAML with the listed keys
+  taken out of both, so a file that differs only there is in sync: no
+  drift, no apply, no capture. A mapping left holding nothing once they
+  are out - an `mqtt:` the app added only for its login, or a bare
+  `mqtt:` with nothing under it - counts as absent.
+- **Applying.** The file written is the repository's, with the live
+  value of each listed key put back (at the end of its mapping, if the
+  repository lacks it), or the key left out where live has none. A file
+  not live yet has no values to keep, so the listed keys are left out of
+  it, as its diff showed. An apply does not strip the login the app wrote
+  - unless the live copy cannot be read as YAML (see below), when the
+  repository's copy is written as it is and the add-on log says so; the
+  app writes its values back the next time it saves its settings.
+- **Pushing to git.** A capture, a commit-back branch, a conflict copy and
+  an import take the repository's value of each listed key, or leave the
+  key out where the repository has none. The literal password never
+  reaches git and no longer holds the file back, so a change made in the
+  Zigbee2MQTT UI, such as `advanced.log_level`, is captured like any
+  other.
+- **Diffs.** The pending diff - on the dashboard, in `/status.json` and
+  on `sensor.gitops_agent_status` - never shows the listed keys or their
+  values.
+- **Rollback** restores the live file exactly as it was before the apply,
+  listed keys included.
+
+Once a file has an entry it is compared as YAML 1.2 data rather than byte
+for byte: indentation, quoting, comments and flow-versus-block style no
+longer count, and neither does how a number, boolean or null is spelled -
+`pan_id: 0x1a62` is `6754`, `True` is `true`, `~` is `null`, `011` is
+`11` - so the app reading the file and writing it back its own way is not
+drift either. Key order and every value not listed still count. The diff
+shows the file in that normalized form. A change that only touches
+comments in such a file is not applied or captured on its own; it travels
+with the next real change. When an apply or a capture does have to move a
+listed key, the file is written out with two-space indentation; its
+comments carry over, blank lines do not.
+
+YAML 1.2 is what Zigbee2MQTT (js-yaml) reads, and the reason to list keys
+only in files an app with those rules reads. Home Assistant and ESPHome
+read YAML 1.1, where a plain `on`, `yes` or `1:30` is a boolean or a
+number rather than the string a quoted one is; in 1.2 the two are the
+same string, so a change between them would not count as drift here.
+
+Only mapping keys can be listed: there is no way to name a list item, or
+a key with a `.` in its name. The listed keys must each sit in one clear
+place: a copy that does not parse as a single YAML document, that repeats
+a key on a listed key's path, merges a mapping into it with `<<`, reaches
+it through an alias or an anchored mapping, or holds an anchor or alias
+in a listed value, cannot have them set aside. Such a file is compared
+byte for byte, with its diff replaced by `diff hidden: ignore_keys could
+not be applied to this file`; an apply writes the repository's copy as it
+is; and every write to git holds it back, named with its listed keys on
+the "Held back from git" card and in the activity feed, rather than push
+values the app wrote. The add-on log names the file, never its content.
+The one exception is a repository copy that cannot be read that way
+during a capture: the listed keys are then left out of what is pushed
+rather than taken from live.
 
 ## Importing an existing config
 
@@ -1816,8 +1922,9 @@ extensionless `KEY=value` file with a value under a secret-shaped key
 reference is left out of the commit, and the rest of the import still
 lands. Each one is named by its key path - never its value - in the
 activity feed and on the import's history row, which reads "partial".
-Replace the value with a `!secret` reference, or list the file in
-`exclude_paths` if another app writes it, and import again. See
+Replace the value with a `!secret` reference, list the key in
+`ignore_keys` if the app writing the file puts it there, or list the file
+in `exclude_paths` if another app writes all of it, and import again. See
 "Secrets" below.
 
 ### Size limits
@@ -2368,7 +2475,10 @@ alone.
 
 Files another app writes with secrets inside - wmbusmeters' meter
 definitions, Node-RED's `flows_cred.json` - belong in `exclude_paths`,
-which gives them the same treatment.
+which gives them the same treatment. When an app writes a secret into
+one key of a file you otherwise manage - Zigbee2MQTT's MQTT login - list
+that key in `ignore_keys` instead (see "Keys an app writes into its own
+file" above).
 
 ### `secret://` in options and manifests
 
@@ -2407,7 +2517,12 @@ nothing:
 - empty, `null`, or a boolean (`auth: true`, `token: off`)
 
 A YAML or JSON file that does not parse is judged line by line and held
-back if any secret-shaped key has a value after it.
+back if any secret-shaped key has a value after it. A file with
+`ignore_keys` entries is also held back, whatever its keys, when those
+entries cannot be set aside in it - named then as
+`zigbee2mqtt/configuration.yaml (mqtt.user, mqtt.password; ignore_keys
+could not be set aside: ...)` with the reason (see "Keys an app writes
+into its own file").
 
 A held-back file is left out and the rest goes ahead. It is named by
 path and key path - `esphome/garage.yaml (wifi.password)`, never the
@@ -2415,8 +2530,8 @@ value - in the activity feed and, for an import, on its history row,
 which reads "partial". A held-back capture also shows on the "Held back
 from git" card and is kept out of the apply, so the live edit is not
 overwritten while it waits; the card clears on the next check after the
-value is replaced with a reference or the file is listed in
-`exclude_paths`.
+value is replaced with a reference, the key is listed in `ignore_keys`,
+or the file is listed in `exclude_paths`.
 
 ### What the dashboard shows
 
@@ -2425,7 +2540,10 @@ holds a literal secret: every secret value is replaced with `*****`, and
 when masking cannot be done confidently - and for JSON and
 extensionless files, always - the whole diff collapses to `diff hidden:
 the file holds secret values`. The same masked text is what reaches
-`GET /status.json` and the `sensor.gitops_agent_status` attributes.
+`GET /status.json` and the `sensor.gitops_agent_status` attributes. A
+file with `ignore_keys` entries is diffed with those keys already taken
+out, before any masking, and one where they could not be taken out shows
+`diff hidden: ignore_keys could not be applied to this file`.
 
 ### Coming from SOPS (0.8.x)
 

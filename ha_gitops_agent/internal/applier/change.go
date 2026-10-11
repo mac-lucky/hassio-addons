@@ -2,6 +2,7 @@ package applier
 
 import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/ignorekeys"
 )
 
 // Change is one file-level difference between the checked-out repo tree and
@@ -30,6 +31,11 @@ const (
 // never be touched by Apply. Config.IsExcluded holds the check Apply
 // actually uses; DefaultIsExcluded is the production implementation.
 type IsExcludedFunc func(p string) bool
+
+// IgnoredKeysFunc returns the ignore_keys key paths of p, a
+// repo/config-relative path, nil when it has none. Config.IgnoredKeys holds
+// the one Apply uses; gitsync.IgnoredKeys is the production one.
+type IgnoredKeysFunc func(p string) []ignorekeys.KeyPath
 
 // DefaultIsExcluded is gitsync.Excluded - the same root-anchored gitops/
 // plus glob/segment algorithm internal/differ and internal/gitsync use for

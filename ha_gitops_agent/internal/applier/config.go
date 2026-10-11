@@ -8,6 +8,7 @@ package applier
 import (
 	"time"
 
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/options"
 )
 
@@ -56,6 +57,10 @@ type Config struct {
 	// touching any path. Overridable so tests can inject a trivial stub
 	// instead of depending on internal/gitsync's actual algorithm.
 	IsExcluded IsExcludedFunc
+	// IgnoredKeys returns a path's ignore_keys entries, whose live values
+	// an add or update keeps (see writeChanges). nil means no path has
+	// any, which is also how a test opts out of the option.
+	IgnoredKeys IgnoredKeysFunc
 }
 
 // DefaultConfig returns the production Config: /homeassistant,
@@ -77,7 +82,8 @@ func DefaultConfig() Config {
 		HealthProbeTimeoutReload:  60 * time.Second,
 		HealthProbeInterval:       3 * time.Second,
 
-		IsExcluded: DefaultIsExcluded,
+		IsExcluded:  DefaultIsExcluded,
+		IgnoredKeys: gitsync.IgnoredKeys,
 	}
 }
 

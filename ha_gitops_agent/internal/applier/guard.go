@@ -58,6 +58,13 @@ func guardPathContained(path, configRootReal string) error {
 // counterpart of internal/differ.isRegularFile), and a symlinked dst would
 // have os.WriteFile follow it and overwrite whatever it points at.
 func copyFile(src, dst string) error {
+	return copyFileWith(src, dst, nil)
+}
+
+// copyFileWith is copyFile with src's content passed through transform
+// before it is written, once both ends have passed the checks; nil copies
+// it unchanged.
+func copyFileWith(src, dst string, transform func([]byte) []byte) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -72,6 +79,9 @@ func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src) // #nosec G304 -- src is a change path resolved under a guarded root, and just Lstat-confirmed regular above
 	if err != nil {
 		return err
+	}
+	if transform != nil {
+		data = transform(data)
 	}
 	// The Random variant, not WriteFileAtomic: dst sits in live config,
 	// where a fixed "<name>.tmp" can be a real, unmanaged user file. The

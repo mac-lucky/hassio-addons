@@ -945,7 +945,7 @@ func TestAHeldBackCaptureStaysOutOfTheApplyAndIsReportedOnce(t *testing.T) {
 	if status.CaptureFailing {
 		t.Error("capture_failing raised for a hold-back, which is not a push failure")
 	}
-	const event = "hold a literal value under a secret-shaped key: esphome/node.yaml (wifi.password)"
+	const event = "holding a literal value under a secret-shaped key: esphome/node.yaml (wifi.password)"
 	if !hasEventContaining(status.Events, event) {
 		t.Errorf("no held-back event in %+v", status.Events)
 	}

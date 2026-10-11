@@ -75,7 +75,7 @@ func (g *GitSync) CommitBack(ctx context.Context, files []DriftFile, configRoot,
 	staged, err := g.commitLiveOnto(ctx, "commit-back", branch, DriftCommitMessage, files, configRoot, baseSHA)
 	if errors.Is(err, ErrAllHeldBack) {
 		return "", staged.HeldBack, fmt.Errorf("gitsync: commit-back: nothing to commit: %w - %s: %s",
-			err, HeldBackSummary(staged.HeldBack), HeldBackAdvice)
+			err, HeldBackSummary(staged.HeldBack), HeldBackAdviceFor(staged.HeldBack))
 	}
 	if err != nil {
 		return "", staged.HeldBack, err
@@ -202,7 +202,7 @@ func (g *GitSync) stageDrift(ctx context.Context, op string, files []DriftFile, 
 		if err != nil {
 			var held *HeldBackError
 			if errors.As(err, &held) {
-				slog.Info("gitsync: "+op+": holding back a file with a literal secret", "path", p, "keys", strings.Join(held.Keys, ", "))
+				slog.Info("gitsync: "+op+": holding back a file", "path", p, "keys", strings.Join(held.Keys, ", "), "reason", held.Reason)
 				set.HeldBack = append(set.HeldBack, held.HeldBack)
 				continue
 			}
@@ -269,9 +269,12 @@ func liveFileIsGone(configRoot, p string) (bool, error) {
 // error means absent or not a regular file, and the caller decides what
 // that means. Both ends go through guardDriftPath.
 //
-// A live file holding a literal value under a secret-shaped key is never
-// written: that is a *HeldBackError, and whatever the worktree held at that
-// path stays as the checked-out commit has it, so nothing of it is staged.
+// A file with ignore_keys entries is written with the repository's value
+// at each ignored key (withRepoValuesAt) before anything else looks at it,
+// and one where that cannot be done is never written. Nor is a live file
+// holding a literal value under a secret-shaped key. Either is a
+// *HeldBackError, and whatever the worktree held at that path stays as the
+// checked-out commit has it, so nothing of it is staged.
 func (g *GitSync) copyLiveIntoWorkdir(configRoot, p string) (bool, error) {
 	livePath, err := guardDriftPath(configRoot, p)
 	if err != nil {
@@ -290,6 +293,19 @@ func (g *GitSync) copyLiveIntoWorkdir(configRoot, p string) (bool, error) {
 	content, err := os.ReadFile(livePath) // #nosec G304 -- livePath is guardDriftPath-confined (symlink-resolved) under configRoot, see above
 	if err != nil {
 		return false, fmt.Errorf("reading live %s: %w", p, err)
+	}
+	if len(IgnoredKeys(p)) > 0 {
+		// The worktree still holds the checked-out commit's copy here, so
+		// that is the repository's value of every ignored key. Any read
+		// failure means there is no such copy, and the keys are removed.
+		repo, readErr := os.ReadFile(repoPath) // #nosec G304 -- repoPath is guardDriftPath-confined (symlink-resolved) under g.Workdir
+		if readErr != nil {
+			repo = nil
+		}
+		content, err = withRepoValuesAt(p, content, repo)
+		if err != nil {
+			return false, &HeldBackError{HeldBack: ignoreKeysHeldBack(p, err)}
+		}
 	}
 	if keys := secretshape.Literals(p, content); len(keys) > 0 {
 		return false, &HeldBackError{HeldBack: HeldBack{Path: p, Keys: keys}}
@@ -310,17 +326,26 @@ func (g *GitSync) copyLiveIntoWorkdir(configRoot, p string) (bool, error) {
 const maxHeldBackKeys = 5
 
 // HeldBackAdvice is the fix every held-back report ends with.
-const HeldBackAdvice = "move each value into secrets.yaml and reference it with !secret, or list the file in exclude_paths"
+const HeldBackAdvice = "move each value into secrets.yaml and reference it with !secret, list the key in ignore_keys if the app that writes the file puts it there, or list the file in exclude_paths"
 
-// HeldBack is one live file a write to git left out because it holds a
-// literal value under a secret-shaped key (internal/secretshape). Keys are
-// key paths, never values, so it is safe to log and to display.
+// ignoreKeysAdvice is the fix for a file held back because its
+// ignore_keys could not be set aside.
+const ignoreKeysAdvice = "make that file a single YAML document with no repeated key, merge key, anchor or alias on an ignored key's path, or remove its ignore_keys entries"
+
+// HeldBack is one live file a write to git left out. Keys are key paths,
+// never values, so it is safe to log and to display.
 type HeldBack struct {
 	Path string
 	Keys []string
+	// Reason is "" for the usual case, a literal value under a
+	// secret-shaped key (internal/secretshape), which Keys then names.
+	// Otherwise it says why in words, and Keys are the file's ignore_keys
+	// that could not be set aside (ignoreKeysHeldBack).
+	Reason string
 }
 
-// String renders "path (key, key)".
+// String renders "path (key, key)", with "; reason" inside the brackets
+// when there is one.
 func (h HeldBack) String() string {
 	keys := h.Keys
 	more := ""
@@ -328,7 +353,44 @@ func (h HeldBack) String() string {
 		more = fmt.Sprintf(" and %d more", len(keys)-maxHeldBackKeys)
 		keys = keys[:maxHeldBackKeys]
 	}
-	return h.Path + " (" + strings.Join(keys, ", ") + more + ")"
+	reason := ""
+	if h.Reason != "" {
+		reason = "; " + h.Reason
+	}
+	return h.Path + " (" + strings.Join(keys, ", ") + more + reason + ")"
+}
+
+// HeldBackCause is what an event says the held-back files in items have in
+// common, after "N file(s)": the literal-secret wording when that is why
+// every one was held back, a neutral one otherwise, each file then saying
+// its own reason (String).
+func HeldBackCause(items []HeldBack) string {
+	for _, h := range items {
+		if h.Reason != "" {
+			return "that cannot be pushed as they are"
+		}
+	}
+	return "holding a literal value under a secret-shaped key"
+}
+
+// HeldBackAdviceFor is the fix an event about items ends with:
+// HeldBackAdvice, ignoreKeysAdvice, or both when items mixes the two.
+func HeldBackAdviceFor(items []HeldBack) string {
+	literal, ignoreKeys := false, false
+	for _, h := range items {
+		if h.Reason == "" {
+			literal = true
+		} else {
+			ignoreKeys = true
+		}
+	}
+	switch {
+	case literal && ignoreKeys:
+		return HeldBackAdvice + "; for a file whose ignore_keys could not be set aside, " + ignoreKeysAdvice
+	case ignoreKeys:
+		return ignoreKeysAdvice
+	}
+	return HeldBackAdvice
 }
 
 // HeldBackSummary renders a list of them for an event or an error.
@@ -347,6 +409,9 @@ type HeldBackError struct {
 }
 
 func (e *HeldBackError) Error() string {
+	if e.Reason != "" {
+		return e.String() + " was held back"
+	}
 	return e.String() + " holds a literal value under a secret-shaped key"
 }
 

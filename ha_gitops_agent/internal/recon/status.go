@@ -278,9 +278,11 @@ type Status struct {
 	ConflictBranch string   `json:"conflict_branch"`
 	ConflictUTC    string   `json:"conflict_utc"`
 	// HeldBack is the files capture would not push because they hold a
-	// literal value under a secret-shaped key, as "path (key, key)" -
-	// key paths, never values. Sorted, rebuilt every cycle. Like a
-	// conflict, each stays out of the apply until someone edits it.
+	// literal value under a secret-shaped key, as "path (key, key)", or
+	// because their ignore_keys could not be set aside, as "path (key,
+	// key; reason)" - key paths, never values. Sorted, rebuilt every
+	// cycle. Like a conflict, each stays out of the apply until someone
+	// edits it.
 	HeldBack []string `json:"held_back"`
 	// WaitingForSecret is why the agent has not started yet: a secret://
 	// option that the live secrets.yaml cannot answer, as "git_token:

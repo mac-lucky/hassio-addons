@@ -98,7 +98,9 @@ func (g *GitSync) ChangedBetween(ctx context.Context, base, tip string) ([]strin
 //
 // A commit that does not track the path is (false, false, nil) - not an
 // error - matching blobMatches, which reads a non-zero "git show" as "not
-// tracked at sha" for the same reason. Otherwise this is a byte compare.
+// tracked at sha" for the same reason. Otherwise this is a byte compare,
+// or for a file with ignore_keys entries the comparison internal/differ
+// makes (sameIgnoringKeys), so the two never disagree about a path.
 func (g *GitSync) BlobEquivalent(ctx context.Context, sha, path string, live []byte) (equivalent, tracked bool, err error) {
 	if sha == "" {
 		return false, false, fmt.Errorf("gitsync: blob-equivalent: no commit given for %s", path)
@@ -108,9 +110,7 @@ func (g *GitSync) BlobEquivalent(ctx context.Context, sha, path string, live []b
 	if err != nil || !tracked {
 		return false, false, err
 	}
-	// Compared as strings so the blob is never copied into a second buffer:
-	// the compiler turns this into an allocation-free comparison.
-	return blob == string(live), true, nil
+	return blobMatchesLive(path, blob, live), true, nil
 }
 
 // blobAt reads path's blob at sha. tracked is false, with no error, when
@@ -192,7 +192,10 @@ func (g *GitSync) LiveFactsAt(ctx context.Context, sha, configRoot, path string)
 		}
 		return LiveFacts{BaseTracks: tracked, Gone: gone, BaseIsSops: tracked && isSopsDocument([]byte(blob))}, nil
 
-	case info.Size() > maxCompareBytes:
+	case info.Size() > maxCompareBytes && len(IgnoredKeys(path)) == 0:
+		// A file with ignore_keys entries is read at any size, as
+		// internal/differ and the applier read it: deferring it here while
+		// they compare it would leave its drift parked for good.
 		return LiveFacts{}, fmt.Errorf("%w: %s", ErrNotComparable, path)
 	}
 
@@ -208,6 +211,19 @@ func (g *GitSync) LiveFactsAt(ctx context.Context, sha, configRoot, path string)
 		// here can prove, so it defers.
 		return LiveFacts{BaseTracks: tracked, BaseIsSops: baseIsSops}, nil
 	}
-	// Compared as strings, BlobEquivalent's reason.
-	return LiveFacts{MatchesBase: tracked && blob == string(live), BaseTracks: tracked, BaseIsSops: baseIsSops}, nil
+	return LiveFacts{MatchesBase: tracked && blobMatchesLive(path, blob, live), BaseTracks: tracked, BaseIsSops: baseIsSops}, nil
+}
+
+// blobMatchesLive is BlobEquivalent's and LiveFactsAt's comparison. Byte
+// for byte, as strings so the blob is never copied into a second buffer
+// (the compiler turns that into an allocation-free comparison) - except
+// for a file with ignore_keys entries, which differ compares with those
+// keys set aside: a live copy that differs from the base only where the
+// app wrote its own values has not moved, or an apply of a repository
+// change to it would read as a conflict.
+func blobMatchesLive(path, blob string, live []byte) bool {
+	if len(IgnoredKeys(path)) == 0 {
+		return blob == string(live)
+	}
+	return sameIgnoringKeys(path, []byte(blob), live)
 }

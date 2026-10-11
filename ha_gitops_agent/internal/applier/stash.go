@@ -2,12 +2,17 @@ package applier
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/ignorekeys"
 )
 
 // stashManifestFile is manifest.json's on-disk shape.
@@ -139,7 +144,15 @@ func dirsToCreate(changes []Change, configRoot string) []string {
 // removes files for delete changes, returning the paths touched in order.
 // A failed copy errors rather than skipping the file, so Apply rolls the
 // whole batch back instead of leaving the config half-updated.
-func writeChanges(changes []Change, repoRoot, configRoot string) ([]string, error) {
+//
+// A path with ignore_keys entries (cfg.IgnoredKeys) is written as the
+// repository's copy with the live value at each ignored key, or without
+// the key where live has none - a file not live yet has none
+// (keepLiveValues): those keys belong to the app that writes the file, and
+// applying git content must not strip them.
+// The stash taken before this holds the live file as it was, ignored keys
+// included, so a rollback restores them byte for byte.
+func writeChanges(cfg Config, changes []Change, repoRoot, configRoot string) ([]string, error) {
 	var changedPaths []string
 	for _, change := range changes {
 		dest := filepath.Join(configRoot, change.Path)
@@ -151,7 +164,11 @@ func writeChanges(changes []Change, repoRoot, configRoot string) ([]string, erro
 					return nil, err
 				}
 			}
-			if err := copyFile(src, dest); err != nil {
+			var keys []ignorekeys.KeyPath
+			if cfg.IgnoredKeys != nil {
+				keys = cfg.IgnoredKeys(change.Path)
+			}
+			if err := copyFileWith(src, dest, keepLiveValues(keys, change.Path, dest)); err != nil {
 				return nil, err
 			}
 			changedPaths = append(changedPaths, change.Path)
@@ -167,4 +184,39 @@ func writeChanges(changes []Change, repoRoot, configRoot string) ([]string, erro
 		}
 	}
 	return changedPaths, nil
+}
+
+// keepLiveValues is writeChanges' transform for a path with ignore_keys
+// entries, nil (a plain copy) for one without. It reads the live file at
+// dst as the copy is about to replace it and overlays its values onto the
+// repository's content (ignorekeys.Overlay). A live file that does not
+// exist yet holds none, so an add leaves every ignored key out - what its
+// published diff shows.
+//
+// A live file that exists but cannot be read, or cannot be read as YAML
+// that way, has no values to keep: the repository's copy is written as it
+// is, as without the option, with a warning naming the file and never its
+// content. That strips whatever the app had written until it writes it
+// again; a repository copy that cannot be read that way is written as it
+// is too.
+func keepLiveValues(keys []ignorekeys.KeyPath, relPath, dst string) func([]byte) []byte {
+	if len(keys) == 0 {
+		return nil
+	}
+	return func(repo []byte) []byte {
+		live, err := os.ReadFile(dst) // #nosec G304 -- dst is a change path under the guarded config root, Lstat-checked by copyFileWith before this runs
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			live = nil
+		case err != nil:
+			slog.Warn("applier: ignore_keys not applied, the live file cannot be read; writing the repository copy as it is", "path", relPath, "error", err)
+			return repo
+		}
+		out, err := ignorekeys.Overlay(keys, repo, live)
+		if err != nil {
+			slog.Warn("applier: ignore_keys not applied, writing the repository copy as it is", "path", relPath, "reason", err)
+			return repo
+		}
+		return out
+	}
 }

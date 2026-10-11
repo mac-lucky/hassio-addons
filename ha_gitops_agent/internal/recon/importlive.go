@@ -28,7 +28,8 @@ type ImportSummary struct {
 	Branch    string
 	Created   bool
 	// HeldBack is the files left out because they hold a literal value
-	// under a secret-shaped key, as "path (key, key)".
+	// under a secret-shaped key, as "path (key, key)", or because their
+	// ignore_keys could not be set aside, as "path (key, key; reason)".
 	HeldBack []string
 }
 
@@ -206,8 +207,8 @@ func (r *Reconciler) importLive(ctx context.Context) (ImportSummary, error) {
 		for _, h := range res.HeldBack {
 			heldBack = append(heldBack, h.String())
 		}
-		held := fmt.Sprintf("held back %d file(s) holding a literal value under a secret-shaped key: %s - %s",
-			len(res.HeldBack), gitsync.HeldBackSummary(res.HeldBack), gitsync.HeldBackAdvice)
+		held := fmt.Sprintf("held back %d file(s) %s: %s - %s",
+			len(res.HeldBack), gitsync.HeldBackCause(res.HeldBack), gitsync.HeldBackSummary(res.HeldBack), gitsync.HeldBackAdviceFor(res.HeldBack))
 		r.logWarn("import " + held)
 		record.Outcome = history.OutcomePartial
 		record.Error = held

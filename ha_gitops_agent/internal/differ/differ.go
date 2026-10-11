@@ -15,6 +15,7 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
+	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/ignorekeys"
 	"github.com/pmezard/go-difflib/difflib"
 )
 
@@ -64,7 +65,9 @@ type Change struct {
 // differing path: "add", "update", or "delete" (only prevManifest paths
 // can be deleted). gitsync.Excluded is skipped in both directions, so a
 // secrets file or an exclude_paths entry is never planned - not even the
-// delete of one an older version applied and recorded in the manifest.
+// delete of one an older version applied and recorded in the manifest. A
+// file with ignore_keys entries is compared and diffed without those keys
+// (withoutIgnoredKeys); every other file byte for byte.
 //
 // skippedContainment names paths refused for a security reason - a
 // symlink or an escape past the root.
@@ -137,14 +140,15 @@ func diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p strin
 			slog.Warn("skipping while diffing", "path", p, "error", sizeErr)
 			return Change{}, false, false
 		}
-		if repoSize > largeFileThresholdBytes {
+		if repoSize > largeFileThresholdBytes && !hasIgnoredKeys(p) {
 			return Change{Path: p, Kind: "add", DiffText: largeFileSummary(0, repoSize)}, true, false
 		}
 		repoBytes := readFile(repoPath)
 		if repoBytes == nil {
 			return Change{}, false, false
 		}
-		return Change{Path: p, Kind: "add", DiffText: diffTextFor(nil, repoBytes, p)}, true, false
+		_, repoBytes, hidden := withoutIgnoredKeys(p, nil, repoBytes)
+		return Change{Path: p, Kind: "add", DiffText: publishedDiff(nil, repoBytes, p, hidden)}, true, false
 	}
 
 	if regular, susp := isRegularFile(configPath, configRootReal); !regular {
@@ -163,7 +167,7 @@ func diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p strin
 		return Change{}, false, false
 	}
 
-	if repoSize > largeFileThresholdBytes || configSize > largeFileThresholdBytes {
+	if (repoSize > largeFileThresholdBytes || configSize > largeFileThresholdBytes) && !hasIgnoredKeys(p) {
 		if largeFilesEqual(repoPath, configPath) {
 			return Change{}, false, false
 		}
@@ -175,10 +179,11 @@ func diffTrackedPath(repoRoot, configRoot, repoRootReal, configRootReal, p strin
 	if repoBytes == nil || configBytes == nil {
 		return Change{}, false, false
 	}
+	configBytes, repoBytes, hidden := withoutIgnoredKeys(p, configBytes, repoBytes)
 	if bytes.Equal(repoBytes, configBytes) {
 		return Change{}, false, false
 	}
-	return Change{Path: p, Kind: "update", DiffText: diffTextFor(configBytes, repoBytes, p)}, true, false
+	return Change{Path: p, Kind: "update", DiffText: publishedDiff(configBytes, repoBytes, p, hidden)}, true, false
 }
 
 // diffTextFor builds a Change's DiffText, routing it through the masking
@@ -205,7 +210,7 @@ func diffDeletedPath(configRoot, configRootReal, p string) (change Change, ok, s
 		slog.Warn("skipping delete check", "path", p, "error", err)
 		return Change{}, false, false
 	}
-	if configSize > largeFileThresholdBytes {
+	if configSize > largeFileThresholdBytes && !hasIgnoredKeys(p) {
 		return Change{Path: p, Kind: "delete", DiffText: largeFileSummary(configSize, 0)}, true, false
 	}
 
@@ -213,7 +218,70 @@ func diffDeletedPath(configRoot, configRootReal, p string) (change Change, ok, s
 	if configBytes == nil {
 		return Change{}, false, false
 	}
-	return Change{Path: p, Kind: "delete", DiffText: diffTextFor(configBytes, nil, p)}, true, false
+	configBytes, _, hidden := withoutIgnoredKeys(p, configBytes, nil)
+	return Change{Path: p, Kind: "delete", DiffText: publishedDiff(configBytes, nil, p, hidden)}, true, false
+}
+
+// ignoreKeysSummary is the whole DiffText of a file with ignore_keys
+// entries that could not be set aside (withoutIgnoredKeys): any real diff
+// of it would quote the ignored keys, which need not be secret-shaped for
+// mask.go to catch them - mqtt.user, or a login inside mqtt.server.
+const ignoreKeysSummary = "diff hidden: ignore_keys could not be applied to this file"
+
+// hasIgnoredKeys reports whether p has ignore_keys entries. Such a file is
+// never compared in chunks, whatever its size: the applier and the
+// three-way classifier set its keys aside at any size, and a chunk compare
+// that did not would plan the same apply every cycle.
+func hasIgnoredKeys(p string) bool {
+	return len(gitsync.IgnoredKeys(p)) > 0
+}
+
+// publishedDiff is diffTextFor, or ignoreKeysSummary when hidden.
+func publishedDiff(before, after []byte, p string, hidden bool) string {
+	if hidden {
+		return ignoreKeysSummary
+	}
+	return diffTextFor(before, after, p)
+}
+
+// withoutIgnoredKeys returns both sides of p as Compute compares and
+// publishes them. For a path with ignore_keys entries that is
+// ignorekeys.Canonical's form: the ignored keys gone, and indentation,
+// quoting, comments and the spelling of numbers normalized away, so a file
+// that differs only where the app wrote its own values is no change, and a
+// diff of one that does differ never shows those keys or their values.
+// Every other path passes through as read, byte for byte as before the
+// option existed.
+//
+// nil stands for a side that is not there and stays nil. When either side
+// cannot be read that way, both pass through unchanged, so the change is
+// decided byte for byte as without the option, and hidden is true: the
+// caller publishes ignoreKeysSummary rather than a diff of them. The
+// warning names the file, never its content.
+func withoutIgnoredKeys(p string, live, repo []byte) (liveOut, repoOut []byte, hidden bool) {
+	keys := gitsync.IgnoredKeys(p)
+	if len(keys) == 0 {
+		return live, repo, false
+	}
+	liveOut, err := canonicalUnlessNil(keys, live)
+	side := "live"
+	if err == nil {
+		repoOut, err = canonicalUnlessNil(keys, repo)
+		side = "repository"
+	}
+	if err != nil {
+		slog.Warn("ignore_keys not applied, comparing the file byte for byte and hiding its diff", "path", p, "copy", side, "reason", err)
+		return live, repo, true
+	}
+	return liveOut, repoOut, false
+}
+
+// canonicalUnlessNil is ignorekeys.Canonical with nil passed through.
+func canonicalUnlessNil(keys []ignorekeys.KeyPath, data []byte) ([]byte, error) {
+	if data == nil {
+		return nil, nil
+	}
+	return ignorekeys.Canonical(keys, data)
 }
 
 // isRegularFile Lstats path (no symlink following) and requires its
