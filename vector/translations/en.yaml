@@ -39,6 +39,12 @@ configuration:
     description: >-
       Replace API keys, tokens, passwords and authorization headers found in log
       messages with a placeholder before shipping them.
+  redact_provider_formats:
+    name: Redact Provider Credential Formats
+    description: >-
+      Also mask about 400 provider credential formats (GitHub, GitLab, AWS,
+      Slack, Stripe, OpenAI and more). Needs Redact Sensitive Data. Uses about
+      150 MB more memory.
   journal_include_units:
     name: Journal Include Units
     description: >-

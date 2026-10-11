@@ -12,6 +12,7 @@ declare hostname
 declare instance
 declare collect_journal
 declare redact_sensitive
+declare redact_provider_formats
 declare stream_fields
 declare custom_config_path
 declare auth_username
@@ -33,6 +34,9 @@ instance=$(jq -r '.instance // "homeassistant"' "${VECTOR_OPTIONS_FILE}")
 # the user explicitly set to false would read back as true
 collect_journal=$(jq -r 'if .collect_journal == null then true else .collect_journal end' "${VECTOR_OPTIONS_FILE}")
 redact_sensitive=$(jq -r 'if .redact_sensitive == null then true else .redact_sensitive end' "${VECTOR_OPTIONS_FILE}")
+# Off by default: the ~400 compiled patterns add about 150 MB of memory.
+# Only with redact_sensitive, which is the switch for all redaction.
+redact_provider_formats=$(jq -r 'if .redact_sensitive != false and .redact_provider_formats == true then true else false end' "${VECTOR_OPTIONS_FILE}")
 stream_fields=$(jq -r '.stream_fields // [] | join(",")' "${VECTOR_OPTIONS_FILE}")
 custom_config_path=$(vector_addon::custom_config_path)
 
@@ -289,6 +293,7 @@ bashio::log.info "VictoriaLogs endpoint: ${masked_endpoint}"
 bashio::log.info "Hostname: ${hostname:-(taken from the journal)}"
 bashio::log.info "Instance: ${instance}"
 bashio::log.info "Redact sensitive: ${redact_sensitive}"
+bashio::log.info "Redact provider formats: ${redact_provider_formats}"
 # The container lists, since a typo in include_containers silently drops
 # every container but the ones it does match. Validated, so safe to print.
 for list in include_containers exclude_containers; do
@@ -349,12 +354,13 @@ JOURNALDSOURCE
 emit_journal_units journal_include_units include_units
 emit_journal_units journal_exclude_units exclude_units
 
-# With redaction on, redact_secrets (appended after this heredoc) sits between
-# the enrichment and the multiline split.
-if [[ "${redact_sensitive}" == "true" ]]; then
-    enriched="redact_secrets"
+# With provider formats on, redact_secrets (appended after this heredoc) takes
+# both branches after the multiline join, so a key logged over several lines
+# is one event when it is scanned, and cap_size reads it instead.
+if [[ "${redact_provider_formats}" == "true" ]]; then
+    cap_inputs="      - redact_secrets"
 else
-    enriched="enrich_logs"
+    cap_inputs=$'      - split_multiline._unmatched\n      - join_multiline'
 fi
 
 # Add transforms section - the enrichment program lives in its own file. This
@@ -408,7 +414,7 @@ transforms:
   split_multiline:
     type: route
     inputs:
-      - ${enriched}
+      - enrich_logs
     route:
       multiline: '%multiline == true'
 
@@ -446,8 +452,7 @@ transforms:
   cap_size:
     type: remap
     inputs:
-      - split_multiline._unmatched
-      - join_multiline
+${cap_inputs}
     source: |-
       msg = to_string(.message) ?? ""
       if length(msg) > 200000 {
@@ -460,13 +465,14 @@ TRANSFORMS_HEADER
 # image. It is its own transform rather than part of enrich.vrl because it reads
 # .message fresh: inside enrich.vrl, .message is already known to be a string
 # and its fallible read would not compile.
-if [[ "${redact_sensitive}" == "true" ]]; then
+if [[ "${redact_provider_formats}" == "true" ]]; then
     cat >> "${VECTOR_CONFIG}" << 'SECRETS_TRANSFORM'
 
   redact_secrets:
     type: remap
     inputs:
-      - enrich_logs
+      - split_multiline._unmatched
+      - join_multiline
     file: /usr/share/vector-addon/secrets.vrl
 SECRETS_TRANSFORM
 fi

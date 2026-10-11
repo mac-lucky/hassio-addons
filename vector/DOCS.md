@@ -6,7 +6,7 @@ This add-on collects logs from your Home Assistant system and sends them to Vict
 ## Features
 
 - Collects systemd journal logs (Home Assistant Core, Supervisor, add-ons, host system)
-- Low memory footprint (~30-50MB RAM)
+- Low memory footprint (~30-50MB RAM; about 150MB more with `redact_provider_formats`)
 - Filtering by add-on container or systemd unit
 - Python tracebacks and other multi-line output joined into one entry
 - Colour codes stripped and log levels read from the line itself
@@ -46,7 +46,8 @@ appends `/_bulk`, so the insert path has to be part of the URL. A bare
 | `instance` | `homeassistant` | Instance identifier for multi-HA setups |
 | `log_level` | `info` | Logging verbosity (trace/debug/info/warning/error) |
 | `collect_journal` | `true` | Collect systemd journal logs |
-| `redact_sensitive` | `true` | Replace API keys, tokens, passwords and known provider credential formats found in log messages with `[REDACTED]` |
+| `redact_sensitive` | `true` | Replace API keys, tokens and passwords found in log messages with `[REDACTED]` |
+| `redact_provider_formats` | `false` | Also mask about 400 provider credential formats (needs `redact_sensitive`; about 150MB more memory) |
 | `journal_include_units` | `[]` | Only collect from these systemd units |
 | `journal_exclude_units` | `[]` | Exclude these systemd units |
 | `include_containers` | `[]` | Only collect these containers; Core and the Supervisor count (see [Containers](#containers)) |
@@ -184,10 +185,13 @@ line of up to 96 KB arrives as one entry; a longer one arrives as several.
   - command-line flags such as `--password x`;
   - credentials inside URLs;
   - bare JWTs, which is what Home Assistant access tokens are;
-  - about 400 provider credential formats (GitHub, GitLab, AWS, Slack, Stripe,
-    OpenAI and many more), taken from the betterleaks rule set. These replace
-    only the credential itself, with `[REDACTED:<rule-id>]`, so the rest of the
-    line stays readable.
+  - with `redact_provider_formats` also on, about 400 provider credential
+    formats (GitHub, GitLab, AWS, Slack, Stripe, OpenAI and many more), taken
+    from the betterleaks rule set. These replace only the credential itself,
+    with `[REDACTED:<rule-id>]`, so the rest of the line stays readable. They
+    run after multiline joining, so a key logged over several lines is caught,
+    and their compiled patterns use about 150MB of memory, which is why the
+    option is off by default.
 
   Keys and values may be quoted, including JSON logged inside JSON. The process
   command line (`_CMDLINE`) and journald's raw copy of a rewritten message
@@ -294,7 +298,8 @@ redacted, so it is safe to paste into a bug report.
 
 ### High memory usage or noisy logs
 
-Vector typically uses 30-50MB of RAM. If usage is higher, or one add-on floods
+Vector typically uses 30-50MB of RAM, about 150MB more with
+`redact_provider_formats` on. If usage is higher, or one add-on floods
 the logs, exclude it by container, and noisy host services by unit:
 
 ```yaml

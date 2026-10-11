@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- With `redact_sensitive` on, messages are also checked against about 400
-  provider credential formats from the betterleaks rule set (GitHub, GitLab,
-  AWS, Slack, Stripe, OpenAI and more). Only the credential is replaced, with
-  `[REDACTED:<rule-id>]`; the rest of the line is kept. The rules run as their
-  own transform after the enrichment, before multiline joining.
+- `redact_provider_formats` (off by default): with `redact_sensitive` also on,
+  messages are checked against about 400 provider credential formats from the
+  betterleaks rule set (GitHub, GitLab, AWS, Slack, Stripe, OpenAI and more).
+  Only the credential is replaced, with `[REDACTED:<rule-id>]`; the rest of the
+  line is kept. The rules run after multiline joining, so a key logged over
+  several lines is masked as a whole. The compiled patterns use about 150MB of
+  memory, so the option is opt-in.
 
 ## [1.10.2] - 2026-10-06
 

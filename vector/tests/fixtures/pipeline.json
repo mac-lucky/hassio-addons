@@ -1,1 +1,1 @@
-{"exclude_containers": ["wmbusmeters-ha-addon"], "multiline_containers": ["homeassistant", "music_assistant"]}
+{"redact_provider_formats": true, "exclude_containers": ["wmbusmeters-ha-addon"], "multiline_containers": ["homeassistant", "music_assistant"]}

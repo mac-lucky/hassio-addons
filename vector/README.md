@@ -16,7 +16,7 @@ This add-on configures Vector to collect logs from your Home Assistant system an
 ## Features
 
 - Collects systemd journal logs (HA Core, Supervisor, add-ons, host services)
-- Low memory footprint (~30-50MB)
+- Low memory footprint (~30-50MB; more with provider-format redaction on)
 - Automatic log enrichment with host/container metadata and a level read from each line
 - Python tracebacks joined into one entry, colour codes stripped
 - Optional redaction of secrets in log messages

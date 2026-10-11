@@ -38,6 +38,7 @@ options:
   log_level: info
   collect_journal: true
   redact_sensitive: true
+  redact_provider_formats: false
   journal_include_units: []
   journal_exclude_units: []
   include_containers: []
@@ -65,6 +66,7 @@ schema:
   log_level: list(trace|debug|info|warning|error)
   collect_journal: bool
   redact_sensitive: bool
+  redact_provider_formats: bool
   journal_include_units:
     - str
   journal_exclude_units:
