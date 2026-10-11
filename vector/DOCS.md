@@ -46,7 +46,7 @@ appends `/_bulk`, so the insert path has to be part of the URL. A bare
 | `instance` | `homeassistant` | Instance identifier for multi-HA setups |
 | `log_level` | `info` | Logging verbosity (trace/debug/info/warning/error) |
 | `collect_journal` | `true` | Collect systemd journal logs |
-| `redact_sensitive` | `true` | Replace API keys, tokens and passwords found in log messages with `[REDACTED]` |
+| `redact_sensitive` | `true` | Replace API keys, tokens, passwords and known provider credential formats found in log messages with `[REDACTED]` |
 | `journal_include_units` | `[]` | Only collect from these systemd units |
 | `journal_exclude_units` | `[]` | Exclude these systemd units |
 | `include_containers` | `[]` | Only collect these containers; Core and the Supervisor count (see [Containers](#containers)) |
@@ -183,7 +183,11 @@ line of up to 96 KB arrives as one entry; a longer one arrives as several.
   - tokens, passwords and secrets written as `key: value` or `key=value`;
   - command-line flags such as `--password x`;
   - credentials inside URLs;
-  - bare JWTs, which is what Home Assistant access tokens are.
+  - bare JWTs, which is what Home Assistant access tokens are;
+  - about 400 provider credential formats (GitHub, GitLab, AWS, Slack, Stripe,
+    OpenAI and many more), taken from the betterleaks rule set. These replace
+    only the credential itself, with `[REDACTED:<rule-id>]`, so the rest of the
+    line stays readable.
 
   Keys and values may be quoted, including JSON logged inside JSON. The process
   command line (`_CMDLINE`) and journald's raw copy of a rewritten message

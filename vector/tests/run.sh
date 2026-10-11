@@ -56,6 +56,10 @@ check     "Core and Supervisor are joined by default" \
 check_not "no container filter unless asked" grep -q "excluded container" "${VECTOR_VRL}"
 check     "the sink acknowledges deliveries" \
     grep -Pzq '\n    acknowledgements:\n      enabled: true\n' "${VECTOR_CONFIG}"
+check     "the credential rules are wired in" \
+    grep -Fq "file: /usr/share/vector-addon/secrets.vrl" "${VECTOR_CONFIG}"
+check     "and the multiline split reads them" \
+    grep -Pzq '\n  split_multiline:\n    type: route\n    inputs:\n      - redact_secrets\n' "${VECTOR_CONFIG}"
 
 run_case auth-quotes
 check     "exits 0"                     test "${rc}" -eq 0
@@ -221,6 +225,7 @@ check "explains the only source"  grep -q "only log source" "${LOG}"
 run_case no-redaction
 check     "exits 0"                test "${rc}" -eq 0
 check_not "no redaction block"     grep -q "REDACTED" "${VECTOR_VRL}"
+check_not "no credential rules"    grep -q "redact_secrets" "${VECTOR_CONFIG}"
 
 run_case password-trailing-newline
 check "exits non-zero"          test "${rc}" -ne 0
@@ -471,6 +476,10 @@ awk -v sink_inputs="${sink_inputs}" '
 EVENTS
     # One line far past the size cap
     jq -nc '{message: ("y" * 250000), PRIORITY: "6", _SYSTEMD_UNIT: "docker.service", CONTAINER_NAME: "app_00000000_big"}'
+    # A provider token that no keyword rule above knows. Built here, never
+    # written whole, so this file holds no token-shaped string.
+    jq -nc --arg t "ghp""_Zq7Xw2Lm9Rt4Vb8Nc1Hj6Kp3Sd5Fg0Ay2Ux9" \
+        '{message: ("push rejected for " + $t + " ok"), PRIORITY: "6", _SYSTEMD_UNIT: "docker.service", CONTAINER_NAME: "app_00000000_git"}'
 } > "${pl}/in.ndjson"
 
 timeout 60 vector --config-yaml "${pl}/cfg.yaml" < "${pl}/in.ndjson" > "${pl}/out.ndjson" 2> "${pl}/run.log"
@@ -478,7 +487,7 @@ check "the pipeline ran to the end of its input" grep -q "All sources have finis
 
 # Asserted by content, never by order: the sink fans in from two branches
 out_count() { jq -s "[.[] | select($1)] | length" "${pl}/out.ndjson"; }
-check "every expected event came out, and nothing else" test "$(out_count 'true')" -eq 10
+check "every expected event came out, and nothing else" test "$(out_count 'true')" -eq 11
 check "Core's traceback rejoined its opening line" \
     test "$(out_count '.container_name == "homeassistant" and .message == "2026-01-11 09:04:15.123 WARNING (MainThread) [homeassistant.core] ha-boom\nTraceback (most recent call last):\n  File \"/x.py\", line 1, in <module>\nValueError: bad"')" -eq 1
 check "and kept that line's level, not the frames' PRIORITY" \
@@ -502,6 +511,9 @@ check "a long line's pieces are one event again" \
 check "with the partial-line fields gone" \
     test "$(out_count '[has("CONTAINER_PARTIAL_ID", "CONTAINER_PARTIAL_LAST", "CONTAINER_PARTIAL_MESSAGE", "CONTAINER_PARTIAL_ORDINAL", "timestamp_end")] | any')" -eq 0
 check_not "a secret split across pieces is still redacted" grep -Fq hunter5sentinel "${pl}/out.ndjson"
+check_not "a provider token is masked" grep -Fq "Zq7Xw2Lm9Rt4Vb8Nc1Hj6Kp3Sd5Fg0Ay2Ux9" "${pl}/out.ndjson"
+check "with only the token replaced" \
+    test "$(out_count '.message == "push rejected for [REDACTED:ctxcop-github-pat-classic] ok"')" -eq 1
 check_not "no colour codes reach the sink" grep -Fq '\u001b' "${pl}/out.ndjson"
 check "an oversized line is cut to the cap" \
     test "$(out_count '.container_name == "app_00000000_big" and (.message | length) < 50100 and (.message | endswith("[truncated by the add-on]"))')" -eq 1

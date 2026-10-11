@@ -5,6 +5,16 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-10-11
+
+### Added
+
+- With `redact_sensitive` on, messages are also checked against about 400
+  provider credential formats from the betterleaks rule set (GitHub, GitLab,
+  AWS, Slack, Stripe, OpenAI and more). Only the credential is replaced, with
+  `[REDACTED:<rule-id>]`; the rest of the line is kept. The rules run as their
+  own transform after the enrichment, before multiline joining.
+
 ## [1.10.2] - 2026-10-06
 
 Rebuild only, no functional change.

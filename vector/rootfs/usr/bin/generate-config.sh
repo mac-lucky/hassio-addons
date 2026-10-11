@@ -349,6 +349,14 @@ JOURNALDSOURCE
 emit_journal_units journal_include_units include_units
 emit_journal_units journal_exclude_units exclude_units
 
+# With redaction on, redact_secrets (appended after this heredoc) sits between
+# the enrichment and the multiline split.
+if [[ "${redact_sensitive}" == "true" ]]; then
+    enriched="redact_secrets"
+else
+    enriched="enrich_logs"
+fi
+
 # Add transforms section - the enrichment program lives in its own file. This
 # heredoc is unquoted so the VRL path lands; nothing below may contain a $.
 cat >> "${VECTOR_CONFIG}" << TRANSFORMS_HEADER
@@ -400,7 +408,7 @@ transforms:
   split_multiline:
     type: route
     inputs:
-      - enrich_logs
+      - ${enriched}
     route:
       multiline: '%multiline == true'
 
@@ -446,6 +454,22 @@ transforms:
         .message = truncate(msg, 50000) + " [truncated by the add-on]"
       }
 TRANSFORMS_HEADER
+
+# Provider credential formats: the betterleaks rule set as one VRL program,
+# generated outside this repo (see the header of the file) and baked into the
+# image. It is its own transform rather than part of enrich.vrl because it reads
+# .message fresh: inside enrich.vrl, .message is already known to be a string
+# and its fallible read would not compile.
+if [[ "${redact_sensitive}" == "true" ]]; then
+    cat >> "${VECTOR_CONFIG}" << 'SECRETS_TRANSFORM'
+
+  redact_secrets:
+    type: remap
+    inputs:
+      - enrich_logs
+    file: /usr/share/vector-addon/secrets.vrl
+SECRETS_TRANSFORM
+fi
 
 # Write the VRL program. Quoted heredocs so its $, \d and \s survive verbatim;
 # the two runtime values are substituted by sed afterwards, and the parts built
