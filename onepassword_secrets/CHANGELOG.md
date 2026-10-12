@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.8] - 2026-10-12
+
+### Security
+
+- Built with Go 1.27.2, which fixes GO-2026-6603, GO-2026-6605, GO-2026-6607,
+  GO-2026-6608, GO-2026-6609, GO-2026-6610, GO-2026-6611, GO-2026-6612 and
+  GO-2026-6613 in the standard library.
+
 ## [0.1.7] - 2026-10-11
 
 ### Changed
