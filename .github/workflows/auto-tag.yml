@@ -1,0 +1,163 @@
+name: Auto Release
+
+# Releases the add-ons without a tag pushed by hand, in two steps.
+#
+# A push to main that changes an add-on's config.yaml tags the version it
+# names (`<slug>/vX.Y.Z`) when that tag does not exist yet, which starts the
+# add-on's release-*.yaml: merging a version bump is the release. A version
+# older than the add-on's newest tag is not tagged, and neither is an add-on
+# with no tag at all: its first release is cut by hand.
+#
+# A dispatch with `images` (GHCR package names, e.g. "hassio-addon-vector-amd64
+# hassio-addon-vector-aarch64") opens a pull request that bumps the patch
+# version of each add-on those images belong to, with a CHANGELOG entry
+# (.github/scripts/rebuild-bump.py), and turns on auto-merge. CI on that pull
+# request is the gate, and its merge is the push above. The Supervisor only
+# offers an update for a new version, so a rebuild has to be one. The nightly
+# GHCR scan in mac-lucky/forgejo-fleet-ops dispatches it this way when a
+# rebuild alone would clear an image's findings, and finds its own runs again
+# by the run name. It dispatches `auto-tag.yml` by that name, hence the .yml.
+#
+# Both steps write with a mac-lucky-ci GitHub App token: a tag or a pull
+# request made with github.token starts no workflow.
+
+run-name: ${{ inputs.images && format('rebuild {0}', inputs.images) || '' }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*/config.yaml'
+  workflow_dispatch:
+    inputs:
+      images:
+        description: 'GHCR packages to rebuild, space-separated (hassio-addon-<slug>-<arch>)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag new versions
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          permission-contents: write
+          # GitHub can refuse an App's tag push over the workflow files the
+          # tagged commit carries unless the token may write workflows.
+          permission-workflows: write
+
+      - name: Checkout
+        # zizmor: ignore[artipacked] the tag push below authenticates with this persisted token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history and tags: each version is checked against the
+          # add-on's newest tag.
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Tag each version that has no tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for config in */config.yaml; do
+            slug="${config%/config.yaml}"
+            version=$(yq -r '.version' "$config")
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::warning::$config: version '$version' is not X.Y.Z; not tagged"
+              continue
+            fi
+            tag="${slug}/v${version}"
+            if git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
+              echo "$tag exists"
+              continue
+            fi
+            last=$(git tag --list "${slug}/v*" | grep -E "^${slug}/v[0-9]+\.[0-9]+\.[0-9]+$" | sort -V | tail -n1 || true)
+            if [ -z "$last" ]; then
+              echo "::notice::$slug has no ${slug}/v* tag yet; cut its first release by hand"
+              continue
+            fi
+            if [ "$(printf '%s\n%s\n' "$last" "$tag" | sort -V | tail -n1)" != "$tag" ]; then
+              echo "::warning::$config names $version, older than $last; not tagged"
+              continue
+            fi
+            git tag -a "$tag" -m "$tag"
+            # One tag per push: GitHub starts no workflow for a push of more
+            # than three tags at once.
+            git push origin "refs/tags/${tag}"
+            echo "pushed $tag"
+          done
+
+  bump:
+    name: Open the rebuild pull request
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout
+        # zizmor: ignore[artipacked] the branch push below authenticates with this persisted token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Tags and history: the CHANGELOG entry lists the commits since
+          # each add-on's newest tag.
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Bump the add-ons
+        id: bump
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          set -euo pipefail
+          read -r -a images <<<"$IMAGES"
+          title=$(python3 .github/scripts/rebuild-bump.py "${images[@]}")
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TITLE: ${{ steps.bump.outputs.title }}
+          IMAGES: ${{ inputs.images }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH: auto-release/rebuild
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "$TITLE"
+          # One branch for every rebuild: a dispatch while the last pull
+          # request is still open replaces its commit.
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+          printf 'Rebuild of %s, opened by [auto-tag.yml](%s).\n\nThe merge tags each new version, which publishes it.\n' \
+            "$IMAGES" "$RUN_URL" > "$RUNNER_TEMP/body.md"
+          open=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh pr edit "$open" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          gh pr merge "$BRANCH" --auto --squash
