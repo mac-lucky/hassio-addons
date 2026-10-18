@@ -3,7 +3,10 @@
   "extends": ["github>mac-lucky/actions-shared-workflows"],
   "packageRules": [
     {
+      "description": "Vector 0.x minors can break the add-on's config, so they are labelled major and wait for a person. Own group: inside the all-minor-patch batch it would make the whole batch manual",
       "matchDepNames": ["vectordotdev/vector"],
+      "groupName": "vector",
+      "groupSlug": "vector",
       "automerge": false,
       "labels": ["major"]
     },
