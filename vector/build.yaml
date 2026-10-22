@@ -1,6 +1,6 @@
 build_from:
-  amd64: ghcr.io/hassio-addons/debian-base:9.5.0
-  aarch64: ghcr.io/hassio-addons/debian-base:9.5.0
+  amd64: ghcr.io/hassio-addons/debian-base:9.5.1
+  aarch64: ghcr.io/hassio-addons/debian-base:9.5.1
 
 args:
   VECTOR_VERSION: "0.59.0"
