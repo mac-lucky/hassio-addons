@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.9.4] - 2026-10-24
+
+### Changed
+
+- chore(deps): update all non-major dependencies (#35)
+- chore(deps): update dependency go to v1.27.3 (#34)
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 0.9.3 was built.
+
 ## [0.9.3] - 2026-10-18
 
 Rebuild only, no functional change.
