@@ -82,6 +82,29 @@ func TestPreApplyBackupReturnsSlugOnSuccess(t *testing.T) {
 	}
 }
 
+func TestPreApplyBackupLeavesOutTheDatabase(t *testing.T) {
+	t.Setenv("SUPERVISOR_TOKEN", "test-token")
+	var body map[string]any
+	client := &fakeClient{
+		postResponse: jsonResponse(t, 200, map[string]any{"result": "ok", "data": map[string]any{"slug": "abc123"}}),
+		onPost: func(req *http.Request) {
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Errorf("decode request body: %v", err)
+			}
+		},
+	}
+
+	if _, err := PreApplyBackup(context.Background(), client); err != nil {
+		t.Fatalf("PreApplyBackup() error = %v, want nil", err)
+	}
+	if body["homeassistant"] != true {
+		t.Errorf("homeassistant = %v, want true", body["homeassistant"])
+	}
+	if body["homeassistant_exclude_database"] != true {
+		t.Errorf("homeassistant_exclude_database = %v, want true", body["homeassistant_exclude_database"])
+	}
+}
+
 func TestPreApplyBackupReturnsEmptyOnHTTPError(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "test-token")
 	client := &fakeClient{postResponse: jsonResponse(t, 503, map[string]any{})}

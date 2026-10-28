@@ -2672,8 +2672,11 @@ written into `/homeassistant`.
 
   Best-effort does not mean silent. That request is synchronous - it holds
   the connection open until Supervisor has finished writing the archive -
-  and `homeassistant: true` covers the whole core config directory,
-  recorder database included. On a large install that can take a while,
+  and it covers the whole core config directory except the recorder
+  database. An apply never writes the database, it is usually most of
+  the archive, and restoring an old copy would only lose the history
+  recorded since; restoring one of these backups leaves the current
+  database in place. On a large install it can still take a while,
   which is why the agent waits up to 15 minutes for it. If it fails
   anyway, the apply still completes and Rollback still works, but the
   dashboard says so in a "Pre-apply backup did not run" callout carrying

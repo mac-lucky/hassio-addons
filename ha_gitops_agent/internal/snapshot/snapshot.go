@@ -30,8 +30,7 @@ var RequestTimeout = 30 * time.Second
 
 // BackupTimeout bounds PreApplyBackup's one call. Far larger than
 // RequestTimeout: /backups/new/partial stays open while Supervisor tars
-// the whole core config, recorder database included. A var so tests can
-// shorten it.
+// the whole core config. A var so tests can shorten it.
 var BackupTimeout = 15 * time.Minute
 
 // HTTPClient is internal/httpx's Doer, aliased so this package's
@@ -63,10 +62,14 @@ func PreApplyBackup(ctx context.Context, client HTTPClient) (string, error) {
 
 	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	name := BackupNamePrefix + ts
+	// The recorder database stays out: an apply never writes it, it is
+	// most of the archive's size, and restoring an old copy would only
+	// throw away the history recorded since.
 	body, err := json.Marshal(map[string]any{
-		"name":          name,
-		"homeassistant": true,
-		"compressed":    true,
+		"name":                           name,
+		"homeassistant":                  true,
+		"homeassistant_exclude_database": true,
+		"compressed":                     true,
 	})
 	if err != nil {
 		slog.Warn("pre_apply_backup: failed to encode request body", "error", err)

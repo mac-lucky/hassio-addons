@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.9.6] - 2026-10-28
+
+### Changed
+
+- The pre-apply Supervisor backup leaves out the recorder database. An
+  apply never writes it, it was most of each backup's size (and five are
+  kept), and restoring an old copy would only lose the history recorded
+  since. Restoring one of these backups
+  keeps the database that is there.
+
 ## [0.9.5] - 2026-10-27
 
 ### Changed
