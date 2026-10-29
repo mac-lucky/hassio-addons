@@ -6,7 +6,7 @@ build_from:
 
 args:
   GO_VERSION: "1.27.3"
-  CONNECT_VERSION: "1.8.3"
+  CONNECT_VERSION: "1.8.4"
 
 labels:
   org.opencontainers.image.title: 1Password Secrets for Home Assistant
