@@ -22,7 +22,11 @@ bump rewrites config.yaml `version:`, the Dockerfile's `ARG BUILD_VERSION=`
 default where it has one, and adds a CHANGELOG entry. The entry takes over
 whatever the add-on's `[Unreleased]` section holds; without one, it lists the
 subjects of the commits that touched the add-on since its newest tag. Either
-way that is more than a rebuild, and `functional=true` says so.
+way that is more than a rebuild, and `functional=true` says so, except for
+chore commits (Renovate's dependency bumps): a chore publishes no release of
+its own, so it rides along with the rebuild and holds back no auto-merge.
+The scan dispatches a rebuild only for a fixable high or critical finding,
+so the title is a fix.
 """
 import datetime as dt
 import re
@@ -34,6 +38,7 @@ from pathlib import Path
 REGISTRY = "ghcr.io/mac-lucky/"
 VERSION_RE = re.compile(r"^(version:\s*[\"']?)(\d+\.\d+\.\d+)([\"']?\s*)$", re.M)
 BUILD_VERSION_RE = re.compile(r"^ARG BUILD_VERSION=(\S+)$", re.M)
+CHORE_RE = re.compile(r"^chore(\([^)]*\))?:")
 
 
 def run(*args):
@@ -83,7 +88,7 @@ def changelog(text, new, since, date, subjects):
     else:
         body = f"Rebuild only, no functional change.\n\n### Security\n\n{security}"
     section = f"## [{new}] - {date}\n\n{body}\n\n"
-    functional = bool(pending or subjects)
+    functional = bool(pending or any(not CHORE_RE.match(s) for s in subjects))
     if unreleased:
         return text[:unreleased.start(1)] + "\nNothing yet.\n\n" + section + text[unreleased.end(1):], functional
     first = re.search(r"^## \[", text, re.M)
@@ -156,7 +161,7 @@ def bump(slug):
     text, functional = changelog(log.read_text() if log.exists() else "# Changelog\n", new, old, date, subjects)
     log.write_text(text)
     print(f"{slug}: {old} -> {new}" + (", with unreleased changes" if functional else ""), file=sys.stderr)
-    print(f"title=chore({slug}): rebuild on current base packages as {new}")
+    print(f"title=fix({slug}): rebuild on current base packages as {new}")
     print(f"functional={'true' if functional else 'false'}")
     return 0
 

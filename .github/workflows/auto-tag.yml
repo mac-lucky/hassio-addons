@@ -17,7 +17,8 @@ name: Auto Release
 # version and adds a CHANGELOG entry, and its merge is the push above. A pure
 # rebuild turns on auto-merge, with CI as the gate. One that would also ship
 # changes merged since the last release (an [Unreleased] section, commits
-# since the tag) waits for a person to read the entry and merge it. An
+# since the tag other than chores such as Renovate's dependency bumps) waits
+# for a person to read the entry and merge it. An
 # add-on whose config.yaml names a version that was never tagged gets that
 # tag instead: its release builds fresh as well.
 #
