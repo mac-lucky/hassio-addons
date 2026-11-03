@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.9.7] - 2026-11-03
+
+Rebuild only, no functional change.
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 0.9.6 was built.
+
 ## [0.9.6] - 2026-10-28
 
 ### Changed
