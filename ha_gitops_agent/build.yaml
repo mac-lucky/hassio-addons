@@ -3,7 +3,7 @@ build_from:
   aarch64: ghcr.io/hassio-addons/base:21.0.11
 
 args:
-  GO_VERSION: "1.27.3"
+  GO_VERSION: "1.27.4"
 
 labels:
   org.opencontainers.image.title: GitOps Agent for Home Assistant

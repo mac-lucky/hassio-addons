@@ -5,7 +5,7 @@ build_from:
   aarch64: ghcr.io/hassio-addons/debian-base:9.5.2
 
 args:
-  GO_VERSION: "1.27.3"
+  GO_VERSION: "1.27.4"
   CONNECT_VERSION: "1.8.4"
 
 labels:
