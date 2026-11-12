@@ -54,7 +54,7 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/failmemory"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // idPattern is the manifest id syntax - the same [a-z0-9_]+ every other

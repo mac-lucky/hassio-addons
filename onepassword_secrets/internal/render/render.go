@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/secret"
 )
@@ -88,7 +88,7 @@ func Render(in Input) (Plan, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(in.Current)) > 0 {
 		if err := yaml.Unmarshal(in.Current, &doc); err != nil {
-			// yaml.v3's error quotes no content, only a line number.
+			// yaml/v4's error quotes no content, only a position.
 			return Plan{}, fmt.Errorf("render: the current file is not valid YAML: %w", err)
 		}
 	}
@@ -349,6 +349,10 @@ func jsonValue(dec *json.Decoder, depth int) (*yaml.Node, error) {
 		tag := "!!float"
 		if _, err := t.Int64(); err == nil {
 			tag = "!!int"
+		} else if _, err := t.Float64(); err != nil {
+			// yaml/v4 reads an out-of-range float such as 1e400 back as a
+			// string; tag it the same so a re-render compares equal.
+			tag = "!!str"
 		}
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: t.String()}, nil
 	case bool:

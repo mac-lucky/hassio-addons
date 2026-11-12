@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/difftext"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // idPattern is the manifest id syntax, shared by every item type.
@@ -64,7 +64,7 @@ var supportedHelperDomainSet = func() map[string]bool {
 }()
 
 // helperBoolFields are the fields each helper domain's storage schema reads
-// with cv.boolean. yaml.v3 keeps an unquoted YAML 1.1 on/yes/off/no as a
+// with cv.boolean. yaml/v4 keeps an unquoted YAML 1.1 on/yes/off/no as a
 // string, which cv.boolean accepts and stores as a bool - so the manifest
 // value never equals the live one and the item is re-applied every cycle.
 // Rejected at load time instead (validateHelpers).

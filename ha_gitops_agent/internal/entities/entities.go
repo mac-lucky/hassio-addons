@@ -59,7 +59,7 @@ import (
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/difftext"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // entityIDPattern validates "domain.object_id". Simpler than HA's own

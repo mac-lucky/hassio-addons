@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"strings"
 
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // KeyRegex is the set of mapping keys whose values are secrets. Anchored

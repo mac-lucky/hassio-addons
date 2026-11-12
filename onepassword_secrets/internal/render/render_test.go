@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/mac-lucky/hassio-addons/onepassword_secrets/internal/secret"
 )

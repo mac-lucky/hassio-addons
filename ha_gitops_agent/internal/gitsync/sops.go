@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // Versions before 0.9.0 could encrypt values with SOPS on their way into
