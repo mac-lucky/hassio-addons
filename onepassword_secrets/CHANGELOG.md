@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.12] - 2026-11-12
+
+### Changed
+
+- fix(deps): update module go.yaml.in/yaml/v3 to v4 (#53)
+- chore(deps): update all non-major dependencies (#52)
+- fix(deps): update all non-major dependencies (#50)
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 0.1.11 was built.
+
 ## [0.1.11] - 2026-11-07
 
 ### Changed
