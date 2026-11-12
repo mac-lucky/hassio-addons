@@ -59,7 +59,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/difftext"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/secretref"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // slugPattern validates a Supervisor add-on slug: lowercase

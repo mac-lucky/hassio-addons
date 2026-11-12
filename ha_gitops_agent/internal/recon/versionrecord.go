@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"sort"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/regapply"
 )
@@ -244,7 +244,7 @@ func renderAddonVersions(addons []regapply.InstalledAddon) ([]byte, error) {
 	buf.WriteString(addonVersionsHeader)
 	enc := yaml.NewEncoder(&buf)
 	// Two spaces, matching the hand-written manifests under gitops/;
-	// yaml.v3 would otherwise indent nested mappings by four.
+	// yaml/v4 would otherwise indent nested mappings by four.
 	enc.SetIndent(2)
 	if err := enc.Encode(root); err != nil {
 		return nil, err

@@ -1384,7 +1384,7 @@ func TestDiffTextNeverRendersARawRefPlaceholder(t *testing.T) {
 
 // --- helper boolean fields -------------------------------------------------
 
-// yaml.v3 keeps an unquoted YAML 1.1 on/yes as the string, HA's cv.boolean
+// yaml/v4 keeps an unquoted YAML 1.1 on/yes as the string, HA's cv.boolean
 // stores True, and the two never compare equal: an update every cycle.
 func TestHelperBoolFieldRejectsUnquotedYAML11Words(t *testing.T) {
 	workdir, gitops := mkGitops(t)

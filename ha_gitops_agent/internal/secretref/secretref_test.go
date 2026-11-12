@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // resolved is the value every test here plants in secrets.yaml, made
@@ -421,7 +421,7 @@ func TestResolveRefusesStructuredValues(t *testing.T) {
 	}
 }
 
-// yaml/v3 decodes a nested mapping with any non-string key as
+// yaml/v4 decodes a nested mapping with any non-string key as
 // map[any]any, and declared data is only validated as map[string]any at
 // its top two levels.
 func TestResolveMapWalksNonStringKeyedMappings(t *testing.T) {

@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Kind tells how a reference is resolved.
@@ -195,7 +195,7 @@ func Scan(o Options) (Result, error) {
 		var doc yaml.Node
 		if err := yaml.Unmarshal(data, &doc); err != nil {
 			// Not valid YAML to this parser (HA accepts a few things
-			// yaml.v3 does not). A line scan still finds tag refs.
+			// yaml/v4 does not). A line scan still finds tag refs.
 			res.Warnings = append(res.Warnings, f.rel+": not parsable as YAML, line-scanned")
 			res.Refs = append(res.Refs, lineScan(f.rel, data)...)
 			continue

@@ -33,7 +33,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // Example is a well-formed entry, quoted in the syntax errors.

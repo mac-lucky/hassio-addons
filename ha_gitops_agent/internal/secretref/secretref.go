@@ -29,7 +29,7 @@ import (
 	"sync"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/difftext"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // Scheme prefixes every reference. A declared string is a reference only
@@ -120,7 +120,7 @@ func (r *Resolver) ResolveString(s string) (string, error) {
 // the log, and a reference resolves to a credential. Malformed references
 // count too - they never resolve, so masking one costs nothing.
 //
-// map[any]any is walked alongside map[string]any because yaml/v3 decodes a
+// map[any]any is walked alongside map[string]any because yaml/v4 decodes a
 // mapping with any non-string key that way, and declared data is only
 // validated as map[string]any at its top two levels: "ports: {1883:
 // secret://x}" three levels down is the shape.

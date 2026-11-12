@@ -71,7 +71,7 @@ import (
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/registries"
 	"github.com/pmezard/go-difflib/difflib"
-	yaml "go.yaml.in/yaml/v3"
+	yaml "go.yaml.in/yaml/v4"
 )
 
 // idPattern is the manifest id syntax: lowercase letters, digits,
