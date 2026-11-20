@@ -136,7 +136,13 @@ the value changes in 1Password again.
 If Home Assistant does not answer the configuration check (it is starting,
 restarting or updating), nothing is restored: the new files stay, Home
 Assistant reads them when it starts, and the check and the remaining steps run
-at the next sync once it answers.
+at the next sync once it answers. A newer value that comes in the meantime is
+written and applied with it. If the check then rejects the change, the
+previous files are restored and Home Assistant, which may have started with
+the rejected values, is restarted (with `notify`, a restart is asked for). If
+Home Assistant does not answer for 10 minutes, the change may be what stops
+it, so the previous files are restored and the change is tried again once
+Home Assistant answers.
 
 ## Moving an existing secrets.yaml to 1Password
 

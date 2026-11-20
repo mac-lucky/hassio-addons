@@ -15,8 +15,16 @@ Nothing yet.
 - A change that landed while Home Assistant was starting, restarting or
   updating was rolled back and held until Sync now, because the configuration
   check it could not answer counted as failed. The new files now stay in place
-  and the check, reloads and restart run once Home Assistant answers again;
-  only a check that reports the configuration invalid rolls a change back.
+  and the check, reloads and restart run once Home Assistant answers again; a
+  newer value that comes in the meantime is written and applied with it. Only
+  an answer other than "valid" rolls a change back. If that answer comes
+  after Home Assistant may have started with the change, it is restarted with
+  the restored files (with `core_restart: notify`, a restart is asked for).
+  If Home Assistant does not answer for 10 minutes, the change may be what
+  stops it, so the previous files are restored and the change is tried again
+  once Home Assistant answers.
+- A change 0.1.12 held back this way is tried again after the update,
+  without Sync now.
 
 ## [0.1.12] - 2026-11-12
 

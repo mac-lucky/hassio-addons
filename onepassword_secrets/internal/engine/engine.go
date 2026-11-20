@@ -8,6 +8,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,6 +152,12 @@ func New(cfg Config, connect Connect, haClient HA, procs Processes) (*Engine, er
 	if err != nil {
 		return nil, err
 	}
+	// 0.1.12 held a change back when Core did not answer its check; that
+	// is a wait now, so such a hold is lifted and the change tried again.
+	switch strings.TrimPrefix(st.HeldBackReason, "the configuration check failed: ") {
+	case "check_config did not answer", "check_config returned HTTP 502", "check_config returned HTTP 503", "check_config returned HTTP 504":
+		st.HeldBack, st.HeldBackReason = "", ""
+	}
 	e := &Engine{
 		cfg:     cfg,
 		connect: connect,
@@ -205,7 +212,7 @@ func (e *Engine) SyncNow() {
 	go func() {
 		e.runMu.Lock()
 		if e.st.HeldBack != "" {
-			e.st.HeldBack, e.st.HeldBackReason = "", ""
+			e.st.HeldBack, e.st.HeldBackReason, e.st.HeldForCore = "", "", false
 			if err := e.st.Save(e.cfg.StatePath); err != nil {
 				slog.Warn("saving state failed", "error", err)
 			}

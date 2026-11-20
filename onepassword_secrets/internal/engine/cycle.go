@@ -174,6 +174,9 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 		case errors.As(writeErr, &rb):
 			next.Headline = "Change rolled back"
 			next.Detail = rb.Reason
+			if e.st.HeldForCore {
+				fix = "The previous values are back in place. The change is tried again once Home Assistant answers."
+			}
 		case errors.As(writeErr, &cd):
 			next.Headline = "Waiting for Home Assistant"
 			fix = "The new values are written. The change is checked and applied once Home Assistant answers again."
@@ -561,13 +564,20 @@ func (e *Engine) write(ctx context.Context, c *cycle) error {
 	now := e.cfg.Now().UTC()
 	sig := e.changeSignature(c)
 	if sig != "" && sig == e.st.HeldBack {
-		c.problems = append(c.problems, Problem{
-			Severity: "error",
-			Title:    "Update held back",
-			Detail:   "The last attempt to apply these values failed and was rolled back: " + e.st.HeldBackReason,
-			Fix:      "Fix the cause and press Sync now, or change the value in 1Password.",
-		})
-		return nil
+		if !e.st.HeldForCore || !e.ha.Probe(ctx) {
+			fix := "Fix the cause and press Sync now, or change the value in 1Password."
+			if e.st.HeldForCore {
+				fix = "It is tried again once Home Assistant answers."
+			}
+			c.problems = append(c.problems, Problem{
+				Severity: "error",
+				Title:    "Update held back",
+				Detail:   "The last attempt to apply these values failed and was rolled back: " + e.st.HeldBackReason,
+				Fix:      fix,
+			})
+			return nil
+		}
+		e.st.HeldBack, e.st.HeldBackReason, e.st.HeldForCore = "", "", false
 	}
 
 	var todo []*fileJob

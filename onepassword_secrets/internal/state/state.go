@@ -56,6 +56,9 @@ type State struct {
 	// value. HeldBackReason says why, in words safe to show.
 	HeldBack       string `json:"held_back,omitempty"`
 	HeldBackReason string `json:"held_back_reason,omitempty"`
+	// HeldForCore marks a hold made because Core did not answer: it lifts
+	// by itself once Core answers again.
+	HeldForCore bool `json:"held_for_core,omitempty"`
 }
 
 // PendingRefresh is a change in flight.
@@ -73,6 +76,9 @@ type PendingRefresh struct {
 	// Before is the state as it was before the write.
 	Before Snapshot  `json:"before"`
 	At     time.Time `json:"at"`
+	// WaitingSince is when Core first did not answer the change's
+	// configuration check; zero once it gave a verdict.
+	WaitingSince time.Time `json:"waiting_since,omitzero"`
 }
 
 // Keys are every changed key, sorted, once.

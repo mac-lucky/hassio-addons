@@ -528,7 +528,8 @@ func TestRestartFailureRollsBackAndHoldsBack(t *testing.T) {
 func TestCheckConfigFailureRollsBack(t *testing.T) {
 	h := newHarness(t, nil)
 	h.sync()
-	h.ha.checkOK = false
+	// An error from Core itself is no "valid": it fails closed.
+	h.ha.checkOK, h.ha.checkReason = false, "check_config returned HTTP 500"
 	h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": "SENTINEL-notify-2"})
 	sentinels = append(sentinels, "SENTINEL-notify-2")
 	h.sync()
@@ -538,8 +539,8 @@ func TestCheckConfigFailureRollsBack(t *testing.T) {
 	if strings.Contains(h.ha.callList(), "restart_core") {
 		t.Fatal("restarted despite a failed check")
 	}
-	if h.engine.st.HeldBack == "" || h.engine.st.Pending != nil {
-		t.Fatalf("held back %q, pending %+v", h.engine.st.HeldBack, h.engine.st.Pending)
+	if !strings.HasSuffix(h.engine.st.HeldBackReason, "check_config returned HTTP 500") || h.engine.st.Pending != nil {
+		t.Fatalf("held back %q, pending %+v", h.engine.st.HeldBackReason, h.engine.st.Pending)
 	}
 	h.ha.reset()
 	if st := h.sync(); strings.Contains(h.ha.callList(), "check_config") || !strings.Contains(fmt.Sprint(st.Problems), "Update held back") {
@@ -565,7 +566,7 @@ func TestCoreDownKeepsChangePending(t *testing.T) {
 					t.Fatalf("rolled back while Core was down: %v", got)
 				}
 				p := h.engine.st.Pending
-				if h.engine.st.HeldBack != "" || p == nil || p.Stage != "all" {
+				if h.engine.st.HeldBack != "" || p == nil || p.Stage != "all" || p.WaitingSince.IsZero() {
 					t.Fatalf("held back %q, pending %+v", h.engine.st.HeldBack, p)
 				}
 				if st.State != StateError || st.Headline != "Waiting for Home Assistant" || strings.Contains(h.ha.callList(), "restart_core") {
@@ -585,8 +586,153 @@ func TestCoreDownKeepsChangePending(t *testing.T) {
 			if h.engine.st.Pending != nil || st.State == StateError || h.read("secrets.yaml")["notify_key"] != value {
 				t.Fatalf("not applied: pending %+v, %s %q", h.engine.st.Pending, st.State, st.Headline)
 			}
+			for _, a := range h.engine.History(1000) {
+				if a.Title == "Finishing an interrupted change" {
+					t.Fatal("a wait for Core was logged as an interrupted change")
+				}
+			}
 			h.assertNoLeak()
 		})
+	}
+}
+
+// Core started on a change it did not answer the check for, and the check
+// then rejects it: the files are restored and Core is made to drop the
+// rejected values (restarted, or a restart asked for in notify mode).
+func TestCoreDownThenInvalidRestoresCore(t *testing.T) {
+	for _, mode := range []string{"auto", "notify"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newHarness(t, func(o *options.Options) { o.CoreRestart = mode })
+			h.sync()
+			h.ha.checkErr = errors.New("check_config returned HTTP 502")
+			value := "SENTINEL-notify-booted-" + mode
+			sentinels = append(sentinels, value)
+			h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": value})
+			h.sync()
+			// Core is back (it restarted, so the pushed sensor is gone) and
+			// rejects the new values.
+			h.ha.checkErr, h.ha.checkOK, h.ha.coreRestarted = nil, false, true
+			h.ha.reset()
+			st := h.sync()
+			if got := h.read("secrets.yaml")["notify_key"]; got != sNotif || h.engine.st.HeldBack == "" {
+				t.Fatalf("not rolled back and held: %v, held %q", got, h.engine.st.HeldBack)
+			}
+			calls := h.ha.callList()
+			if mode == "auto" && (!strings.Contains(calls, "restart_core") || !strings.Contains(calls, "wait_healthy")) {
+				t.Fatalf("Core not restarted onto the restored files:\n%s", calls)
+			}
+			if mode == "notify" && (strings.Contains(calls, "restart_core") || len(st.RestartPending) == 0) {
+				t.Fatalf("no restart asked for: pending %v, calls:\n%s", st.RestartPending, calls)
+			}
+			h.assertNoLeak()
+		})
+	}
+}
+
+// A newer value that comes while Core does not answer replaces the waiting
+// change: Core starts on the newest values and is refreshed once, and a
+// rollback still restores the files from before the first change.
+func TestCoreDownNewerValueSupersedes(t *testing.T) {
+	a, b := "SENTINEL-notify-a", "SENTINEL-notify-b"
+	sentinels = append(sentinels, a, b)
+	for _, valid := range []bool{true, false} {
+		t.Run(fmt.Sprint("valid=", valid), func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.sync()
+			h.ha.checkErr = errors.New("check_config did not answer")
+			h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": a})
+			h.sync()
+			h.connect.set("i5", "homeassistant notify", 3, map[string]string{"notify_key": b})
+			h.sync()
+			if got := h.read("secrets.yaml")["notify_key"]; got != b || h.engine.st.Pending == nil {
+				t.Fatalf("newer value not written while Core was down: %v, pending %+v", got, h.engine.st.Pending)
+			}
+			h.ha.checkErr, h.ha.checkOK = nil, valid
+			h.ha.reset()
+			h.sync()
+			want := b
+			if !valid {
+				want = sNotif
+			}
+			if got := h.read("secrets.yaml")["notify_key"]; got != want || h.engine.st.Pending != nil {
+				t.Fatalf("notify_key = %v, want %v; pending %+v", got, want, h.engine.st.Pending)
+			}
+			if n := strings.Count(h.ha.callList(), "restart_core"); n != 1 {
+				t.Fatalf("%d Core restarts, want 1:\n%s", n, h.ha.callList())
+			}
+			h.assertNoLeak()
+		})
+	}
+}
+
+// Past coreDownTimeout the waiting change may be what keeps Core from
+// answering, so the files are restored. It is tried again once Core
+// answers; if Core answers and only its check does not, it is held like a
+// failed check.
+func TestCoreDownTooLongRollsBack(t *testing.T) {
+	value := "SENTINEL-notify-long"
+	sentinels = append(sentinels, value)
+	waitTooLong := func(h *harness) {
+		h.sync()
+		h.ha.checkErr = errors.New("check_config returned HTTP 502")
+		h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": value})
+		h.sync()
+		h.engine.st.Pending.WaitingSince = time.Now().Add(-coreDownTimeout - time.Minute)
+	}
+
+	h := newHarness(t, nil)
+	waitTooLong(h)
+	for range 2 {
+		h.ha.up = false // nothing answers, not even the API root
+		st := h.sync()
+		if got := h.read("secrets.yaml")["notify_key"]; got != sNotif || !h.engine.st.HeldForCore || h.engine.st.Pending != nil || st.State != StateError {
+			t.Fatalf("not rolled back and held for Core: %v, held %q %v, pending %+v", got, h.engine.st.HeldBack, h.engine.st.HeldForCore, h.engine.st.Pending)
+		}
+	}
+	h.ha.checkErr = nil
+	h.ha.reset()
+	h.sync()
+	if got := h.read("secrets.yaml")["notify_key"]; got != value || h.engine.st.HeldBack != "" || !strings.Contains(h.ha.callList(), "restart_core") {
+		t.Fatalf("not tried again once Core answered: %v, held %q, calls:\n%s", got, h.engine.st.HeldBack, h.ha.callList())
+	}
+	h.assertNoLeak()
+
+	h2 := newHarness(t, nil)
+	waitTooLong(h2)
+	h2.sync() // the API root answers, check_config still does not
+	if got := h2.read("secrets.yaml")["notify_key"]; got != sNotif || h2.engine.st.HeldBack == "" || h2.engine.st.HeldForCore {
+		t.Fatalf("not held like a failed check: %v, held %q %v", got, h2.engine.st.HeldBack, h2.engine.st.HeldForCore)
+	}
+	h2.ha.reset()
+	h2.sync()
+	if strings.Contains(h2.ha.callList(), "check_config") {
+		t.Fatalf("held change retried:\n%s", h2.ha.callList())
+	}
+	h2.assertNoLeak()
+}
+
+// A hold 0.1.12 made because Core did not answer is lifted on start; a hold
+// for a check Core failed stays.
+func TestOlderCoreDownHoldIsLifted(t *testing.T) {
+	h := newHarness(t, nil)
+	for reason, lifted := range map[string]bool{
+		"the configuration check failed: check_config returned HTTP 502":                              true,
+		"the configuration check failed: check_config did not answer":                                 true,
+		"the configuration check failed: check_config returned HTTP 500":                              false,
+		"the configuration check failed: Invalid config for 'mqtt' (details in Home Assistant's log)": false,
+		"Home Assistant did not answer the configuration check for 10 minutes":                        false,
+	} {
+		h.engine.st.HeldBack, h.engine.st.HeldBackReason = "sig", reason
+		if err := h.engine.st.Save(h.engine.cfg.StatePath); err != nil {
+			t.Fatal(err)
+		}
+		e2, err := New(h.engine.cfg, h.connect, h.ha, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (e2.st.HeldBack == "") != lifted {
+			t.Errorf("%q: held %q, want lifted %v", reason, e2.st.HeldBack, lifted)
+		}
 	}
 }
 

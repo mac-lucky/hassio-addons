@@ -139,13 +139,33 @@ func safeErr(err error) string {
 	return err.Error()
 }
 
-// resumePending finishes a change a restart interrupted.
+// safeReason keeps a check_config failure to its locations (ha's client
+// already does; this holds for any HA implementation the engine gets).
+func safeReason(reason string) string {
+	if strings.HasPrefix(reason, "check_config ") {
+		return reason
+	}
+	return ha.SafeCheckReason(reason)
+}
+
+// resumePending finishes a change a restart interrupted, or one waiting for
+// Core to answer its configuration check.
 func (e *Engine) resumePending(ctx context.Context, c *cycle) error {
 	p := e.st.Pending
 	if p == nil {
 		return nil
 	}
-	e.record(state.KindInfo, "Finishing an interrupted change", "", p.Keys())
+	if p.WaitingSince.IsZero() {
+		e.record(state.KindInfo, "Finishing an interrupted change", "", p.Keys())
+	} else if e.changeSignature(c) != "" {
+		// Newer values came while Core did not answer: put the files back
+		// as they were and let write() apply everything as one change, so
+		// Core starts on the newest values and is refreshed once.
+		e.rollback(p.Written, p.Before)
+		c.jobs, c.routed = nil, nil
+		e.plan(c)
+		return nil
+	}
 	return e.refresh(ctx, c, p)
 }
 
@@ -163,18 +183,18 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 	if p.Stage != "addons" {
 		var restartFor []string
 		if len(who.domains) > 0 {
-			if err := e.check(ctx, p); err != nil {
+			domains := make([]string, 0, len(who.domains))
+			for d := range who.domains {
+				domains = append(domains, d)
+			}
+			sort.Strings(domains)
+			if err := e.check(ctx, p, domains); err != nil {
 				return err
 			}
 			services, err := e.ha.Services(ctx)
 			if err != nil {
 				services = nil
 			}
-			domains := make([]string, 0, len(who.domains))
-			for d := range who.domains {
-				domains = append(domains, d)
-			}
-			sort.Strings(domains)
 			for _, d := range domains {
 				service := "reload"
 				if d == "homeassistant" {
@@ -283,34 +303,96 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 	return nil
 }
 
-// check runs check_config on a written change. Only an answered "invalid"
-// rolls it back and holds it. With no verdict (Core starting, restarting or
-// updating) the files and st.Pending stay as they are: Core reads the new
-// values when it starts, and resumePending checks and applies the change on
-// a later cycle.
-func (e *Engine) check(ctx context.Context, p *state.PendingRefresh) error {
+// check runs check_config on a written change; domains use its keys. Only
+// an answer other than "valid" rolls it back and holds it. With no answer
+// (Core starting, restarting or updating) the files and st.Pending stay as
+// they are: Core reads the new values when it starts, and resumePending
+// checks and applies the change on a later cycle (waitForCore bounds that).
+func (e *Engine) check(ctx context.Context, p *state.PendingRefresh, domains []string) error {
 	e.setPhase("Validating the configuration")
 	ok, reason, err := e.ha.CheckConfig(ctx)
 	if err != nil {
-		e.setPhase("")
-		return &CoreDownError{Reason: safeErr(err)}
+		return e.waitForCore(ctx, p, domains, err)
 	}
 	if !ok {
-		reason = ha.SafeCheckReason(reason)
-		return e.fail2(ctx, p, "the configuration check failed: "+reason,
+		reason = safeReason(reason)
+		return e.fail2(ctx, p, domains, "the configuration check failed: "+reason,
 			"Home Assistant's configuration check failed with the new values, so the secrets files were restored.\n\n"+reason)
 	}
+	p.WaitingSince = time.Time{}
 	return nil
 }
 
-// fail2 rolls a change back, holds it, and says so.
-func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, reason, message string) error {
+// coreDownTimeout is how long a written change waits for Core to answer its
+// configuration check: as long as a guarded restart waits for Core.
+const coreDownTimeout = 10 * time.Minute
+
+// waitForCore keeps a change Core did not answer the check for pending,
+// with its files. Past coreDownTimeout the change itself may be what keeps
+// Core from answering (an http: value), so the previous files are restored
+// and the change is held until Core answers again; if Core answers and only
+// its check does not, that counts as a failed check.
+func (e *Engine) waitForCore(ctx context.Context, p *state.PendingRefresh, domains []string, err error) error {
+	e.setPhase("")
+	if p.WaitingSince.IsZero() {
+		p.WaitingSince = e.cfg.Now()
+		e.st.Pending = p
+		if err := e.st.Save(e.cfg.StatePath); err != nil {
+			e.record(state.KindError, "Saving state failed", err.Error(), nil)
+		}
+	}
+	if e.cfg.Now().Sub(p.WaitingSince) < coreDownTimeout {
+		return &CoreDownError{Reason: safeErr(err)}
+	}
+	why := fmt.Sprintf("Home Assistant did not answer the configuration check for %d minutes", int(coreDownTimeout/time.Minute))
+	if e.ha.Probe(ctx) {
+		return e.fail2(ctx, p, domains, why, why+", so the secrets files were restored.")
+	}
 	e.rollback(p.Written, p.Before)
-	e.holdBack(p.Signature, reason)
+	e.holdBack(p.Signature, why, true)
+	e.record(state.KindError, "Rolled back: "+why, "The change is tried again once Home Assistant answers.", p.Keys())
+	return &RolledBackError{Reason: why}
+}
+
+// fail2 rolls a change back, holds it, and says so. Core may have started
+// on the files of a change that waited for it, so it is then made to read
+// the restored ones.
+func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, domains []string, reason, message string) error {
+	waited := !p.WaitingSince.IsZero()
+	e.rollback(p.Written, p.Before)
+	e.holdBack(p.Signature, reason, false)
 	e.record(state.KindError, "Rolled back: "+reason, "", p.Keys())
+	if waited {
+		message += "\n\n" + e.restartOntoRestored(ctx, p.Keys(), domains)
+	}
 	e.notify(ctx, notifyError, "1Password Secrets: change rolled back", message)
 	e.setPhase("")
 	return &RolledBackError{Reason: reason}
+}
+
+// restartOntoRestored restarts Core after a rollback, or with core_restart
+// notify asks for the restart, so it drops the rejected values it may have
+// started with while it did not answer. Returns what it did, for the
+// notification.
+func (e *Engine) restartOntoRestored(ctx context.Context, keys, domains []string) string {
+	const may = "Home Assistant may have started with the rejected values while it was not answering"
+	if e.cfg.Options.CoreRestart != "auto" {
+		e.addPending(domains)
+		// The sensor Core lost in that restart must not count as the
+		// restart asked for here (noticeOutsideRestart).
+		e.lastPublished, e.publishedAt = "", time.Time{}
+		e.record(state.KindRestart, "Home Assistant needs a restart", "to drop the rejected values", keys)
+		return may + ". Restart it to load the restored ones."
+	}
+	e.setPhase("Restarting Home Assistant")
+	e.record(state.KindRestart, "Restarting Home Assistant", "to drop the rejected values", keys)
+	if ok, why := e.restartAndWait(ctx); !ok {
+		e.record(state.KindError, why, "", keys)
+		return may + ", and restarting it failed (" + why + "); check Home Assistant's log."
+	}
+	e.clearPending()
+	e.record(state.KindRefresh, "Home Assistant is back", "", keys)
+	return may + ", so it was restarted with the restored ones."
 }
 
 // guardedRestart restarts Core after a config check, waits for it to go
@@ -318,7 +400,7 @@ func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, reason, mes
 // restarts again.
 func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, reasons []string) error {
 	keys := p.Keys()
-	if err := e.check(ctx, p); err != nil {
+	if err := e.check(ctx, p, reasons); err != nil {
 		return err
 	}
 	e.setPhase("Restarting Home Assistant")
@@ -330,7 +412,7 @@ func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, re
 		return nil
 	}
 	e.rollback(p.Written, p.Before)
-	e.holdBack(p.Signature, why)
+	e.holdBack(p.Signature, why, false)
 	e.record(state.KindError, "Rolled back: "+why, "Restarting again with the previous values.", keys)
 	recovered, why2 := e.restartAndWait(ctx)
 	msg := "Home Assistant did not come back after a restart with the new secret values (" + why + "), so the previous secrets files were restored and it was restarted again."
@@ -385,7 +467,7 @@ func (e *Engine) RestartCoreNow(ctx context.Context) error {
 	e.setPhase("Validating the configuration")
 	defer e.setPhase("")
 	if ok, reason, err := e.ha.CheckConfig(ctx); err != nil || !ok {
-		reason = ha.SafeCheckReason(reason)
+		reason = safeReason(reason)
 		if err != nil {
 			reason = safeErr(err)
 		}
@@ -404,10 +486,12 @@ func (e *Engine) RestartCoreNow(ctx context.Context) error {
 	return nil
 }
 
-// holdBack remembers a failed change so it is not retried every poll.
-func (e *Engine) holdBack(signature, reason string) {
+// holdBack remembers a failed change so it is not retried every poll;
+// untilCore lifts the hold once Core answers again.
+func (e *Engine) holdBack(signature, reason string, untilCore bool) {
 	e.st.HeldBack = signature
 	e.st.HeldBackReason = reason
+	e.st.HeldForCore = untilCore
 	if err := e.st.Save(e.cfg.StatePath); err != nil {
 		e.record(state.KindError, "Saving state failed", err.Error(), nil)
 	}
