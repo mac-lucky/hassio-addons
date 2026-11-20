@@ -29,7 +29,7 @@ type Connect interface {
 
 // HA is the subset of *ha.Client the engine uses.
 type HA interface {
-	CheckConfig(ctx context.Context) (bool, string)
+	CheckConfig(ctx context.Context) (valid bool, reason string, err error)
 	Services(ctx context.Context) (map[string]map[string]bool, error)
 	CallService(ctx context.Context, domain, service string, data map[string]any) error
 	Probe(ctx context.Context) bool

@@ -133,6 +133,11 @@ the restart, the previous files are restored (and Home Assistant restarted
 again), and the same change is not tried again until you press **Sync now** or
 the value changes in 1Password again.
 
+If Home Assistant does not answer the configuration check (it is starting,
+restarting or updating), nothing is restored: the new files stay, Home
+Assistant reads them when it starts, and the check and the remaining steps run
+at the next sync once it answers.
+
 ## Moving an existing secrets.yaml to 1Password
 
 1. Turn on **Dry run** and start the add-on.

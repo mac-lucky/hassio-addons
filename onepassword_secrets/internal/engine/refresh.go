@@ -29,6 +29,14 @@ type RolledBackError struct{ Reason string }
 
 func (e *RolledBackError) Error() string { return "change rolled back: " + e.Reason }
 
+// CoreDownError reports a written change Home Assistant gave no
+// configuration check verdict on: it stays pending and is retried.
+type CoreDownError struct{ Reason string }
+
+func (e *CoreDownError) Error() string {
+	return "Home Assistant did not answer the configuration check (" + e.Reason + ")"
+}
+
 // EventChanged is fired after a change is applied.
 const EventChanged = "onepassword_secrets_changed"
 
@@ -131,15 +139,6 @@ func safeErr(err error) string {
 	return err.Error()
 }
 
-// safeReason keeps a check_config failure to its locations (ha's client
-// already does; this holds for any HA implementation the engine gets).
-func safeReason(reason string) string {
-	if strings.HasPrefix(reason, "check_config ") {
-		return reason
-	}
-	return ha.SafeCheckReason(reason)
-}
-
 // resumePending finishes a change a restart interrupted.
 func (e *Engine) resumePending(ctx context.Context, c *cycle) error {
 	p := e.st.Pending
@@ -164,11 +163,8 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 	if p.Stage != "addons" {
 		var restartFor []string
 		if len(who.domains) > 0 {
-			e.setPhase("Validating the configuration")
-			if ok, reason := e.ha.CheckConfig(ctx); !ok {
-				reason = safeReason(reason)
-				return e.fail2(ctx, p, "the configuration check failed: "+reason,
-					"Home Assistant's configuration check failed with the new values, so the secrets files were restored.\n\n"+reason)
+			if err := e.check(ctx, p); err != nil {
+				return err
 			}
 			services, err := e.ha.Services(ctx)
 			if err != nil {
@@ -287,6 +283,26 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 	return nil
 }
 
+// check runs check_config on a written change. Only an answered "invalid"
+// rolls it back and holds it. With no verdict (Core starting, restarting or
+// updating) the files and st.Pending stay as they are: Core reads the new
+// values when it starts, and resumePending checks and applies the change on
+// a later cycle.
+func (e *Engine) check(ctx context.Context, p *state.PendingRefresh) error {
+	e.setPhase("Validating the configuration")
+	ok, reason, err := e.ha.CheckConfig(ctx)
+	if err != nil {
+		e.setPhase("")
+		return &CoreDownError{Reason: safeErr(err)}
+	}
+	if !ok {
+		reason = ha.SafeCheckReason(reason)
+		return e.fail2(ctx, p, "the configuration check failed: "+reason,
+			"Home Assistant's configuration check failed with the new values, so the secrets files were restored.\n\n"+reason)
+	}
+	return nil
+}
+
 // fail2 rolls a change back, holds it, and says so.
 func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, reason, message string) error {
 	e.rollback(p.Written, p.Before)
@@ -302,11 +318,8 @@ func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, reason, mes
 // restarts again.
 func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, reasons []string) error {
 	keys := p.Keys()
-	e.setPhase("Validating the configuration")
-	if ok, reason := e.ha.CheckConfig(ctx); !ok {
-		reason = safeReason(reason)
-		return e.fail2(ctx, p, "the configuration check failed: "+reason,
-			"Home Assistant's configuration check failed with the new values, so the secrets files were restored.\n\n"+reason)
+	if err := e.check(ctx, p); err != nil {
+		return err
 	}
 	e.setPhase("Restarting Home Assistant")
 	e.record(state.KindRestart, "Restarting Home Assistant", "for "+strings.Join(reasons, ", "), keys)
@@ -371,8 +384,11 @@ func (e *Engine) RestartCoreNow(ctx context.Context) error {
 	defer e.setSyncing(false)
 	e.setPhase("Validating the configuration")
 	defer e.setPhase("")
-	if ok, reason := e.ha.CheckConfig(ctx); !ok {
-		reason = safeReason(reason)
+	if ok, reason, err := e.ha.CheckConfig(ctx); err != nil || !ok {
+		reason = ha.SafeCheckReason(reason)
+		if err != nil {
+			reason = safeErr(err)
+		}
 		e.record(state.KindError, "Restart refused: the configuration check failed", reason, nil)
 		return fmt.Errorf("configuration check failed: %s", reason)
 	}

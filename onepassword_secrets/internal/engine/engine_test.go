@@ -125,6 +125,8 @@ type fakeHA struct {
 	restartErr    error
 	coreRestarted bool
 	checkReason   string
+	// checkErr is CheckConfig with no verdict: Core down or not answering.
+	checkErr error
 }
 
 func newFakeHA() *fakeHA {
@@ -169,15 +171,18 @@ func (h *fakeHA) reset() {
 	h.calls = nil
 }
 
-func (h *fakeHA) CheckConfig(context.Context) (bool, string) {
+func (h *fakeHA) CheckConfig(context.Context) (bool, string, error) {
 	h.rec("check_config", nil)
+	if h.checkErr != nil {
+		return false, "", h.checkErr
+	}
 	if h.checkOK {
-		return true, ""
+		return true, "", nil
 	}
 	if h.checkReason != "" {
-		return false, h.checkReason
+		return false, h.checkReason, nil
 	}
-	return false, "Invalid config for 'xiaomi_miio' at configuration.yaml, line 2: got 'x'"
+	return false, "Invalid config for 'xiaomi_miio' at configuration.yaml, line 2: got 'x'", nil
 }
 
 func (h *fakeHA) Services(context.Context) (map[string]map[string]bool, error) {
@@ -533,7 +538,56 @@ func TestCheckConfigFailureRollsBack(t *testing.T) {
 	if strings.Contains(h.ha.callList(), "restart_core") {
 		t.Fatal("restarted despite a failed check")
 	}
+	if h.engine.st.HeldBack == "" || h.engine.st.Pending != nil {
+		t.Fatalf("held back %q, pending %+v", h.engine.st.HeldBack, h.engine.st.Pending)
+	}
+	h.ha.reset()
+	if st := h.sync(); strings.Contains(h.ha.callList(), "check_config") || !strings.Contains(fmt.Sprint(st.Problems), "Update held back") {
+		t.Fatalf("held-back change retried: %+v\n%s", st.Problems, h.ha.callList())
+	}
 	h.assertNoLeak()
+}
+
+// A check Core gives no verdict on (down, booting, restarting) keeps the
+// new files and retries; only an answered "invalid" rolls back.
+func TestCoreDownKeepsChangePending(t *testing.T) {
+	for i, down := range []error{errors.New("check_config did not answer"), errors.New("check_config returned HTTP 502")} {
+		t.Run(down.Error(), func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.sync()
+			h.ha.checkErr = down
+			value := fmt.Sprintf("SENTINEL-notify-down-%d", i)
+			sentinels = append(sentinels, value)
+			h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": value})
+			for range 2 {
+				st := h.sync()
+				if got := h.read("secrets.yaml")["notify_key"]; got != value {
+					t.Fatalf("rolled back while Core was down: %v", got)
+				}
+				p := h.engine.st.Pending
+				if h.engine.st.HeldBack != "" || p == nil || p.Stage != "all" {
+					t.Fatalf("held back %q, pending %+v", h.engine.st.HeldBack, p)
+				}
+				if st.State != StateError || st.Headline != "Waiting for Home Assistant" || strings.Contains(h.ha.callList(), "restart_core") {
+					t.Fatalf("status %s %q, calls:\n%s", st.State, st.Headline, h.ha.callList())
+				}
+			}
+
+			h.ha.checkErr = nil
+			h.ha.reset()
+			st := h.sync()
+			calls := h.ha.callList()
+			for _, want := range []string{"check_config", "restart_core", "event onepassword_secrets_changed"} {
+				if !strings.Contains(calls, want) {
+					t.Fatalf("missing %q once Core answered:\n%s", want, calls)
+				}
+			}
+			if h.engine.st.Pending != nil || st.State == StateError || h.read("secrets.yaml")["notify_key"] != value {
+				t.Fatalf("not applied: pending %+v, %s %q", h.engine.st.Pending, st.State, st.Headline)
+			}
+			h.assertNoLeak()
+		})
+	}
 }
 
 func TestNotifyModeAndDryRun(t *testing.T) {

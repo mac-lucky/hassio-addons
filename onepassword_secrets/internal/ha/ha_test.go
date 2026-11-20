@@ -1,6 +1,10 @@
 package ha
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -19,5 +23,37 @@ func TestSafeCheckReasonDropsValues(t *testing.T) {
 	}
 	if got := SafeCheckReason("Platform error: SENTINEL-x"); strings.Contains(got, "SENTINEL") {
 		t.Fatalf("unknown shape leaked: %s", got)
+	}
+}
+
+// No answer and a proxy error are "no verdict" (err), never "invalid".
+func TestCheckConfigNoAnswerIsNotInvalid(t *testing.T) {
+	answer := func(code int, body string) *Client {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w, body)
+		}))
+		t.Cleanup(srv.Close)
+		return &Client{Base: srv.URL}
+	}
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	invalid := `{"result":"invalid","errors":"Invalid config for 'mqtt' at configuration.yaml, line 2: got 'SENTINEL'"}`
+	for _, tc := range []struct {
+		name     string
+		c        *Client
+		valid    bool
+		answered bool
+		reason   string
+	}{
+		{"valid", answer(200, `{"result":"valid","errors":null}`), true, true, ""},
+		{"invalid", answer(200, invalid), false, true, "Invalid config for 'mqtt' at configuration.yaml, line 2 (details in Home Assistant's log)"},
+		{"proxy 502", answer(502, "Bad Gateway"), false, false, ""},
+		{"no answer", &Client{Base: gone.URL}, false, false, ""},
+	} {
+		valid, reason, err := tc.c.CheckConfig(context.Background())
+		if valid != tc.valid || (err == nil) != tc.answered || reason != tc.reason {
+			t.Errorf("%s: valid %v reason %q err %v", tc.name, valid, reason, err)
+		}
 	}
 }

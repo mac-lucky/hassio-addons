@@ -95,12 +95,15 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("%s returned HTTP %d%s", e.Path, e.Code, httperr.SuffixOf(e.Detail))
 }
 
-// CheckConfig asks Core to validate its configuration. Fails closed: any
-// error is "invalid". The reason is reduced to where the problem is
-// ("Invalid config for 'mqtt' at configuration.yaml, line 12"): Core's full
-// text quotes the offending value, and with !secret resolved that value can
-// be a secret, which must not reach a log, a notification or the panel.
-func (c *Client) CheckConfig(ctx context.Context) (valid bool, reason string) {
+// CheckConfig asks Core to validate its configuration. err is set when Core
+// gave no verdict (no connection, a timeout, or a non-2xx answer such as
+// the 502 Supervisor's proxy returns while Core starts or restarts).
+// Otherwise valid is the verdict, and the reason for an invalid one is
+// reduced to where the problem is ("Invalid config for 'mqtt' at
+// configuration.yaml, line 12"): Core's full text quotes the offending
+// value, and with !secret resolved that value can be a secret, which must
+// not reach a log, a notification or the panel.
+func (c *Client) CheckConfig(ctx context.Context) (valid bool, reason string, err error) {
 	var out struct {
 		Result string `json:"result"`
 		Errors any    `json:"errors"`
@@ -108,15 +111,15 @@ func (c *Client) CheckConfig(ctx context.Context) (valid bool, reason string) {
 	if err := c.do(ctx, http.MethodPost, "/core/api/config/core/check_config", nil, checkConfigTimeout, &out); err != nil {
 		var se *StatusError
 		if errors.As(err, &se) {
-			return false, fmt.Sprintf("check_config returned HTTP %d", se.Code)
+			return false, "", fmt.Errorf("check_config returned HTTP %d", se.Code)
 		}
-		return false, "check_config did not answer"
+		return false, "", errors.New("check_config did not answer")
 	}
 	if out.Result == "valid" {
-		return true, ""
+		return true, "", nil
 	}
 	s, _ := out.Errors.(string)
-	return false, SafeCheckReason(s)
+	return false, SafeCheckReason(s), nil
 }
 
 // invalidAt matches the location part of Core's config errors.

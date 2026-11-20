@@ -167,12 +167,18 @@ func (e *Engine) SyncOnce(ctx context.Context) {
 		next.State = StateError
 		next.Headline = "Could not write the secrets files"
 		next.Detail = writeErr.Error()
+		fix := "The previous values are back in place. Fix the cause, then press Sync now."
 		var rb *RolledBackError
-		if errors.As(writeErr, &rb) {
+		var cd *CoreDownError
+		switch {
+		case errors.As(writeErr, &rb):
 			next.Headline = "Change rolled back"
 			next.Detail = rb.Reason
+		case errors.As(writeErr, &cd):
+			next.Headline = "Waiting for Home Assistant"
+			fix = "The new values are written. The change is checked and applied once Home Assistant answers again."
 		}
-		next.Problems = append([]Problem{{Severity: "error", Title: next.Headline, Detail: next.Detail, Fix: "The previous values are back in place. Fix the cause, then press Sync now."}}, next.Problems...)
+		next.Problems = append([]Problem{{Severity: "error", Title: next.Headline, Detail: next.Detail, Fix: fix}}, next.Problems...)
 	}
 	e.publish(ctx, next)
 }

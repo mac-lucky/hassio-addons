@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## [0.1.13] - 2026-11-20
+
+### Fixed
+
+- A change that landed while Home Assistant was starting, restarting or
+  updating was rolled back and held until Sync now, because the configuration
+  check it could not answer counted as failed. The new files now stay in place
+  and the check, reloads and restart run once Home Assistant answers again;
+  only a check that reports the configuration invalid rolls a change back.
+
 ## [0.1.12] - 2026-11-12
 
 ### Changed
