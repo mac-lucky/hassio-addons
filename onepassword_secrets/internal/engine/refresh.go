@@ -197,10 +197,7 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 				services = nil
 			}
 			for _, d := range domains {
-				service := "reload"
-				if d == "homeassistant" {
-					service = "reload_core_config"
-				}
+				service := reloadService(d)
 				if services == nil || !services[d][service] {
 					restartFor = append(restartFor, d)
 					continue
@@ -219,7 +216,7 @@ func (e *Engine) refresh(ctx context.Context, c *cycle, p *state.PendingRefresh)
 		}
 		if len(restartFor) > 0 {
 			if e.cfg.Options.CoreRestart == "auto" {
-				if err := e.guardedRestart(ctx, p, restartFor); err != nil {
+				if err := e.guardedRestart(ctx, p, restartFor, reloaded); err != nil {
 					return err
 				}
 				coreRestarted = true
@@ -336,6 +333,11 @@ const coreDownTimeout = 10 * time.Minute
 // check does not, that counts as a failed check.
 func (e *Engine) waitForCore(ctx context.Context, p *state.PendingRefresh, domains []string, err error) error {
 	e.setPhase("")
+	if ctx.Err() != nil {
+		// This add-on is stopping: the change stays pending as it is, and a
+		// dead probe says nothing about Core.
+		return ctx.Err()
+	}
 	up := e.ha.Probe(ctx)
 	if p.WaitingSince.IsZero() || (!up && !p.CoreSeenDown) {
 		if p.WaitingSince.IsZero() {
@@ -392,7 +394,7 @@ func (e *Engine) restartOntoRestored(ctx context.Context, keys, domains []string
 	}
 	e.setPhase("Restarting Home Assistant")
 	e.record(state.KindRestart, "Restarting Home Assistant", "to drop the rejected values", keys)
-	if ok, why := e.restartAndWait(ctx); !ok {
+	if ok, _, why := e.restartAndWait(ctx); !ok {
 		e.record(state.KindError, why, "", keys)
 		return may + ", and restarting it failed (" + why + "); check Home Assistant's log."
 	}
@@ -401,29 +403,60 @@ func (e *Engine) restartOntoRestored(ctx context.Context, keys, domains []string
 	return may + ", so it was restarted with the restored ones."
 }
 
-// guardedRestart restarts Core after a config check, waits for it to go
-// down and come back, and on failure restores the previous files and
-// restarts again.
-func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, reasons []string) error {
-	keys := p.Keys()
-	if err := e.check(ctx, p, reasons); err != nil {
-		return err
+// reloadService is the service that makes domain re-read its YAML.
+func reloadService(domain string) string {
+	if domain == "homeassistant" {
+		return "reload_core_config"
 	}
+	return "reload"
+}
+
+// guardedRestart restarts Core for a change refresh already checked, waits
+// for it to go down and come back, and on failure restores the previous
+// files. Core that went down is restarted again onto them; Core that never
+// went down still runs on the previous values, so only the domains this
+// change reloaded are reloaded again. A stop of this add-on in the middle
+// leaves the change pending, to be resumed on the next start.
+func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, reasons, reloaded []string) error {
+	keys := p.Keys()
 	e.setPhase("Restarting Home Assistant")
 	e.record(state.KindRestart, "Restarting Home Assistant", "for "+strings.Join(reasons, ", "), keys)
-	ok, why := e.restartAndWait(ctx)
+	ok, wentDown, why := e.restartAndWait(ctx)
 	if ok {
 		e.clearPending()
 		e.record(state.KindRefresh, "Home Assistant is back", "", keys)
 		return nil
 	}
+	if ctx.Err() != nil {
+		e.setPhase("")
+		return ctx.Err()
+	}
 	e.rollback(p.Written, p.Before)
 	e.holdBack(p.Signature, why, false)
-	e.record(state.KindError, "Rolled back: "+why, "Restarting again with the previous values.", keys)
-	recovered, why2 := e.restartAndWait(ctx)
-	msg := "Home Assistant did not come back after a restart with the new secret values (" + why + "), so the previous secrets files were restored and it was restarted again."
-	if !recovered {
-		msg += " That restart failed too (" + why2 + "); check Home Assistant's log."
+	var msg string
+	switch {
+	case wentDown:
+		e.record(state.KindError, "Rolled back: "+why, "Restarting again with the previous values.", keys)
+		recovered, _, why2 := e.restartAndWait(ctx)
+		msg = "Home Assistant did not come back after a restart with the new secret values (" + why + "), so the previous secrets files were restored and it was restarted again."
+		if !recovered {
+			msg += " That restart failed too (" + why2 + "); check Home Assistant's log."
+		}
+	case len(reloaded) > 0:
+		e.record(state.KindError, "Rolled back: "+why, "Reloading "+strings.Join(reloaded, ", ")+" with the previous values.", keys)
+		msg = "Home Assistant did not restart for the new secret values (" + why + "), so the previous secrets files were restored and " + strings.Join(reloaded, ", ") + " reloaded with them."
+		var failed []string
+		for _, d := range reloaded {
+			if err := e.ha.CallService(ctx, d, reloadService(d), nil); err != nil {
+				failed = append(failed, d)
+			}
+		}
+		if len(failed) > 0 {
+			msg += " Reloading " + strings.Join(failed, ", ") + " failed; restart Home Assistant to load the restored values."
+		}
+	default:
+		e.record(state.KindError, "Rolled back: "+why, "Home Assistant kept running on the previous values.", keys)
+		msg = "Home Assistant did not restart for the new secret values (" + why + "), so the previous secrets files were restored. It kept running on the previous values."
 	}
 	e.notify(ctx, notifyError, "1Password Secrets: restart failed, rolled back", msg)
 	e.setPhase("")
@@ -431,35 +464,45 @@ func (e *Engine) guardedRestart(ctx context.Context, p *state.PendingRefresh, re
 }
 
 // restartAndWait restarts Core and reports whether it really went down and
-// answered again. A restart Supervisor or Core refused (an HTTP error) is a
-// failure; a dropped connection is not, as long as Core is seen down.
-func (e *Engine) restartAndWait(ctx context.Context) (bool, string) {
+// answered again, and whether it was seen down at all. A restart Supervisor
+// or Core refused (an HTTP error) is a failure; a dropped connection is
+// not, as long as Core is seen down. A cancelled ctx reports "interrupted".
+func (e *Engine) restartAndWait(ctx context.Context) (ok, wentDown bool, why string) {
+	const interrupted = "interrupted"
 	if err := e.ha.RestartCore(ctx); err != nil {
+		if ctx.Err() != nil {
+			return false, false, interrupted
+		}
 		var se *ha.StatusError
 		if errors.As(err, &se) {
-			return false, "Home Assistant refused the restart (" + safeErr(err) + ")"
+			return false, false, "Home Assistant refused the restart (" + safeErr(err) + ")"
 		}
 	}
 	deadline := e.cfg.Now().Add(e.cfg.RestartDownTimeout)
-	wentDown := false
 	for e.cfg.Now().Before(deadline) {
 		if !e.ha.Probe(ctx) {
+			if ctx.Err() != nil {
+				return false, false, interrupted
+			}
 			wentDown = true
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return false, "interrupted"
+			return false, false, interrupted
 		case <-time.After(2 * time.Second):
 		}
 	}
 	if !wentDown {
-		return false, "Home Assistant did not restart"
+		return false, false, "Home Assistant did not restart"
 	}
 	if !e.ha.WaitHealthy(ctx, e.cfg.RestartUpTimeout) {
-		return false, "Home Assistant did not come back in time"
+		if ctx.Err() != nil {
+			return false, true, interrupted
+		}
+		return false, true, "Home Assistant did not come back in time"
 	}
-	return true, ""
+	return true, true, ""
 }
 
 // RestartCoreNow is the UI's "Restart Home Assistant" for a pending
@@ -482,7 +525,7 @@ func (e *Engine) RestartCoreNow(ctx context.Context) error {
 	}
 	e.setPhase("Restarting Home Assistant")
 	e.record(state.KindRestart, "Restarting Home Assistant", "requested from the panel", nil)
-	if ok, why := e.restartAndWait(ctx); !ok {
+	if ok, _, why := e.restartAndWait(ctx); !ok {
 		e.record(state.KindError, why, "", nil)
 		return errors.New(why)
 	}

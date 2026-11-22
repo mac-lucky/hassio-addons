@@ -19,6 +19,15 @@ Nothing yet.
   one, or that is written again after a hold for a stopped Home Assistant,
   keeps the mark, so a rejection still restarts Home Assistant onto the
   restored files when it may have started on the rejected ones.
+- A restart Home Assistant refused, or one it did not go down for, no longer
+  triggers a second restart after the rollback: Home Assistant is still
+  running on the previous values, so only the integrations this change had
+  reloaded are reloaded again, and the notification says which case it was.
+- Stopping or updating the add-on while it restarts Home Assistant, or while
+  it waits for the configuration check, no longer rolls the change back and
+  holds it; the change stays pending and is finished on the next start.
+- The configuration check runs once per change instead of twice back to back
+  before a Home Assistant restart.
 
 ## [0.1.13] - 2026-11-20
 

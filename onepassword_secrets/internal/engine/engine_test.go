@@ -127,6 +127,8 @@ type fakeHA struct {
 	checkReason   string
 	// checkErr is CheckConfig with no verdict: Core down or not answering.
 	checkErr error
+	// onWaitHealthy runs inside WaitHealthy (a stop mid-restart, say).
+	onWaitHealthy func()
 }
 
 func newFakeHA() *fakeHA {
@@ -206,6 +208,9 @@ func (h *fakeHA) Probe(context.Context) bool {
 
 func (h *fakeHA) WaitHealthy(context.Context, time.Duration) bool {
 	h.rec("wait_healthy", nil)
+	if h.onWaitHealthy != nil {
+		h.onWaitHealthy()
+	}
 	return h.healthyBack
 }
 
@@ -978,6 +983,76 @@ func TestRefusedRestartIsAFailure(t *testing.T) {
 	}
 	if strings.Contains(h.ha.callList(), "wait_healthy") || st.State != StateError {
 		t.Fatalf("state %s calls:\n%s", st.State, h.ha.callList())
+	}
+	// Core never went down, so no second restart: template, which reloaded
+	// the new value, reloads the restored one.
+	calls := h.ha.callList()
+	if strings.Count(calls, "restart_core") != 1 || strings.Count(calls, "service template.reload") != 2 {
+		t.Fatalf("want one restart and template reloaded twice:\n%s", calls)
+	}
+	h.assertNoLeak()
+}
+
+// A refused restart for a change nothing reloaded leaves Core running on
+// the previous values: roll back, no second restart, no reload.
+func TestRefusedRestartWithNothingReloadedDoesNotRestartAgain(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	h.ha.restartErr = &ha.StatusError{Path: "/core/api/services/homeassistant/restart", Code: 500}
+	h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": "SENTINEL-notify-refused"})
+	sentinels = append(sentinels, "SENTINEL-notify-refused")
+	h.ha.reset()
+	h.sync()
+	if got := h.read("secrets.yaml")["notify_key"]; got != sNotif || h.engine.st.HeldBack == "" {
+		t.Fatalf("not rolled back and held: %v", got)
+	}
+	if calls := h.ha.callList(); strings.Count(calls, "restart_core") != 1 || strings.Contains(calls, ".reload") {
+		t.Fatalf("calls:\n%s", calls)
+	}
+	h.assertNoLeak()
+}
+
+// refresh already checked the files; the guarded restart does not check
+// them again.
+func TestRestartChecksTheConfigOnce(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	h.connect.set("i1", "homeassistant fan", 2, map[string]string{"xiaomi_fan_token": sFan2})
+	h.ha.reset()
+	h.sync()
+	if calls := h.ha.callList(); strings.Count(calls, "check_config") != 1 || !strings.Contains(calls, "restart_core") {
+		t.Fatalf("want one check and a restart:\n%s", calls)
+	}
+}
+
+// A stop of this add-on during the guarded restart leaves the change
+// pending, unrolled-back, for the next start to finish.
+func TestStopDuringRestartKeepsTheChangePending(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.ha.onWaitHealthy = cancel
+	h.ha.healthyBack = false
+	h.connect.set("i1", "homeassistant fan", 2, map[string]string{"xiaomi_fan_token": sFan2})
+	h.ha.reset()
+	h.engine.SyncOnce(ctx)
+	if got := h.read("secrets.yaml")["xiaomi_fan_token"]; got != sFan2 {
+		t.Fatalf("rolled back on a stop: %v", got)
+	}
+	p := h.engine.st.Pending
+	if p == nil || p.Stage != "all" || h.engine.st.HeldBack != "" {
+		t.Fatalf("pending %+v, held %q", p, h.engine.st.HeldBack)
+	}
+	if n := strings.Count(h.ha.callList(), "restart_core"); n != 1 {
+		t.Fatalf("%d restarts, want 1:\n%s", n, h.ha.callList())
+	}
+
+	h.ha.onWaitHealthy, h.ha.healthyBack = nil, true
+	h.ha.reset()
+	h.sync()
+	if h.engine.st.Pending != nil || !strings.Contains(h.ha.callList(), "event onepassword_secrets_changed") {
+		t.Fatalf("not resumed: pending %+v, calls:\n%s", h.engine.st.Pending, h.ha.callList())
 	}
 	h.assertNoLeak()
 }
