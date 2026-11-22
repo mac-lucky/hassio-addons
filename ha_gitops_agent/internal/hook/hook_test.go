@@ -459,6 +459,22 @@ func TestWebhookCycleStopsWithTheApp(t *testing.T) {
 	}
 }
 
+// A leftover token with no acceptance time behind it was already covered
+// by the cycle before it; running it would skip SyncNow's post-rollback
+// guard, which a zero time disables.
+func TestWorkerSkipsATokenWithNoAcceptanceTime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := newFakeAgent()
+	trigger := newPendingTrigger()
+	trigger.ready <- struct{}{}
+	go worker(ctx, agent, trigger, 0)
+
+	expectNoCall(t, agent)
+	trigger.set(time.Now())
+	agent.waitForCall(t)
+}
+
 func withCycleSpacing(t *testing.T, d time.Duration) {
 	t.Helper()
 	old := minCycleSpacing

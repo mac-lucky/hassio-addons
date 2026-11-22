@@ -205,6 +205,11 @@ func worker(ctx context.Context, agent Agent, trigger *pendingTrigger, spacing t
 		case <-trigger.ready:
 		}
 		acceptedAt := trigger.take()
+		if acceptedAt.IsZero() {
+			// A token set() left after this loop's previous take(): the
+			// cycle that just ran already covered that delivery.
+			continue
+		}
 		func() {
 			defer recoverReconcile()
 			agent.SyncNow(ctx, acceptedAt)

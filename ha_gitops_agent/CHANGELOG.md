@@ -35,6 +35,9 @@ Nothing yet.
   rather than that it matches the repository.
 - The add-on's own `.gitops-agent-*.tmp` files, which a crash in the middle
   of a write can leave beside a live file, are never synced or imported.
+- Two webhook deliveries landing together could queue an extra check that
+  ignored a Roll Back pressed just before it; that extra check is skipped,
+  as the check before it already covered both deliveries.
 
 ## [0.9.9] - 2026-11-12
 
