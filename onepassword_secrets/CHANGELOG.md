@@ -33,6 +33,10 @@ Nothing yet.
   file keeps its value until the field is filled, deleting the field leaves a
   hand-written value where it was, and a key that is new or already empty is
   still written empty, so a value left blank on purpose keeps working.
+- When one add-on's options cannot be read, the keys it used last time still
+  count as used by it: it is restarted when one of them changes, and a key it
+  uses is not removed from `secrets.yaml` meanwhile. An add-on whose options
+  were never read is asked again on the next sync.
 
 ## [0.1.13] - 2026-11-20
 

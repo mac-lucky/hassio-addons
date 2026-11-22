@@ -396,7 +396,9 @@ func (e *Engine) rescan() error {
 }
 
 // addonRefsCached re-reads other add-ons' options at most every
-// AddonRefsTTL; a failure keeps the previous answer.
+// AddonRefsTTL; a failure keeps the previous answer. An add-on whose
+// options cannot be read keeps the references it had; one never read yet
+// leaves the cache unstamped, so the next cycle asks again.
 func (e *Engine) addonRefsCached(ctx context.Context) []refscan.AddonRef {
 	if !e.addonRefsAt.IsZero() && e.cfg.Now().Sub(e.addonRefsAt) < e.cfg.AddonRefsTTL {
 		return e.addonRefs
@@ -405,20 +407,36 @@ func (e *Engine) addonRefsCached(ctx context.Context) []refscan.AddonRef {
 	if err != nil {
 		return e.addonRefs
 	}
+	prev := map[string][]refscan.AddonRef{}
+	for _, r := range e.addonRefs {
+		prev[r.Slug] = append(prev[r.Slug], r)
+	}
 	var refs []refscan.AddonRef
+	read := map[string]bool{}
+	complete := true
 	for _, a := range addons {
 		if a.Slug == e.cfg.SelfSlug {
 			continue
 		}
 		opts, err := e.ha.AddonOptions(ctx, a.Slug)
 		if err != nil {
+			refs = append(refs, prev[a.Slug]...)
+			read[a.Slug] = e.addonOptsRead[a.Slug]
+			complete = complete && read[a.Slug]
 			continue
 		}
+		read[a.Slug] = true
 		refs = append(refs, refscan.AddonOptionRefs(a.Slug, a.Name, opts)...)
 	}
 	e.addons = addons
 	e.addonRefs = refs
-	e.addonRefsAt = e.cfg.Now()
+	e.addonOptsRead = read
+	e.addonRefsAt = time.Time{}
+	if complete {
+		e.addonRefsAt = e.cfg.Now()
+	}
+	// Set even when one add-on was never read: a single broken add-on
+	// must not switch off removing keys deleted from 1Password for good.
 	e.addonsLoaded = true
 	return refs
 }

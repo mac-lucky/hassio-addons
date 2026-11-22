@@ -129,6 +129,8 @@ type fakeHA struct {
 	checkErr error
 	// onWaitHealthy runs inside WaitHealthy (a stop mid-restart, say).
 	onWaitHealthy func()
+	// optionsErr is AddonOptions' error per slug.
+	optionsErr map[string]error
 }
 
 func newFakeHA() *fakeHA {
@@ -258,6 +260,9 @@ func (h *fakeHA) Addons(context.Context) ([]ha.Addon, error) {
 
 func (h *fakeHA) AddonOptions(_ context.Context, slug string) (map[string]any, error) {
 	h.rec("addon_options "+slug, nil)
+	if err := h.optionsErr[slug]; err != nil {
+		return nil, err
+	}
 	return h.options[slug], nil
 }
 
@@ -525,6 +530,36 @@ func TestEmptyFieldKeepsTheFileValue(t *testing.T) {
 		t.Fatalf("anon_broker = %#v (present %v), want written empty", got, ok)
 	}
 	h.assertNoLeak()
+}
+
+// An add-on whose options cannot be read keeps the references it had; one
+// never read is asked again next cycle, without switching off pruning.
+func TestUnreadableAddonOptionsKeepTheirReferences(t *testing.T) {
+	uses := func(h *harness) bool {
+		for _, r := range h.engine.addonRefs {
+			if r.Slug == "core_mosquitto" {
+				return true
+			}
+		}
+		return false
+	}
+	h := newHarness(t, nil)
+	h.ha.optionsErr = map[string]error{"core_mosquitto": errors.New("supervisor said 500")}
+	h.sync()
+	if !h.engine.addonsLoaded || !h.engine.addonRefsAt.IsZero() || uses(h) {
+		t.Fatalf("loaded %v, stamped %v, mosquitto refs %v", h.engine.addonsLoaded, h.engine.addonRefsAt, uses(h))
+	}
+	h.ha.optionsErr = nil
+	h.sync()
+	if h.engine.addonRefsAt.IsZero() || !uses(h) {
+		t.Fatal("not read again on the next cycle")
+	}
+	h.ha.optionsErr = map[string]error{"core_mosquitto": errors.New("supervisor said 500")}
+	h.engine.addonRefsAt = time.Time{} // the cache expired
+	h.sync()
+	if !uses(h) || h.engine.addonRefsAt.IsZero() {
+		t.Fatalf("previous references dropped: mosquitto refs %v, stamped %v", uses(h), h.engine.addonRefsAt)
+	}
 }
 
 func TestRestartFailureRollsBackAndHoldsBack(t *testing.T) {
