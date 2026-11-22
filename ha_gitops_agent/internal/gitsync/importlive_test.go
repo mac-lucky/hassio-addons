@@ -510,7 +510,7 @@ func TestImportPropagatesLsRemoteFailure(t *testing.T) {
 	}
 	gs := New(makeOpts("https://git.example.invalid/repo.git"), workdir)
 	runner := &scriptedGitRunner{
-		failOnArgs: []string{"--heads", "https://git.example.invalid/repo.git", "main"},
+		failOnArgs: []string{"--exit-code", "https://git.example.invalid/repo.git", "refs/heads/main"},
 		failResult: RunResult{ExitCode: 128, Stderr: "fatal: Authentication failed\n"},
 	}
 	gs.Runner = runner

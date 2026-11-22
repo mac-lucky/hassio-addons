@@ -432,6 +432,63 @@ func TestFetchReturnsNewSHAAndCheckoutSwitchesContent(t *testing.T) {
 	}
 }
 
+// A tag spelled like the tracked branch must not stand in for it: git
+// resolves a short name to the tag first.
+func TestFetchTracksTheBranchNotASameNamedTag(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "remote")
+	commitFile(t, work, "automations.yaml", "old\n", "old")
+	runGitHelper(t, work, "tag", "main")
+	runGitHelper(t, work, "push", "origin", "refs/tags/main")
+	if err := os.WriteFile(filepath.Join(work, "automations.yaml"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitHelper(t, work, "commit", "-am", "new")
+	runGitHelper(t, work, "push", "origin", "refs/heads/main:refs/heads/main")
+
+	gs := New(makeOpts("file://"+bare), filepath.Join(tmp, "clone"))
+	ctx := context.Background()
+	if err := gs.EnsureClone(ctx); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	got, err := gs.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	cmd := exec.Command("git", "rev-parse", "refs/heads/main") // #nosec G204 -- fixed git binary and args
+	cmd.Dir = work
+	want, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Errorf("Fetch = %s, want the branch tip %s", got, want)
+	}
+}
+
+// ls-remote matches a pattern by its tail, so x/release must not count as
+// the branch release.
+func TestRemoteHasBranchIgnoresABranchThatOnlyEndsInTheName(t *testing.T) {
+	tmp := t.TempDir()
+	bare, work := makeRemote(t, tmp, "remote")
+	commitFile(t, work, "automations.yaml", "x\n", "x")
+	runGitHelper(t, work, "push", "origin", "main:refs/heads/foo/release")
+
+	opts := makeOpts("file://" + bare)
+	opts.Branch = "release"
+	gs := New(opts, filepath.Join(tmp, "clone"))
+	if err := gs.EnsureClone(context.Background()); err != nil {
+		t.Fatalf("EnsureClone: %v", err)
+	}
+	has, err := gs.RemoteHasBranch(context.Background())
+	if err != nil {
+		t.Fatalf("RemoteHasBranch: %v", err)
+	}
+	if has {
+		t.Error("RemoteHasBranch = true, want false: only foo/release exists")
+	}
+}
+
 func TestCurrentSHANoneBeforeClone(t *testing.T) {
 	gs := New(makeOpts("file:///does-not-matter"), filepath.Join(t.TempDir(), "clone"))
 	if got := gs.CurrentSHA(context.Background()); got != "" {

@@ -603,7 +603,8 @@ var fetchRetryDelays = []time.Duration{2 * time.Second, 8 * time.Second}
 // every such blip used to put the agent in the error state and drop the
 // plan waiting for review until the next interval.
 func (g *GitSync) fetchWithRetry(ctx context.Context) error {
-	args := []string{"fetch", "--quiet", g.Opts.RepoURL, g.Opts.Branch}
+	// The full ref: a short name resolves a same-named tag before the branch.
+	args := []string{"fetch", "--quiet", g.Opts.RepoURL, "refs/heads/" + g.Opts.Branch}
 	for attempt := 0; ; attempt++ {
 		_, err := g.runGitWith(ctx, args, g.Workdir, g.networkEnv(), g.NetworkTimeout)
 		if err == nil || attempt >= len(fetchRetryDelays) || !IsTransientFetchError(err) {
@@ -654,9 +655,10 @@ func IsTransientFetchError(err error) bool {
 // RemoteHasBranch reports whether opts.Branch exists on the remote. Exit 2
 // alone means "no such branch"; every other non-zero (128 for an
 // unreachable host or an expired token) is an error, or an auth failure
-// would read as an empty repository.
+// would read as an empty repository. The full ref, because ls-remote
+// matches a pattern by its tail: "main" alone also matches x/main.
 func (g *GitSync) RemoteHasBranch(ctx context.Context) (bool, error) {
-	result, err := g.runGitRaw(ctx, []string{"ls-remote", "--exit-code", "--heads", g.Opts.RepoURL, g.Opts.Branch}, "", g.credentialEnv(), 0)
+	result, err := g.runGitRaw(ctx, []string{"ls-remote", "--exit-code", g.Opts.RepoURL, "refs/heads/" + g.Opts.Branch}, "", g.credentialEnv(), 0)
 	if err != nil {
 		return false, err
 	}

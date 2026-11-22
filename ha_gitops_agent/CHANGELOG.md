@@ -15,6 +15,10 @@ Nothing yet.
 - The Roll Back point is saved before an apply writes its first file. An
   add-on stop, restart or host reboot in the middle of an apply used to leave
   Roll Back pointing at the apply before it.
+- The tracked branch is fetched by its full name. A tag spelled like the
+  branch (a `main` tag, say) used to be fetched and applied instead of the
+  branch, and a branch that only ended in the name (`x/main`) counted as the
+  branch when checking whether it exists.
 
 ## [0.9.9] - 2026-11-12
 
