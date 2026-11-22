@@ -1967,6 +1967,14 @@ func TestARollbackThatRestoredFilesReportsDrift(t *testing.T) {
 	if len(status.Pending) != 0 || status.PlanID != "" {
 		t.Errorf("pending = %v, plan = %q, want the stale plan dropped", status.Pending, status.PlanID)
 	}
+	if !status.RolledBack {
+		t.Error("RolledBack = false, want true until the next check plans")
+	}
+
+	r.ReconcileNow(context.Background())
+	if r.Status().RolledBack {
+		t.Error("RolledBack still set after a check planned again")
+	}
 }
 
 // A pointer whose directory is gone - pruned, or /data restored from a

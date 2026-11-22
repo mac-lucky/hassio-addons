@@ -355,6 +355,11 @@ type Status struct {
 	//
 	// NextCheckUTC is "" whenever this is set.
 	Paused bool `json:"paused"`
+	// RolledBack is whether the last Roll Back restored files and no check
+	// has planned since, so the dashboard can say why drift_pending has no
+	// plan. Capture holding every drifted path back leaves the same state
+	// and plan with this false.
+	RolledBack bool `json:"rolled_back"`
 	// AddonUpdates is the most recent check's per-slug results. Empty is
 	// not "nothing to update": with AutoUpdateEnabled set it means no check
 	// has ever recorded anything, on this run or an earlier persisted one

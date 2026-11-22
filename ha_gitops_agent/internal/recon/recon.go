@@ -135,6 +135,10 @@ type Reconciler struct {
 	// lastRollbackAt is when the last Roll Back completed, so SyncNow can
 	// drop a webhook cycle whose delivery arrived before it (see there).
 	lastRollbackAt time.Time
+	// rolledBack is whether the last Roll Back restored files and no plan
+	// has been built since. It tells that drift_pending apart from the one
+	// capture leaves when it holds every drifted path back.
+	rolledBack bool
 	// fetchFailingSince is when the fetch first failed transiently in the
 	// outage going on now, zero while fetches succeed. Within
 	// forgeOutageGrace of it a failed fetch keeps the last plan and state
@@ -954,6 +958,7 @@ func (r *Reconciler) Status() Status {
 	// Read beside nextTickUTC, which SetPaused clears under the same lock:
 	// "paused" plus a countdown would promise a cycle that is not coming.
 	paused := r.paused
+	rolledBack := r.rolledBack
 	// Copied out so a caller cannot reach the live results. make+copy
 	// rather than append-to-nil: a nil slice serializes as null while every
 	// sibling list emits [], which the UI would have to special-case.
@@ -1049,6 +1054,7 @@ func (r *Reconciler) Status() Status {
 		LastVersionRecordUTC: lastVersionRecordUTC,
 		NextCheckUTC:         nextTickUTC,
 		Paused:               paused,
+		RolledBack:           rolledBack,
 
 		PendingCount:        len(pending) + len(pendingRegistry),
 		Pending:             pendingChanges,
@@ -1496,6 +1502,7 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 
 	r.mu.Lock()
 	r.pending = changes
+	r.rolledBack = false
 	r.pendingRegistry = registryOps
 	r.pendingAddonRestartOnChange = addonRestartOnChange
 	r.pendingHacsRestartPending = hacsRestartPending
@@ -2301,6 +2308,7 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 
 	r.mu.Lock()
 	r.pending = nil
+	r.rolledBack = false
 	r.lastApplyUTC = state.LastApplyUTC
 	// The commit this apply executed. Not state.LastGoodSHA, which stays
 	// behind when yaml_files is off.
@@ -3059,7 +3067,8 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 	if combined.OK {
 		r.withMu(func() {
 			r.state = StateInSync
-			if len(result.Changed) > 0 {
+			r.rolledBack = len(result.Changed) > 0
+			if r.rolledBack {
 				// Live now differs from the repository. The plan described
 				// live before the restore, so it goes as a set, as in
 				// failCycle; Check Now plans again.

@@ -62,6 +62,7 @@ type fakeAgent struct {
 	dryRun          bool
 	pendingCount    int
 	state           string
+	rolledBack      bool
 	pendingRegistry []recon.PendingRegOp
 	// pendingFiles, when set, replaces the one change pendingCount stands for.
 	pendingFiles      []recon.PendingChange
@@ -284,6 +285,7 @@ func (f *fakeAgent) Status() recon.Status {
 		LastApplyUTC:      "2026-08-01T00:00:00+00:00",
 		NextCheckUTC:      f.nextCheckUTC,
 		Paused:            f.paused,
+		RolledBack:        f.rolledBack,
 		LastStashDir:      f.lastStashDir,
 		RollbackPreview:   f.rollbackPreview,
 		LastError:         lastError,
@@ -2176,23 +2178,34 @@ func TestPendingCardsAreCappedWhileStatusJSONStaysComplete(t *testing.T) {
 	}
 }
 
-// With no plan, the pending card claims a match only when the state does.
+// With no plan, the pending card claims a match only when the state does,
+// and a rollback only when one happened: capture holding every drifted
+// path back also leaves drift_pending with no plan.
 func TestEmptyPendingCardFollowsTheState(t *testing.T) {
 	devEnv(t)
-	for state, want := range map[string]string{
-		"in_sync":       "No pending changes. Config matches the repository.",
-		"drift_pending": "Rolled back: live differs from the repository.",
-		"error":         "<p class=\"empty\">No pending changes.</p>",
+	for _, tc := range []struct {
+		state      string
+		rolledBack bool
+		want       string
+	}{
+		{"in_sync", false, "No pending changes. Config matches the repository."},
+		{"drift_pending", true, "Rolled back: live differs from the repository."},
+		{"drift_pending", false, "<p class=\"empty\">No pending changes.</p>"},
+		{"error", false, "<p class=\"empty\">No pending changes.</p>"},
 	} {
 		agent := newFakeAgent()
 		agent.pendingCount = 0
-		agent.state = state
+		agent.state = tc.state
+		agent.rolledBack = tc.rolledBack
 		body := doRequest(t, New(agent), http.MethodGet, "/", nil).Body.String()
-		if !strings.Contains(body, want) {
-			t.Errorf("state %s: body lacks %q", state, want)
+		if !strings.Contains(body, tc.want) {
+			t.Errorf("state %s, rolled back %v: body lacks %q", tc.state, tc.rolledBack, tc.want)
 		}
-		if state != "in_sync" && strings.Contains(body, "Config matches the repository") {
-			t.Errorf("state %s: body claims the config matches the repository", state)
+		if tc.state != "in_sync" && strings.Contains(body, "Config matches the repository") {
+			t.Errorf("state %s: body claims the config matches the repository", tc.state)
+		}
+		if !tc.rolledBack && strings.Contains(body, "Rolled back") {
+			t.Errorf("state %s: body claims a Roll Back that did not happen", tc.state)
 		}
 	}
 }
