@@ -16,8 +16,8 @@ Nothing yet.
   Assistant unless it was actually seen down during that wait. A
   configuration check that only kept timing out while Home Assistant was up
   used to cost one Home Assistant restart. A change that replaces a waiting
-  one, or that is written again after a hold for a stopped Home Assistant,
-  keeps the mark, so a rejection still restarts Home Assistant onto the
+  one, or that is written again after a hold for a stopped Home Assistant
+  (once it answers, or with Sync now), keeps the mark, so a rejection still restarts Home Assistant onto the
   restored files when it may have started on the rejected ones.
 - A restart Home Assistant refused, or one it did not go down for, no longer
   triggers a second restart after the rollback: Home Assistant is still

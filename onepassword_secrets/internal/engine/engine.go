@@ -136,8 +136,8 @@ type Engine struct {
 	lastPublished string
 	publishedAt   time.Time
 	tokenNotified bool
-	// coreSeenDown carries a superseded change's CoreSeenDown into the
-	// change write() builds next in the same cycle.
+	// coreSeenDown carries a superseded change's CoreSeenDown, or a Core
+	// hold Sync now cleared, into the change write() builds next.
 	coreSeenDown bool
 }
 
@@ -217,6 +217,9 @@ func (e *Engine) SyncNow() {
 	go func() {
 		e.runMu.Lock()
 		if e.st.HeldBack != "" {
+			// Held because Core was down: it may have started on these
+			// values, which write() no longer learns from the hold.
+			e.coreSeenDown = e.coreSeenDown || e.st.HeldForCore
 			e.st.HeldBack, e.st.HeldBackReason, e.st.HeldForCore = "", "", false
 			if err := e.st.Save(e.cfg.StatePath); err != nil {
 				slog.Warn("saving state failed", "error", err)

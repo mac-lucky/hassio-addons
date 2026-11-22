@@ -807,6 +807,33 @@ func TestCoreDownTooLongRollsBack(t *testing.T) {
 		t.Fatalf("not restarted onto the restored files: %v, calls:\n%s", got, h3.ha.callList())
 	}
 	h3.assertNoLeak()
+
+	// The same, with the hold lifted by Sync now instead: Core was still
+	// down, so a rejection restarts it onto the restored files.
+	h4 := newHarness(t, nil)
+	waitTooLong(h4)
+	h4.ha.up = false
+	h4.sync()
+	h4.ha.up, h4.ha.checkErr, h4.ha.checkOK = true, nil, false
+	h4.engine.SyncNow()
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		h4.engine.runMu.Lock()
+		lifted := h4.engine.st.HeldBack == ""
+		h4.engine.runMu.Unlock()
+		if lifted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Sync now did not lift the hold")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h4.ha.reset()
+	h4.sync()
+	if got := h4.read("secrets.yaml")["notify_key"]; got != sNotif || !strings.Contains(h4.ha.callList(), "restart_core") {
+		t.Fatalf("not restarted onto the restored files after Sync now: %v, calls:\n%s", got, h4.ha.callList())
+	}
+	h4.assertNoLeak()
 }
 
 // A hold 0.1.12 made because Core did not answer is lifted on start; a hold
