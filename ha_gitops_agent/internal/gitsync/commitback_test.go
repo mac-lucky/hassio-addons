@@ -886,6 +886,31 @@ func TestCommitBackCapturesDeletionAndContentDriftInOneCommit(t *testing.T) {
 	}
 }
 
+// Content an earlier operation left staged (a restore that failed) rides
+// through checkout -B; the commit takes only the paths this call staged.
+func TestCommitBackCommitsOnlyThePathsItStaged(t *testing.T) {
+	gs, bare, _, configRoot, sha := driftClone(t, map[string]string{"automations.yaml": "- id: demo\n"})
+	leftover := filepath.Join(gs.Workdir, "leftover.yaml")
+	if err := os.WriteFile(leftover, []byte("stale: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitHelper(t, gs.Workdir, "add", "leftover.yaml")
+	liveEdit := "- id: demo\n  alias: Hand-edited live\n"
+	writeLiveFile(t, configRoot, "automations.yaml", liveEdit)
+
+	branch, _, err := gs.CommitBack(context.Background(),
+		[]DriftFile{{Path: "automations.yaml", Kind: "update"}}, configRoot, sha, fixedDriftTime)
+	if err != nil {
+		t.Fatalf("CommitBack: %v", err)
+	}
+	if _, ok := showAtRef(t, bare, branch, "leftover.yaml"); ok {
+		t.Error("leftover.yaml reached the drift branch, want only the staged path committed")
+	}
+	if pushed, ok := showAtRef(t, bare, branch, "automations.yaml"); !ok || pushed != liveEdit {
+		t.Errorf("automations.yaml on the drift branch = %q (ok=%v), want the live edit", pushed, ok)
+	}
+}
+
 func TestCommitBackDeletionOfUntrackedPathDoesNotSinkTheRest(t *testing.T) {
 	// "git rm" on an untracked path is a hard git error, so it is passed
 	// over rather than costing the drift that is capturable beside it.

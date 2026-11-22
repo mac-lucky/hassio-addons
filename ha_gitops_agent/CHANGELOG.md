@@ -38,6 +38,9 @@ Nothing yet.
 - Two webhook deliveries landing together could queue an extra check that
   ignored a Roll Back pressed just before it; that extra check is skipped,
   as the check before it already covered both deliveries.
+- Commit Drift Back and conflict parking commit only the files they staged,
+  as captures already did, so content an earlier interrupted operation left
+  in the index cannot ride along onto the pushed branch.
 
 ## [0.9.9] - 2026-11-12
 

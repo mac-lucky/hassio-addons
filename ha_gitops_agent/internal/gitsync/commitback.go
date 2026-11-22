@@ -150,7 +150,10 @@ func (g *GitSync) commitLiveOnto(
 		return staged, fmt.Errorf("gitsync: %s: nothing to stage among %v", op, files)
 	}
 
-	if _, err := g.runGit(ctx, []string{"commit", "--quiet", "-m", message}, "", commitIdentityEnv()); err != nil {
+	// --only, as CaptureFiles commits: checkout -B carries over whatever an
+	// earlier operation's failed restore left staged.
+	args := append([]string{"commit", "--quiet", "-m", message, "--only", "--"}, staged.Paths...)
+	if _, err := g.runGit(ctx, args, "", commitIdentityEnv()); err != nil {
 		if isNothingToCommitError(err) {
 			// Everything staged is byte-identical to baseSHA. Named
 			// explicitly rather than reported as success with an empty
