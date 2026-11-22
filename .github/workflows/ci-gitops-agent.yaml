@@ -211,6 +211,8 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
+          # Pinned so a linter release cannot fail the required check on its own; Renovate bumps it.
+          version: v2.15.0
           working-directory: ha_gitops_agent
 
   build:
