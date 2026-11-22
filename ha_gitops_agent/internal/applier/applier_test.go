@@ -1127,6 +1127,58 @@ func TestPruneStashDirsNoopWhenBackupRootMissing(t *testing.T) {
 
 // --- StateLoad() / StateSave() --------------------------------------------
 
+// A state.json that does not parse is moved aside before defaults are
+// returned, so the next save cannot overwrite the only copy.
+func TestStateLoadMovesAnUnparsableFileAside(t *testing.T) {
+	cfg := testConfig(t)
+	writeText(t, cfg.StatePath, `{"last_good_sha": "abc123",`)
+
+	state := StateLoad(cfg)
+	if state.LoadErr != nil || state.LastGoodSHA != "" {
+		t.Fatalf("state = %+v, want defaults with no load error", state)
+	}
+	aside, _ := filepath.Glob(cfg.StatePath + ".corrupt-*")
+	if len(aside) != 1 {
+		t.Fatalf("moved-aside files = %v, want one", aside)
+	}
+	if got := readText(t, aside[0]); got != `{"last_good_sha": "abc123",` {
+		t.Errorf("moved-aside content = %q, want the original bytes", got)
+	}
+	if err := StateSave(cfg, State{LastGoodSHA: "def456"}); err != nil {
+		t.Fatalf("StateSave: %v", err)
+	}
+	if got := StateLoad(cfg).LastGoodSHA; got != "def456" {
+		t.Errorf("reloaded last_good_sha = %q, want def456", got)
+	}
+}
+
+// A state.json that exists but cannot be read must not be replaced by
+// defaults: StateSave refuses a state that carries the load error.
+func TestStateLoadFlagsAnUnreadableFileAndSaveRefusesIt(t *testing.T) {
+	cfg := testConfig(t)
+	if err := os.MkdirAll(cfg.StatePath, 0o750); err != nil { // a directory reads as EISDIR
+		t.Fatal(err)
+	}
+
+	state := StateLoad(cfg)
+	if state.LoadErr == nil {
+		t.Fatal("LoadErr = nil, want the read error")
+	}
+	if err := StateSave(cfg, state); err == nil {
+		t.Error("StateSave succeeded over a state.json it could not read")
+	}
+	if info, err := os.Stat(cfg.StatePath); err != nil || !info.IsDir() {
+		t.Errorf("state path replaced: %v", err)
+	}
+}
+
+func TestStateLoadMissingFileIsDefaults(t *testing.T) {
+	state := StateLoad(testConfig(t))
+	if state.LoadErr != nil || state.Manifest == nil {
+		t.Errorf("state = %+v, want defaults", state)
+	}
+}
+
 func TestStateLoadDropsUnsafeManifestEntries(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.ConfigRoot = filepath.Join(t.TempDir(), "config")

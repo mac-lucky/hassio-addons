@@ -147,6 +147,9 @@ func PoisonedState(t *testing.T) applier.State {
 			// nothing renders, so a sentinel here is what proves no display
 			// path picked it up.
 			state.LastCapturePaths = []string{Sentinel}
+		case "LoadErr":
+			// Left nil: exempt as never persisted, and a set error would make
+			// every caller of this state stop before it reads anything else.
 		default:
 			t.Fatalf("applier.State.%s is new and unclassified: poison its values here, "+
 				"or exempt it with the reason - a secret test over a state that zero-values "+

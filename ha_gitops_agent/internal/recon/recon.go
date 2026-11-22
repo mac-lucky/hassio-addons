@@ -1373,6 +1373,11 @@ func (r *Reconciler) reconcileNowWith(ctx context.Context, deferFetch bool) []di
 	}
 
 	state := r.applier.StateLoad()
+	if state.LoadErr != nil {
+		// Planning on defaults would forget conflicts, ownership and the
+		// merge base; the file is still there, so stop until it reads.
+		return r.failCycle(run, state.LoadErr)
+	}
 	// Refreshed here - from the copy this cycle plans against - rather than
 	// at the end, where a failCycle return would skip them. The capture
 	// phase is the one thing in this cycle that DOES write state.json, and
@@ -2032,6 +2037,19 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 				return applier.Result{OK: false, Error: msg}
 			}
 		}
+	}
+
+	if loadErr := r.applier.StateLoad().LoadErr; loadErr != nil {
+		// Before any write: the bookkeeping after it could not be saved.
+		msg := loadErr.Error()
+		r.withMu(func() {
+			r.lastError = msg
+			r.state = StateError
+		})
+		r.logError("apply failed: " + msg)
+		run.finish(history.Record{Outcome: history.OutcomeError, Error: msg})
+		r.pushStatus()
+		return applier.Result{OK: false, Error: msg}
 	}
 
 	r.logEvent(fmt.Sprintf("applying %d change(s)", len(pending)))

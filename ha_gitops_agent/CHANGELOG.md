@@ -19,6 +19,12 @@ Nothing yet.
   branch (a `main` tag, say) used to be fetched and applied instead of the
   branch, and a branch that only ended in the name (`x/main`) counted as the
   branch when checking whether it exists.
+- A `state.json` that does not parse is moved aside as
+  `state.json.corrupt-<time>` and logged before the agent starts from empty
+  state; it used to be overwritten by the next save, losing conflicts,
+  ownership records and the Roll Back point. One that cannot be read at all
+  now stops checks and applies with an error instead of running on empty
+  state.
 
 ## [0.9.9] - 2026-11-12
 

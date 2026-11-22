@@ -2,11 +2,14 @@ package applier
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/fsx"
 	"github.com/mac-lucky/hassio-addons/ha_gitops_agent/internal/gitsync"
@@ -168,11 +171,18 @@ type State struct {
 	// a bad apply. Cleared by a successful rollback.
 	LastStashDir     string
 	LastStashSummary string
+
+	// LoadErr is set, never persisted, when state.json exists but could not
+	// be read. StateSave refuses such a state, so defaults never overwrite a
+	// file that may still hold the real state, and a cycle or apply fails
+	// rather than run on it.
+	LoadErr error
 }
 
 // StateLoad loads the agent's persisted sync state from cfg.StatePath,
-// returning defaults - never an error - when the file is missing or does
-// not parse. Entries guardChangePath would reject, or of the wrong shape,
+// returning defaults when the file is missing. A file that does not parse
+// is renamed to state.json.corrupt-<ts> and logged, so the next save cannot
+// destroy it; one that cannot be read at all sets State.LoadErr. Entries guardChangePath would reject, or of the wrong shape,
 // are dropped one by one and logged rather than resetting the whole field,
 // so a poisoned state.json cannot become an unsafe delete or a Plan panic.
 //
@@ -197,12 +207,24 @@ func StateLoad(cfg Config) State {
 	}
 
 	data, err := os.ReadFile(cfg.StatePath) // #nosec G304 -- cfg.StatePath is the fixed Supervisor-managed state path in production
+	if errors.Is(err, fs.ErrNotExist) {
+		return defaults
+	}
 	if err != nil {
+		slog.Error("applier: state.json could not be read; nothing is applied or saved until it can", "error", err)
+		defaults.LoadErr = fmt.Errorf("applier: reading the agent state: %w", err)
 		return defaults
 	}
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
+		aside := cfg.StatePath + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
+		if renameErr := os.Rename(cfg.StatePath, aside); renameErr != nil {
+			slog.Error("applier: state.json does not parse and could not be moved aside", "error", err, "rename_error", renameErr)
+			defaults.LoadErr = fmt.Errorf("applier: the agent state does not parse (%w) and could not be moved aside: %w", err, renameErr)
+			return defaults
+		}
+		slog.Error("applier: state.json does not parse; moved it aside and starting from empty state", "error", err, "moved_to", aside)
 		return defaults
 	}
 
@@ -447,6 +469,9 @@ func sanitizeStringList(raw any, field string) []string {
 // successful apply. Writes a .tmp file then renames, so a crash mid-write
 // cannot leave a truncated state.json.
 func StateSave(cfg Config, state State) error {
+	if state.LoadErr != nil {
+		return state.LoadErr
+	}
 	if parent := filepath.Dir(cfg.StatePath); parent != "." {
 		if err := os.MkdirAll(parent, 0o755); err != nil { // #nosec G301 -- 0755 deliberate: Home Assistant's own process must traverse/read these dirs
 			return err

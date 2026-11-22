@@ -1917,6 +1917,32 @@ func TestASelfRolledBackApplyRestoresThePersistedPointer(t *testing.T) {
 	}
 }
 
+// state.json that exists but cannot be read stops the cycle and any apply
+// before a write, instead of planning against empty defaults.
+func TestAnUnreadableStateStopsTheCycleAndTheApply(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	fakes.applier.state.LoadErr = errors.New("applier: reading the agent state: input/output error")
+
+	if result := r.ApplyNow(context.Background(), true); result.OK {
+		t.Errorf("apply result = %+v, want it refused", result)
+	}
+	if len(fakes.applier.applyCalls) != 0 {
+		t.Errorf("apply calls = %d, want none", len(fakes.applier.applyCalls))
+	}
+	r.ReconcileNow(context.Background())
+	if got := r.Status().State; got != StateError {
+		t.Errorf("state = %q, want %q", got, StateError)
+	}
+	if fakes.differ.computeCalls != 1 {
+		t.Errorf("compute calls = %d, want only the first cycle's", fakes.differ.computeCalls)
+	}
+}
+
 // A pointer whose directory is gone - pruned, or /data restored from a
 // backup - must not offer a rollback that would fail.
 func TestAVanishedStashDirectoryIsNotHydrated(t *testing.T) {
