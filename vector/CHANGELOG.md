@@ -5,7 +5,7 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.11.6] - 2026-11-22
+## [1.11.7] - 2026-11-22
 
 ### Fixed
 
@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   options. Such an endpoint never worked, and the startup log printed the
   part of the password after the `/`. An `@` in the endpoint's path or query
   is not taken for a password, with or without credentials in front of it.
+
+## [1.11.6] - 2026-11-22
+
+Rebuild only, no functional change.
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 1.11.5 was built.
 
 ## [1.11.5] - 2026-11-17
 

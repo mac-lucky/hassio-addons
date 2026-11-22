@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
-## [0.1.14] - 2026-11-22
+## [0.1.15] - 2026-11-22
 
 ### Fixed
 
@@ -37,6 +37,15 @@ Nothing yet.
   count as used by it: it is restarted when one of them changes, and a key it
   uses is not removed from `secrets.yaml` meanwhile. An add-on whose options
   were never read is asked again on the next sync.
+
+## [0.1.14] - 2026-11-22
+
+Rebuild only, no functional change.
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 0.1.13 was built.
 
 ## [0.1.13] - 2026-11-20
 

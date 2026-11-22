@@ -42,6 +42,15 @@ Nothing yet.
   as captures already did, so content an earlier interrupted operation left
   in the index cannot ride along onto the pushed branch.
 
+## [0.9.10] - 2026-11-20
+
+Rebuild only, no functional change.
+
+### Security
+
+- Rebuilt on the base image's current packages, picking up the fixes published
+  after 0.9.9 was built.
+
 ## [0.9.9] - 2026-11-12
 
 ### Changed
