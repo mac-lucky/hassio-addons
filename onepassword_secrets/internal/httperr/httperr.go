@@ -43,14 +43,9 @@ func Detail(resp *http.Response) string {
 	return render(raw, overRead)
 }
 
-// Suffix is Detail formatted for appending to an error message: ": " and
-// the detail, or "" when there is no usable body.
-func Suffix(resp *http.Response) string {
-	return SuffixOf(Detail(resp))
-}
-
-// SuffixOf formats an already-read detail as Suffix formats its own, for
-// a caller that also logs it and so may read the body only once.
+// SuffixOf formats an already-read detail for appending to an error
+// message: ": " and the detail, or "" when there is none. The caller reads
+// the body once with Detail, since it also logs it.
 func SuffixOf(detail string) string {
 	if detail == "" {
 		return ""

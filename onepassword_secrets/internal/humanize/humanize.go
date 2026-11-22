@@ -3,9 +3,7 @@
 package humanize
 
 import (
-	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -22,34 +20,4 @@ func Truncate(s string, maxLen int) string {
 		cut--
 	}
 	return strings.TrimRight(s[:cut], " \t\n") + marker
-}
-
-// Bytes renders n as "512 B", "1.5 KB", "100.0 MB". Binary units, like
-// Home Assistant's frontend and the 100 << 20 limits this is read
-// against.
-func Bytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
-// Duration renders d as the run-history card reads it: "0.9s", "4.2s",
-// "3m 12s". One decimal below a minute, where almost every run lands;
-// whole seconds above it, which a backup wait reaches. A negative d
-// renders as "0.0s" rather than "-0.3s".
-func Duration(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	return fmt.Sprintf("%dm %02ds", int64(d/time.Minute), int64(d%time.Minute/time.Second))
 }

@@ -151,7 +151,7 @@ func TestDetailNeverReadsMoreThanTheReadLimit(t *testing.T) {
 	}
 }
 
-// --- Detail()/Suffix(): degenerate responses -------------------------------
+// --- Detail()/SuffixOf(): degenerate responses -----------------------------
 
 func TestDetailToleratesAMissingResponseOrBody(t *testing.T) {
 	if got := Detail(nil); got != "" {
@@ -163,12 +163,6 @@ func TestDetailToleratesAMissingResponseOrBody(t *testing.T) {
 }
 
 func TestSuffixPrefixesADetailAndOmitsAnEmptyOne(t *testing.T) {
-	if got := Suffix(respWithBody(`{"message":"nope"}`)); got != ": nope" {
-		t.Errorf("Suffix() = %q, want %q", got, ": nope")
-	}
-	if got := Suffix(respWithBody("")); got != "" {
-		t.Errorf("Suffix() on an empty body = %q, want empty", got)
-	}
 	if got := SuffixOf("already read"); got != ": already read" {
 		t.Errorf("SuffixOf() = %q, want %q", got, ": already read")
 	}

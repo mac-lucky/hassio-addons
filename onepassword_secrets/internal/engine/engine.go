@@ -130,7 +130,7 @@ type Engine struct {
 	// addonsLoaded is set once other add-ons' options were read: until
 	// then nothing is known about who uses a key from add-on options, so
 	// no previously written key may be removed.
-	addonsLoaded  bool
+	addonsLoaded bool
 	// addonOptsRead are the add-ons whose options were read at least once.
 	addonOptsRead map[string]bool
 	lastPublished string

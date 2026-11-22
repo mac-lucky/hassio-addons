@@ -568,11 +568,7 @@ func (e *Engine) clearPending() {
 
 func (e *Engine) setPhase(phase string) {
 	e.mu.Lock()
-	if phase == "" {
-		e.status.Phase = ""
-	} else {
-		e.status.Phase = phase
-	}
+	e.status.Phase = phase
 	e.mu.Unlock()
 }
 

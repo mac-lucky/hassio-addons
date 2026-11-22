@@ -441,13 +441,6 @@ func (e *Engine) addonRefsCached(ctx context.Context) []refscan.AddonRef {
 	return refs
 }
 
-// ForgetAddonRefs makes the next cycle re-read add-on options.
-func (e *Engine) ForgetAddonRefs() {
-	e.runMu.Lock()
-	e.addonRefsAt = time.Time{}
-	e.runMu.Unlock()
-}
-
 // plan routes keys to files and renders every file.
 func (e *Engine) plan(c *cycle) {
 	targets := e.cfg.Options.SecretsFiles

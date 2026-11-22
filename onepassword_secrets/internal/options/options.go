@@ -20,9 +20,6 @@ import (
 // Supervisor is the base URL for the Supervisor API.
 const Supervisor = "http://supervisor"
 
-// Path is where Supervisor writes the options.
-const Path = "/data/options.json"
-
 // Reference is one explicit key -> op:// reference.
 type Reference struct {
 	Key string `json:"key"`
