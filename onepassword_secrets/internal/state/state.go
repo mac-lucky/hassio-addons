@@ -79,6 +79,10 @@ type PendingRefresh struct {
 	// WaitingSince is when Core first did not answer the change's
 	// configuration check; zero once it gave a verdict.
 	WaitingSince time.Time `json:"waiting_since,omitzero"`
+	// CoreSeenDown is set once Core's API root did not answer while the
+	// change waited, so Core may have started on these files: a rejected
+	// change then restarts Core onto the restored ones.
+	CoreSeenDown bool `json:"core_seen_down,omitempty"`
 }
 
 // Keys are every changed key, sorted, once.

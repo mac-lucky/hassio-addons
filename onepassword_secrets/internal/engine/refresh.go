@@ -161,6 +161,7 @@ func (e *Engine) resumePending(ctx context.Context, c *cycle) error {
 		// Newer values came while Core did not answer: put the files back
 		// as they were and let write() apply everything as one change, so
 		// Core starts on the newest values and is refreshed once.
+		e.coreSeenDown = p.CoreSeenDown
 		e.rollback(p.Written, p.Before)
 		c.jobs, c.routed = nil, nil
 		e.plan(c)
@@ -328,14 +329,19 @@ func (e *Engine) check(ctx context.Context, p *state.PendingRefresh, domains []s
 const coreDownTimeout = 10 * time.Minute
 
 // waitForCore keeps a change Core did not answer the check for pending,
-// with its files. Past coreDownTimeout the change itself may be what keeps
-// Core from answering (an http: value), so the previous files are restored
-// and the change is held until Core answers again; if Core answers and only
-// its check does not, that counts as a failed check.
+// with its files, and notes whether Core's API root answers (CoreSeenDown).
+// Past coreDownTimeout the change itself may be what keeps Core from
+// answering (an http: value), so the previous files are restored and the
+// change is held until Core answers again; if Core answers and only its
+// check does not, that counts as a failed check.
 func (e *Engine) waitForCore(ctx context.Context, p *state.PendingRefresh, domains []string, err error) error {
 	e.setPhase("")
-	if p.WaitingSince.IsZero() {
-		p.WaitingSince = e.cfg.Now()
+	up := e.ha.Probe(ctx)
+	if p.WaitingSince.IsZero() || (!up && !p.CoreSeenDown) {
+		if p.WaitingSince.IsZero() {
+			p.WaitingSince = e.cfg.Now()
+		}
+		p.CoreSeenDown = p.CoreSeenDown || !up
 		e.st.Pending = p
 		if err := e.st.Save(e.cfg.StatePath); err != nil {
 			e.record(state.KindError, "Saving state failed", err.Error(), nil)
@@ -345,7 +351,7 @@ func (e *Engine) waitForCore(ctx context.Context, p *state.PendingRefresh, domai
 		return &CoreDownError{Reason: safeErr(err)}
 	}
 	why := fmt.Sprintf("Home Assistant did not answer the configuration check for %d minutes", int(coreDownTimeout/time.Minute))
-	if e.ha.Probe(ctx) {
+	if up {
 		return e.fail2(ctx, p, domains, why, why+", so the secrets files were restored.")
 	}
 	e.rollback(p.Written, p.Before)
@@ -355,14 +361,14 @@ func (e *Engine) waitForCore(ctx context.Context, p *state.PendingRefresh, domai
 }
 
 // fail2 rolls a change back, holds it, and says so. Core may have started
-// on the files of a change that waited for it, so it is then made to read
-// the restored ones.
+// on the files of a change it was seen down for, so it is then made to read
+// the restored ones; a Core that answered throughout never loaded them.
 func (e *Engine) fail2(ctx context.Context, p *state.PendingRefresh, domains []string, reason, message string) error {
-	waited := !p.WaitingSince.IsZero()
+	seenDown := p.CoreSeenDown
 	e.rollback(p.Written, p.Before)
 	e.holdBack(p.Signature, reason, false)
 	e.record(state.KindError, "Rolled back: "+reason, "", p.Keys())
-	if waited {
+	if seenDown {
 		message += "\n\n" + e.restartOntoRestored(ctx, p.Keys(), domains)
 	}
 	e.notify(ctx, notifyError, "1Password Secrets: change rolled back", message)

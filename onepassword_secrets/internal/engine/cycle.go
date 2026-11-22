@@ -563,6 +563,8 @@ func (e *Engine) noteDryRun(c *cycle) {
 func (e *Engine) write(ctx context.Context, c *cycle) error {
 	now := e.cfg.Now().UTC()
 	sig := e.changeSignature(c)
+	seenDown := e.coreSeenDown
+	e.coreSeenDown = false
 	if sig != "" && sig == e.st.HeldBack {
 		if !e.st.HeldForCore || !e.ha.Probe(ctx) {
 			fix := "Fix the cause and press Sync now, or change the value in 1Password."
@@ -578,6 +580,8 @@ func (e *Engine) write(ctx context.Context, c *cycle) error {
 			return nil
 		}
 		e.st.HeldBack, e.st.HeldBackReason, e.st.HeldForCore = "", "", false
+		// Held because Core was down: it may have started on these values.
+		seenDown = true
 	}
 
 	var todo []*fileJob
@@ -593,7 +597,7 @@ func (e *Engine) write(ctx context.Context, c *cycle) error {
 	}
 
 	before := e.st.Snap()
-	pending := &state.PendingRefresh{Changed: changed, Stage: "all", Signature: sig, Before: before, At: now}
+	pending := &state.PendingRefresh{Changed: changed, Stage: "all", Signature: sig, Before: before, At: now, CoreSeenDown: seenDown}
 	for _, j := range todo {
 		f := state.PendingFile{Path: j.path, Existed: j.existed}
 		if j.existed {

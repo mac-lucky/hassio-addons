@@ -605,10 +605,14 @@ func TestCoreDownThenInvalidRestoresCore(t *testing.T) {
 			h := newHarness(t, func(o *options.Options) { o.CoreRestart = mode })
 			h.sync()
 			h.ha.checkErr = errors.New("check_config returned HTTP 502")
+			h.ha.up = false // seen down while the change waits
 			value := "SENTINEL-notify-booted-" + mode
 			sentinels = append(sentinels, value)
 			h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": value})
 			h.sync()
+			if p := h.engine.st.Pending; p == nil || !p.CoreSeenDown {
+				t.Fatalf("Core not marked seen down: %+v", p)
+			}
 			// Core is back (it restarted, so the pushed sensor is gone) and
 			// rejects the new values.
 			h.ha.checkErr, h.ha.checkOK, h.ha.coreRestarted = nil, false, true
@@ -640,12 +644,17 @@ func TestCoreDownNewerValueSupersedes(t *testing.T) {
 			h := newHarness(t, nil)
 			h.sync()
 			h.ha.checkErr = errors.New("check_config did not answer")
+			h.ha.up = false // seen down while the first change waits
 			h.connect.set("i5", "homeassistant notify", 2, map[string]string{"notify_key": a})
 			h.sync()
 			h.connect.set("i5", "homeassistant notify", 3, map[string]string{"notify_key": b})
 			h.sync()
 			if got := h.read("secrets.yaml")["notify_key"]; got != b || h.engine.st.Pending == nil {
 				t.Fatalf("newer value not written while Core was down: %v, pending %+v", got, h.engine.st.Pending)
+			}
+			// The newer change inherits the mark: Core may have booted on a.
+			if !h.engine.st.Pending.CoreSeenDown {
+				t.Fatal("the superseding change lost the seen-down mark")
 			}
 			h.ha.checkErr, h.ha.checkOK = nil, valid
 			h.ha.reset()
@@ -699,9 +708,15 @@ func TestCoreDownTooLongRollsBack(t *testing.T) {
 
 	h2 := newHarness(t, nil)
 	waitTooLong(h2)
+	h2.ha.reset()
 	h2.sync() // the API root answers, check_config still does not
 	if got := h2.read("secrets.yaml")["notify_key"]; got != sNotif || h2.engine.st.HeldBack == "" || h2.engine.st.HeldForCore {
 		t.Fatalf("not held like a failed check: %v, held %q %v", got, h2.engine.st.HeldBack, h2.engine.st.HeldForCore)
+	}
+	// Core answered throughout, so it never loaded the rejected values:
+	// no restart onto the restored files.
+	if calls := h2.ha.callList(); strings.Contains(calls, "restart_core") || len(h2.engine.st.RestartPending) != 0 {
+		t.Fatalf("restarted a Core that never went down: pending %v, calls:\n%s", h2.engine.st.RestartPending, calls)
 	}
 	h2.ha.reset()
 	h2.sync()
@@ -709,6 +724,20 @@ func TestCoreDownTooLongRollsBack(t *testing.T) {
 		t.Fatalf("held change retried:\n%s", h2.ha.callList())
 	}
 	h2.assertNoLeak()
+
+	// Held for Core, then written again once Core answers, then rejected:
+	// Core was down, so it is restarted onto the restored files.
+	h3 := newHarness(t, nil)
+	waitTooLong(h3)
+	h3.ha.up = false
+	h3.sync()
+	h3.ha.checkErr, h3.ha.checkOK = nil, false
+	h3.ha.reset()
+	h3.sync()
+	if got := h3.read("secrets.yaml")["notify_key"]; got != sNotif || !strings.Contains(h3.ha.callList(), "restart_core") {
+		t.Fatalf("not restarted onto the restored files: %v, calls:\n%s", got, h3.ha.callList())
+	}
+	h3.assertNoLeak()
 }
 
 // A hold 0.1.12 made because Core did not answer is lifted on start; a hold

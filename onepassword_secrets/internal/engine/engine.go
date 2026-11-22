@@ -134,6 +134,9 @@ type Engine struct {
 	lastPublished string
 	publishedAt   time.Time
 	tokenNotified bool
+	// coreSeenDown carries a superseded change's CoreSeenDown into the
+	// change write() builds next in the same cycle.
+	coreSeenDown bool
 }
 
 type cachedItem struct {

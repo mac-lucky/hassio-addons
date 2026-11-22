@@ -10,12 +10,15 @@ Nothing yet.
 
 ## [0.1.14] - 2026-11-22
 
-Rebuild only, no functional change.
+### Fixed
 
-### Security
-
-- Rebuilt on the base image's current packages, picking up the fixes published
-  after 0.1.13 was built.
+- A change Home Assistant rejected after a wait no longer restarts Home
+  Assistant unless it was actually seen down during that wait. A
+  configuration check that only kept timing out while Home Assistant was up
+  used to cost one Home Assistant restart. A change that replaces a waiting
+  one, or that is written again after a hold for a stopped Home Assistant,
+  keeps the mark, so a rejection still restarts Home Assistant onto the
+  restored files when it may have started on the rejected ones.
 
 ## [0.1.13] - 2026-11-20
 
