@@ -54,17 +54,17 @@ type fakeAgent struct {
 	mu sync.Mutex
 	// planID is what Status reports as the current plan; applyResult and
 	// rollbackResult what the operations return (zero means OK).
-	planID            string
-	applyResult       *applier.Result
-	rollbackResult    *applier.Result
-	configured        bool
-	busy              bool
-	dryRun            bool
-	pendingCount      int
-	state             string
-	pendingRegistry   []recon.PendingRegOp
+	planID          string
+	applyResult     *applier.Result
+	rollbackResult  *applier.Result
+	configured      bool
+	busy            bool
+	dryRun          bool
+	pendingCount    int
+	state           string
+	pendingRegistry []recon.PendingRegOp
 	// pendingFiles, when set, replaces the one change pendingCount stands for.
-	pendingFiles []recon.PendingChange
+	pendingFiles      []recon.PendingChange
 	lastStashDir      string
 	repoURLOverride   string
 	warnings          string
