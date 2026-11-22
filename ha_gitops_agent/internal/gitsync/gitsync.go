@@ -108,6 +108,9 @@ var ExcludedPatterns = []string{
 	// Home Assistant's uploaded-image store. Root-anchored because
 	// "www/image/" is just as likely to be a user's own folder of pictures.
 	"/image/",
+	// This agent's own temp files (fsx.WriteFileAtomicRandom), left behind
+	// only by a crash mid-write and possibly holding a live credential.
+	".gitops-agent-*.tmp",
 }
 
 // exclusions is a list of entries with each one's kind decided once rather

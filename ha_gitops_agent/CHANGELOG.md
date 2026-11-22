@@ -33,6 +33,8 @@ Nothing yet.
   `in_sync`, since live no longer matches the repository, and drops the plan
   built before it. The pending card then says the config was rolled back
   rather than that it matches the repository.
+- The add-on's own `.gitops-agent-*.tmp` files, which a crash in the middle
+  of a write can leave beside a live file, are never synced or imported.
 
 ## [0.9.9] - 2026-11-12
 

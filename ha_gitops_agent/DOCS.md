@@ -2783,6 +2783,8 @@ comparison and every apply, in both directions:
   Device Builder add-on's state, which includes binary key material)
 - `image/` at the config root only - Home Assistant's uploaded-image
   store. A `www/image/` folder of your own is yours and keeps syncing.
+- `.gitops-agent-*.tmp` (this add-on's own temporary files, left behind
+  only if it is killed in the middle of writing a file)
 
 Apart from the secrets files, everything on that list is machine-written
 state rather than configuration: it comes back on its own, and syncing it

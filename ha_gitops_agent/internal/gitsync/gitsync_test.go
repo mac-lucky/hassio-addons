@@ -31,6 +31,8 @@ func TestExcluded(t *testing.T) {
 		{"gitops/helpers.yaml", true},
 		{"automations.yaml", false},
 		{"packages/demo.yaml", false},
+		{"zigbee2mqtt/.gitops-agent-123456.tmp", true},
+		{"agent-notes.tmp", false},
 	}
 	for _, c := range cases {
 		if got := Excluded(c.path); got != c.want {
