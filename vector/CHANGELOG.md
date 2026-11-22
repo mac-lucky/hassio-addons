@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An endpoint whose password holds an unencoded `/` is refused at startup
   with a message saying to write it as `%2F` or use the username and password
   options. Such an endpoint never worked, and the startup log printed the
-  part of the password after the `/`.
+  part of the password after the `/`. An `@` in the endpoint's path or query
+  is not taken for a password, with or without credentials in front of it.
 
 ## [1.11.5] - 2026-11-17
 

@@ -200,6 +200,15 @@ check_not "no part of the password logged"    grep -Fq SENTINELSL9z "${LOG}"
 run_case endpoint-at-in-query
 check     "exits 0"                           test "${rc}" -eq 0
 
+# Userinfo ends at the first /, so an @ in the path is a path, with or
+# without credentials in front of it
+run_case endpoint-at-in-path
+check     "exits 0"                           test "${rc}" -eq 0
+
+run_case endpoint-creds-at-in-path
+check     "exits 0"                           test "${rc}" -eq 0
+check_not "endpoint secret not logged"        grep -Fq SENTINELAP9z "${LOG}"
+
 run_case empty-stream-fields
 check     "exits 0"                   test "${rc}" -eq 0
 check_not "no empty _stream_fields"   grep -q _stream_fields "${VECTOR_CONFIG}"

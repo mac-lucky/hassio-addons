@@ -157,16 +157,24 @@ validate_url_for_yaml() {
         bashio::exit.nok
     fi
     # Userinfo holding / or whitespace: the masks stop at /, so the rest of the
-    # password would be logged, and Vector would read it as a port anyway. Only
-    # the part before ? or # counts, so an @ in a query value stays allowed.
+    # password would be logged, and Vector would read it as a port anyway.
+    # Userinfo can only sit in the authority (:// to the first /), so an @ in
+    # the path or the query stays allowed. With no @ there, only user:pa/ss@host
+    # is refused: a ":port" that is not a number, and an @ later before ? or #.
     local head="${url%%[?#]*}"
-    if [[ "${head}" == *@* ]]; then
-        local userinfo="${head#*://}"
-        userinfo="${userinfo%@*}"
-        if [[ "${userinfo}" =~ [/[:space:]] ]]; then
-            bashio::log.fatal "VictoriaLogs endpoint: percent-encode / in the endpoint's password as %2F, or use victorialogs_username/victorialogs_password"
-            bashio::exit.nok
+    local rest="${head#*://}"
+    local authority="${rest%%/*}"
+    local bad_port='^[^[]*:.*[^0-9]' bad_userinfo=""
+    if [[ "${authority}" == *@* ]]; then
+        if [[ "${authority%@*}" =~ [[:space:]] ]]; then
+            bad_userinfo=1
         fi
+    elif [[ "${rest}" == */*@* && "${authority}" =~ ${bad_port} ]]; then
+        bad_userinfo=1
+    fi
+    if [[ -n "${bad_userinfo}" ]]; then
+        bashio::log.fatal "VictoriaLogs endpoint: percent-encode / in the endpoint's password as %2F, or use victorialogs_username/victorialogs_password"
+        bashio::exit.nok
     fi
 }
 
