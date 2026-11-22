@@ -402,8 +402,13 @@ there is no restore point outside this add-on for that change.`)}}
     {{end}}
   </div>
   {{if $pending.More}}<p class="meta-line">... and {{$pending.More}} more, listed in full by status.json</p>{{end}}
-  {{else}}
+  {{else if eq .Status.State "in_sync"}}
   <p class="empty"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.6"></circle><path d="M5.2 8.2l2 2 3.6-4.2"></path></svg>No pending changes. Config matches the repository.</p>
+  {{else if and (eq .Status.State "drift_pending") (not .Status.PendingRegistry)}}
+  {{/* Drift with no plan: a Roll Back restored live and dropped the plan. */}}
+  <p class="empty">Rolled back: live differs from the repository. Fix the repository, then press Check Now.</p>
+  {{else}}
+  <p class="empty">No pending changes.</p>
   {{end}}
 </section>
 

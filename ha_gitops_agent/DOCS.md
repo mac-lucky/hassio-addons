@@ -2702,6 +2702,8 @@ written into `/homeassistant`.
   again (and with `capture_live_changes` on, would push the restored files
   over it). A successful rollback therefore pauses automatic checks; fix
   or revert the commit, then press Resume. See "Pausing automatic checks".
+  Until the next check the state reads `drift_pending`, since live no
+  longer matches the repository.
   With `capture_live_changes` on, a check you press or a webhook delivery
   still captures while paused, so fix or revert the commit before either.
 - **Apply means the plan you reviewed.** The dashboard's Apply button

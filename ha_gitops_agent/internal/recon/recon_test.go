@@ -1943,6 +1943,32 @@ func TestAnUnreadableStateStopsTheCycleAndTheApply(t *testing.T) {
 	}
 }
 
+// Restored files no longer match the repository: the state says so, and
+// the plan built against the pre-rollback live tree is dropped.
+func TestARollbackThatRestoredFilesReportsDrift(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: t.TempDir()}
+	fakes.applier.rollbackResult = applier.Result{OK: true, RolledBack: true, Changed: []string{"automations.yaml"}}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+	r.ReconcileNow(context.Background())
+
+	if result := r.Rollback(context.Background()); !result.OK {
+		t.Fatalf("rollback result = %+v, want ok", result)
+	}
+	status := r.Status()
+	if status.State != StateDriftPending {
+		t.Errorf("state = %q, want %q", status.State, StateDriftPending)
+	}
+	if len(status.Pending) != 0 || status.PlanID != "" {
+		t.Errorf("pending = %v, plan = %q, want the stale plan dropped", status.Pending, status.PlanID)
+	}
+}
+
 // A pointer whose directory is gone - pruned, or /data restored from a
 // backup - must not offer a rollback that would fail.
 func TestAVanishedStashDirectoryIsNotHydrated(t *testing.T) {

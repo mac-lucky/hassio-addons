@@ -2176,6 +2176,27 @@ func TestPendingCardsAreCappedWhileStatusJSONStaysComplete(t *testing.T) {
 	}
 }
 
+// With no plan, the pending card claims a match only when the state does.
+func TestEmptyPendingCardFollowsTheState(t *testing.T) {
+	devEnv(t)
+	for state, want := range map[string]string{
+		"in_sync":       "No pending changes. Config matches the repository.",
+		"drift_pending": "Rolled back: live differs from the repository.",
+		"error":         "<p class=\"empty\">No pending changes.</p>",
+	} {
+		agent := newFakeAgent()
+		agent.pendingCount = 0
+		agent.state = state
+		body := doRequest(t, New(agent), http.MethodGet, "/", nil).Body.String()
+		if !strings.Contains(body, want) {
+			t.Errorf("state %s: body lacks %q", state, want)
+		}
+		if state != "in_sync" && strings.Contains(body, "Config matches the repository") {
+			t.Errorf("state %s: body claims the config matches the repository", state)
+		}
+	}
+}
+
 func TestPostImportSkippedWhenBusy(t *testing.T) {
 	devEnv(t)
 	agent := newFakeAgent()

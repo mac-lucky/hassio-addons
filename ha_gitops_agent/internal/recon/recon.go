@@ -3059,6 +3059,17 @@ func (r *Reconciler) Rollback(ctx context.Context) applier.Result {
 	if combined.OK {
 		r.withMu(func() {
 			r.state = StateInSync
+			if len(result.Changed) > 0 {
+				// Live now differs from the repository. The plan described
+				// live before the restore, so it goes as a set, as in
+				// failCycle; Check Now plans again.
+				r.state = StateDriftPending
+				r.pending = nil
+				r.pendingRegistry = nil
+				r.planID = ""
+				r.pendingAddonRestartOnChange = nil
+				r.pendingHacsRestartPending = nil
+			}
 			r.lastError = ""
 			r.lastStashDir = ""
 			// Cleared with the directory it describes, or it would come

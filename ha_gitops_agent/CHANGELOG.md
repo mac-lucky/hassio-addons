@@ -29,6 +29,10 @@ Nothing yet.
   changes, with a line counting the rest (all of them stay in
   `status.json`). A first sync with thousands of pending changes made every
   refresh render every diff.
+- A Roll Back that restored files reports `drift_pending` instead of
+  `in_sync`, since live no longer matches the repository, and drops the plan
+  built before it. The pending card then says the config was rolled back
+  rather than that it matches the repository.
 
 ## [0.9.9] - 2026-11-12
 
