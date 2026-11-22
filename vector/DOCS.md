@@ -34,7 +34,9 @@ journal already carries container output, so the journald source covers it.
 
 The endpoint is passed to Vector's `elasticsearch` sink verbatim and Vector
 appends `/_bulk`, so the insert path has to be part of the URL. A bare
-`http://192.168.1.100:9428` will not work.
+`http://192.168.1.100:9428` will not work. A `/` in a password written into
+the URL has to be percent-encoded as `%2F`; or put the credentials in
+`victorialogs_username` and `victorialogs_password` instead.
 
 ### Optional Options
 
@@ -181,7 +183,8 @@ line of up to 96 KB arrives as one entry; a longer one arrives as several.
   silently drops entries over 256 KB.
 - **Redaction.** With `redact_sensitive` on, the message is scrubbed of:
   - authorization headers and API keys;
-  - tokens, passwords and secrets written as `key: value` or `key=value`;
+  - tokens, passwords and secrets written as `key: value` or `key=value`
+    (a quoted password up to its closing quote, spaces included);
   - command-line flags such as `--password x`;
   - credentials inside URLs;
   - bare JWTs, which is what Home Assistant access tokens are;

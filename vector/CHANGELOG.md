@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.6] - 2026-11-22
 
-Rebuild only, no functional change.
+### Fixed
 
-### Security
-
-- Rebuilt on the base image's current packages, picking up the fixes published
-  after 1.11.5 was built.
+- A quoted password with spaces in it (`password: 'correct horse battery'`)
+  is redacted up to its closing quote; only its first word used to be. A
+  quote that never closes on the line still redacts the first word.
+- Tokens, secrets and API keys containing `+`, `/` or `=` (base64) are
+  redacted whole; one with a `+` or `/` early on used to pass unredacted, and
+  a later one let the rest of the value through.
+- An endpoint whose password holds an unencoded `/` is refused at startup
+  with a message saying to write it as `%2F` or use the username and password
+  options. Such an endpoint never worked, and the startup log printed the
+  part of the password after the `/`.
 
 ## [1.11.5] - 2026-11-17
 

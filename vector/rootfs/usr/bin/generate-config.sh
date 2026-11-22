@@ -156,6 +156,18 @@ validate_url_for_yaml() {
         bashio::log.fatal "VictoriaLogs endpoint must start with http:// or https://"
         bashio::exit.nok
     fi
+    # Userinfo holding / or whitespace: the masks stop at /, so the rest of the
+    # password would be logged, and Vector would read it as a port anyway. Only
+    # the part before ? or # counts, so an @ in a query value stays allowed.
+    local head="${url%%[?#]*}"
+    if [[ "${head}" == *@* ]]; then
+        local userinfo="${head#*://}"
+        userinfo="${userinfo%@*}"
+        if [[ "${userinfo}" =~ [/[:space:]] ]]; then
+            bashio::log.fatal "VictoriaLogs endpoint: percent-encode / in the endpoint's password as %2F, or use victorialogs_username/victorialogs_password"
+            bashio::exit.nok
+        fi
+    fi
 }
 
 # Check for custom config with path validation (TOCTOU-safe). This runs before
@@ -659,15 +671,18 @@ if [[ "${redact_sensitive}" == "true" ]]; then
 # A key only counts when a separator follows it (:, =, := or =>), so a
 # sentence that merely mentions a password or a secret is left alone. The key
 # and the value may sit in quotes, including the escaped quotes of JSON logged
-# inside JSON. \x27 is a single quote, which a raw string cannot hold.
+# inside JSON. \x27 is a single quote, which a raw string cannot hold. A quoted
+# password is taken up to its closing quote, spaces included; with no closing
+# quote on the line it falls back to the first word. The other values take the
+# base64 alphabet, so a + or / does not end them early.
 msg = replace(msg, r'(?i)Authorization\\?["\x27]?\s*[:=]\s*\\?["\x27]?\s*Bearer\s+[A-Za-z0-9\-._~+/]+={0,2}', "Authorization: Bearer [REDACTED]")
 msg = replace(msg, r'(?i)Authorization\\?["\x27]?\s*[:=]\s*\\?["\x27]?\s*Basic\s+[A-Za-z0-9+/]+={0,2}', "Authorization: Basic [REDACTED]")
 msg = replace(msg, r'(?i)X-API-Key\\?["\x27]?\s*[:=]\s*\\?["\x27]?[A-Za-z0-9\-._~+/]+', "X-API-Key: [REDACTED]")
 msg = replace(msg, r'(?i)X-Auth-Token\\?["\x27]?\s*[:=]\s*\\?["\x27]?[A-Za-z0-9\-._~+/]+', "X-Auth-Token: [REDACTED]")
-msg = replace(msg, r'(?i)api[_-]?key\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{16,}', "api_key: [REDACTED]")
-msg = replace(msg, r'(?i)token\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{16,}', "token: [REDACTED]")
-msg = replace(msg, r'(?i)password\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[^\s"\x27]+', "password: [REDACTED]")
-msg = replace(msg, r'(?i)secret\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._]{8,}', "secret: [REDACTED]")
+msg = replace(msg, r'(?i)api[_-]?key\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._~+/=]{16,}', "api_key: [REDACTED]")
+msg = replace(msg, r'(?i)token\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._~+/=]{16,}', "token: [REDACTED]")
+msg = replace(msg, r'(?i)password\\?["\x27]?\s*(?::=|=>|[:=])\s*(?:\\?"[^"\n]*"|\\?\x27[^\x27\n]*\x27|\\?["\x27]?[^\s"\x27]+)', "password: [REDACTED]")
+msg = replace(msg, r'(?i)secret\\?["\x27]?\s*(?::=|=>|[:=])\s*\\?["\x27]?[A-Za-z0-9\-._~+/=]{8,}', "secret: [REDACTED]")
 # Command-line flags, which take the value after a space: mysql --password x
 msg = replace(msg, r'(?i)--password\s+[^\s-]\S*', "--password [REDACTED]")
 msg = replace(msg, r'(?i)--token\s+[^\s-]\S*', "--token [REDACTED]")

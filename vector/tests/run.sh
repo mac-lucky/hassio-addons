@@ -189,6 +189,17 @@ run_case endpoint-at-in-password
 check     "exits 0"                            test "${rc}" -eq 0
 check_not "no tail of an @-bearing password"   grep -Fq SENTINELAT9z "${LOG}"
 
+# The masks stop at /, so a / in the password would print the rest of it:
+# refused before anything logs the endpoint
+run_case endpoint-slash-in-password
+check     "exits non-zero"                    test "${rc}" -ne 0
+check     "says how to fix it"                grep -q "percent-encode" "${LOG}"
+check_not "no part of the password logged"    grep -Fq SENTINELSL9z "${LOG}"
+
+# An @ after the ? is a query value, not userinfo
+run_case endpoint-at-in-query
+check     "exits 0"                           test "${rc}" -eq 0
+
 run_case empty-stream-fields
 check     "exits 0"                   test "${rc}" -eq 0
 check_not "no empty _stream_fields"   grep -q _stream_fields "${VECTOR_CONFIG}"
