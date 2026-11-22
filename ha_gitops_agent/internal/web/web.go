@@ -115,6 +115,8 @@ var funcMap = template.FuncMap{
 	"humanState":     humanState,
 	"humanTime":      humanTime,
 	"inventoryGroup": inventoryGroupFunc,
+	"pendingFiles":   capPending[recon.PendingChange],
+	"pendingOps":     capPending[recon.PendingRegOp],
 	"join":           strings.Join,
 	"printable":      escapeFormatChars,
 	"planVals":       planVals,
@@ -285,6 +287,25 @@ func inventoryGroupFunc(label string, items []string) inventoryView {
 		view.More = len(items) - inventoryMax
 	}
 	return view
+}
+
+// pendingMax caps each pending card for inventoryMax's reason, only more
+// so: every row carries its diff (up to 40 KB), and a first sync with
+// dry_run on can leave thousands pending. The heading keeps the real count.
+const pendingMax = 200
+
+// pendingView is a pending card's rows, capped at pendingMax; More is what
+// the cap left out.
+type pendingView[T any] struct {
+	Items []T
+	More  int
+}
+
+func capPending[T any](items []T) pendingView[T] {
+	if len(items) > pendingMax {
+		return pendingView[T]{Items: items[:pendingMax], More: len(items) - pendingMax}
+	}
+	return pendingView[T]{Items: items}
 }
 
 // addonUpdatesView splits the add-on update card in two: Rows can still

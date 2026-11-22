@@ -25,6 +25,10 @@ Nothing yet.
   ownership records and the Roll Back point. One that cannot be read at all
   now stops checks and applies with an error instead of running on empty
   state.
+- The dashboard lists at most 200 pending file changes and 200 registry
+  changes, with a line counting the rest (all of them stay in
+  `status.json`). A first sync with thousands of pending changes made every
+  refresh render every diff.
 
 ## [0.9.9] - 2026-11-12
 

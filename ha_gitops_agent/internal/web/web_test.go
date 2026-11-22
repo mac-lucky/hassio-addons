@@ -63,6 +63,8 @@ type fakeAgent struct {
 	pendingCount      int
 	state             string
 	pendingRegistry   []recon.PendingRegOp
+	// pendingFiles, when set, replaces the one change pendingCount stands for.
+	pendingFiles []recon.PendingChange
 	lastStashDir      string
 	repoURLOverride   string
 	warnings          string
@@ -259,6 +261,9 @@ func (f *fakeAgent) Status() recon.Status {
 	var pending []recon.PendingChange
 	if f.pendingCount > 0 {
 		pending = []recon.PendingChange{{Path: "automations.yaml", Kind: "update", DiffText: "+alias: Demo\n-old: 1"}}
+	}
+	if f.pendingFiles != nil {
+		pending = f.pendingFiles
 	}
 	// Never less than the card's rows - the reconciler's invariant by
 	// construction, and what the heading's link is gated on.
@@ -2123,6 +2128,51 @@ func TestImportPreviewListIsCappedWhileStatusJSONStaysComplete(t *testing.T) {
 	}
 	if got := len(status.ImportPreview.Files); got != len(files) {
 		t.Errorf("status.json carries %d files, want all %d - the cap is the view's, not the API's", got, len(files))
+	}
+}
+
+// Every poll renders and hashes the pending cards, diffs included, so they
+// are capped like the managed card; the headings keep the real count and
+// /status.json the full lists.
+func TestPendingCardsAreCappedWhileStatusJSONStaysComplete(t *testing.T) {
+	devEnv(t)
+	const extra = 42
+	files := make([]recon.PendingChange, pendingMax+extra)
+	for i := range files {
+		files[i] = recon.PendingChange{Path: fmt.Sprintf("packages/p%04d.yaml", i), Kind: "add", DiffText: "+x"}
+	}
+	ops := make([]recon.PendingRegOp, pendingMax+extra)
+	for i := range ops {
+		ops[i] = recon.PendingRegOp{Kind: "create", RType: "label", Key: fmt.Sprintf("l%04d", i), DiffText: "+x"}
+	}
+	agent := newFakeAgent()
+	agent.pendingFiles = files
+	agent.pendingRegistry = ops
+	handler := New(agent)
+
+	body := doRequest(t, handler, http.MethodGet, "/", nil).Body.String()
+
+	if rendered := strings.Count(body, "packages/p"); rendered != pendingMax {
+		t.Errorf("rendered %d file changes, want %d", rendered, pendingMax)
+	}
+	if rendered := strings.Count(body, "label:l"); rendered != pendingMax {
+		t.Errorf("rendered %d registry changes, want %d", rendered, pendingMax)
+	}
+	want := `<span class="count">` + strconv.Itoa(pendingMax+extra) + `</span>`
+	if strings.Count(body, want) < 2 {
+		t.Errorf("headings do not both carry the full count %d", pendingMax+extra)
+	}
+	if got := strings.Count(body, "... and 42 more, listed in full by status.json"); got != 2 {
+		t.Errorf("found %d cap lines, want one per card", got)
+	}
+
+	var status recon.Status
+	if err := json.NewDecoder(doRequest(t, handler, http.MethodGet, "/status.json", nil).Body).Decode(&status); err != nil {
+		t.Fatalf("decoding status.json: %v", err)
+	}
+	if len(status.Pending) != len(files) || len(status.PendingRegistry) != len(ops) {
+		t.Errorf("status.json carries %d/%d changes, want all %d/%d",
+			len(status.Pending), len(status.PendingRegistry), len(files), len(ops))
 	}
 }
 
