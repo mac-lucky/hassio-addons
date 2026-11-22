@@ -61,6 +61,11 @@ type Config struct {
 	// an add or update keeps (see writeChanges). nil means no path has
 	// any, which is also how a test opts out of the option.
 	IgnoredKeys IgnoredKeysFunc
+
+	// OnStashed, when set, runs once the stash is complete and before the
+	// first write, so the caller can persist the rollback pointer: a kill
+	// mid-apply then leaves Roll Back aimed at this apply's stash.
+	OnStashed func(dir string)
 }
 
 // DefaultConfig returns the production Config: /homeassistant,

@@ -90,6 +90,9 @@ func Apply(
 	if err := stashFiles(changes, configRoot, stashDir); err != nil {
 		return Result{}, fmt.Errorf("applier: stashing files: %w", err)
 	}
+	if cfg.OnStashed != nil {
+		cfg.OnStashed(stashDir)
+	}
 
 	changedPaths, writeErr := writeChanges(cfg, changes, repoRoot, configRoot)
 	if writeErr != nil {

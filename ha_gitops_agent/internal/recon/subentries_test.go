@@ -568,10 +568,11 @@ func TestApplyNowPassesSubentryStateThroughAndPersistsIt(t *testing.T) {
 	if !reflect.DeepEqual(call.attempts, fakes.applier.state.SubentryAttempts) {
 		t.Errorf("attempts = %+v, want %+v", call.attempts, fakes.applier.state.SubentryAttempts)
 	}
-	if len(fakes.applier.stateSaveCalls) != 1 {
-		t.Fatalf("state_save_calls = %d, want 1", len(fakes.applier.stateSaveCalls))
+	// The rollback pointer before the layers run, then the apply's result.
+	if len(fakes.applier.stateSaveCalls) != 2 {
+		t.Fatalf("state_save_calls = %d, want 2", len(fakes.applier.stateSaveCalls))
 	}
-	saved := fakes.applier.stateSaveCalls[0]
+	saved := fakes.applier.stateSaveCalls[1]
 	wantManaged := map[string]string{"subentry:existing": "sub1", "subentry:kitchen": "sub2"}
 	if !reflect.DeepEqual(saved.SubentryManaged, wantManaged) {
 		t.Errorf("saved subentry_managed = %+v, want %+v", saved.SubentryManaged, wantManaged)

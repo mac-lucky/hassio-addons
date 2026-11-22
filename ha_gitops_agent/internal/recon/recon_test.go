@@ -430,9 +430,13 @@ func newFakeApplier() *fakeApplier {
 
 func (f *fakeApplier) Apply(
 	ctx context.Context, changes []applier.Change, repoRoot, configRoot string, opts options.Options,
+	onStashed func(dir string),
 ) (applier.Result, error) {
 	f.applyCalls = append(f.applyCalls, changes)
 	f.applyCtxs = append(f.applyCtxs, ctx)
+	if f.applyErr == nil && f.applyResult.StashDir != "" && onStashed != nil {
+		onStashed(f.applyResult.StashDir)
+	}
 	if f.onApply != nil {
 		f.onApply()
 	}
@@ -1856,6 +1860,60 @@ func TestTheRollbackPointerSurvivesARestart(t *testing.T) {
 	}
 	if got := fakes.applier.state.LastStashDir; got != "" {
 		t.Errorf("persisted stash dir after rollback = %q, want cleared", got)
+	}
+}
+
+// The pointer reaches state.json before the applier writes, so a kill
+// mid-apply (no return from Apply) still leaves Roll Back aimed at the
+// stash that undoes it after the restart.
+func TestTheRollbackPointerIsPersistedBeforeApplyReturns(t *testing.T) {
+	fakes := newReconcilerFakes()
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	stash := t.TempDir()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: stash}
+	var midApply string
+	fakes.applier.onApply = func() { midApply = fakes.applier.state.LastStashDir }
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+
+	if midApply != stash {
+		t.Fatalf("persisted stash dir during Apply = %q, want %q", midApply, stash)
+	}
+	if got := fakes.reconciler(opts).Status().LastStashDir; got != stash {
+		t.Errorf("hydrated stash dir = %q, want %q", got, stash)
+	}
+}
+
+// A failed apply the applier undid in full puts the previous persisted
+// pointer back, summary included, so a restart restores the same apply
+// Roll Back offered before.
+func TestASelfRolledBackApplyRestoresThePersistedPointer(t *testing.T) {
+	fakes := newReconcilerFakes()
+	good := t.TempDir()
+	fakes.applier.applyResult = applier.Result{OK: true, Changed: []string{"automations.yaml"}, StashDir: good}
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+x"}}
+	opts := baseOpts()
+	opts.DryRun = false
+	r := fakes.reconciler(opts)
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+	summary := fakes.applier.state.LastStashSummary
+
+	fakes.applier.applyResult = applier.Result{
+		OK: false, Error: "check_config: invalid", RolledBack: true, StashDir: t.TempDir(),
+	}
+	fakes.differ.changes = []differ.Change{{Path: "automations.yaml", Kind: "update", DiffText: "+y"}}
+	r.ReconcileNow(context.Background())
+	r.ApplyNow(context.Background(), true)
+
+	if got := fakes.applier.state.LastStashDir; got != good {
+		t.Errorf("persisted stash dir = %q, want the last good apply's %q", got, good)
+	}
+	if got := fakes.applier.state.LastStashSummary; got != summary {
+		t.Errorf("persisted summary = %q, want %q", got, summary)
 	}
 }
 

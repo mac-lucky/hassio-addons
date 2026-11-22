@@ -2179,6 +2179,8 @@ func (r *Reconciler) applyNow(ctx context.Context) applier.Result {
 				acc.fail(layerStash, mkErr.Error(), false)
 			} else {
 				finalStashDir = newDir
+				// Before any layer writes, as Apply's OnStashed does.
+				r.persistStashPointer(newDir, "")
 			}
 		}
 
@@ -2391,7 +2393,17 @@ func (r *Reconciler) persistStashPointer(dir, summary string) applier.State {
 // warnings and any failure. A true second return means ApplyNow must stop
 // and return the Result alongside it, already logged and pushed.
 func (r *Reconciler) applyFileLayer(ctx context.Context, pending []differ.Change) (applier.Result, bool) {
-	result, err := r.applier.Apply(ctx, toApplierChanges(pending), r.git.Workdir(), ConfigRoot, r.opts)
+	// The pointer is on disk before the first write, so a kill mid-apply
+	// leaves Roll Back aimed at the stash that undoes this apply.
+	var prevDir, prevSummary string
+	r.withMu(func() { prevDir, prevSummary = r.lastStashDir, r.lastStashSummary })
+	onStashed := func(dir string) { r.persistStashPointer(dir, "") }
+	result, err := r.applier.Apply(ctx, toApplierChanges(pending), r.git.Workdir(), ConfigRoot, r.opts, onStashed)
+	if result.StashDir != "" && !result.OK && result.RolledBack {
+		// Undone in full: the previous apply's stash is the rollback point
+		// again (see below).
+		r.persistStashPointer(prevDir, prevSummary)
+	}
 	if err != nil {
 		// applier.Apply returns a non-nil error for only two failures rather
 		// than folding them into Result: writing the stash directory, and a

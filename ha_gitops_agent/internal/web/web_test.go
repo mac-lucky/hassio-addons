@@ -3805,7 +3805,7 @@ func TestDashboardRendersNoValueOutOfTheAgentsState(t *testing.T) {
 type stateOnlyApplier struct{ state applier.State }
 
 func (s *stateOnlyApplier) Apply(
-	context.Context, []applier.Change, string, string, options.Options,
+	context.Context, []applier.Change, string, string, options.Options, func(string),
 ) (applier.Result, error) {
 	return applier.Result{}, nil
 }

@@ -8,14 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
-## [0.9.10] - 2026-11-20
+## [0.9.10] - 2026-11-22
 
-Rebuild only, no functional change.
+### Fixed
 
-### Security
-
-- Rebuilt on the base image's current packages, picking up the fixes published
-  after 0.9.9 was built.
+- The Roll Back point is saved before an apply writes its first file. An
+  add-on stop, restart or host reboot in the middle of an apply used to leave
+  Roll Back pointing at the apply before it.
 
 ## [0.9.9] - 2026-11-12
 

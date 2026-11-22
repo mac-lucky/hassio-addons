@@ -854,9 +854,10 @@ func TestAnApplyOnlyCycleDoesNotRewriteStateFromTheCapturePhase(t *testing.T) {
 	r := fakes.reconciler(captureOpts())
 	r.runCycle(context.Background())
 
-	// Exactly one save, the apply's own - the capture phase adds none.
-	if got := len(fakes.applier.stateSaveCalls); got != 1 {
-		t.Errorf("StateSave called %d time(s), want 1 (the apply's)", got)
+	// The apply's two saves (the rollback pointer before the write, then
+	// the result) - the capture phase adds none.
+	if got := len(fakes.applier.stateSaveCalls); got != 2 {
+		t.Errorf("StateSave called %d time(s), want 2 (the apply's)", got)
 	}
 }
 

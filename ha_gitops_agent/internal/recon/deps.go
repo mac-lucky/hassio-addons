@@ -165,7 +165,11 @@ var _ Differ = realDiffer{}
 // Applier is the internal/applier seam: apply a diff, and persist/inspect
 // the agent's sync state and per-apply stash directories.
 type Applier interface {
-	Apply(ctx context.Context, changes []applier.Change, repoRoot, configRoot string, opts options.Options) (applier.Result, error)
+	// onStashed is applier.Config.OnStashed for this call.
+	Apply(
+		ctx context.Context, changes []applier.Change, repoRoot, configRoot string, opts options.Options,
+		onStashed func(dir string),
+	) (applier.Result, error)
 	StateLoad() applier.State
 	StateSave(state applier.State) error
 	RollbackFrom(stashDir, configRoot string) applier.Result
@@ -182,8 +186,11 @@ type realApplier struct {
 
 func (r *realApplier) Apply(
 	ctx context.Context, changes []applier.Change, repoRoot, configRoot string, opts options.Options,
+	onStashed func(dir string),
 ) (applier.Result, error) {
-	return applier.Apply(ctx, r.cfg, changes, repoRoot, configRoot, opts, nil)
+	cfg := r.cfg
+	cfg.OnStashed = onStashed
+	return applier.Apply(ctx, cfg, changes, repoRoot, configRoot, opts, nil)
 }
 
 func (r *realApplier) StateLoad() applier.State { return applier.StateLoad(r.cfg) }

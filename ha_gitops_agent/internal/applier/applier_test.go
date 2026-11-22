@@ -247,6 +247,36 @@ func TestHappyPathWritesFilesAndReturnsOK(t *testing.T) {
 	}
 }
 
+// OnStashed fires once, after the stash holds the live bytes and before
+// anything is written, so a caller can persist the rollback pointer first.
+func TestOnStashedRunsAfterTheStashAndBeforeTheFirstWrite(t *testing.T) {
+	t.Setenv("SUPERVISOR_TOKEN", "test-token")
+	cfg := testConfig(t)
+	repoRoot := t.TempDir()
+	configRoot := t.TempDir()
+	writeText(t, filepath.Join(repoRoot, "automations.yaml"), "new\n")
+	writeText(t, filepath.Join(configRoot, "automations.yaml"), "old\n")
+	var seen []string
+	cfg.OnStashed = func(dir string) {
+		seen = append(seen, dir)
+		if got := readText(t, filepath.Join(configRoot, "automations.yaml")); got != "old\n" {
+			t.Errorf("live file at OnStashed = %q, want it not yet written", got)
+		}
+		if got := readText(t, filepath.Join(dir, "automations.yaml")); got != "old\n" {
+			t.Errorf("stashed copy at OnStashed = %q, want the live bytes", got)
+		}
+	}
+
+	result, err := Apply(context.Background(), cfg, []Change{{Path: "automations.yaml", Kind: ChangeUpdate}},
+		repoRoot, configRoot, testOptions("off"), validCheckConfigClient(nil))
+	if err != nil || !result.OK {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if len(seen) != 1 || seen[0] != result.StashDir {
+		t.Errorf("OnStashed calls = %v, want once with %q", seen, result.StashDir)
+	}
+}
+
 func TestAddAndDeleteWrites(t *testing.T) {
 	t.Setenv("SUPERVISOR_TOKEN", "test-token")
 	cfg := testConfig(t)
