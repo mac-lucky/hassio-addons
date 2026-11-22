@@ -56,6 +56,31 @@ func TestRenderRoundTripsTrickyValues(t *testing.T) {
 	}
 }
 
+// An empty 1Password value never wipes a value the file holds; a new key,
+// or one already empty, is still written empty (a deliberate blank).
+func TestRenderEmptyValueKeepsANonEmptyCurrentValue(t *testing.T) {
+	current := []byte("broker_login: keep-me\nblank:\nquoted: \"\"\n")
+	plan, err := Render(Input{Current: current, Desired: []Desired{d("broker_login", ""), d("blank", ""), d("quoted", ""), d("fresh", "")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decode(t, plan.Content)
+	if got["broker_login"] != "keep-me" {
+		t.Errorf("broker_login = %#v, want the file's value kept", got["broker_login"])
+	}
+	if got["blank"] != "" || got["quoted"] != "" || got["fresh"] != "" {
+		t.Errorf("blank = %#v, quoted = %#v, fresh = %#v, want all empty", got["blank"], got["quoted"], got["fresh"])
+	}
+	if !reflect.DeepEqual(plan.KeptEmpty, []string{"broker_login"}) || !reflect.DeepEqual(plan.Added, []string{"fresh"}) {
+		t.Errorf("kept empty %v, added %v", plan.KeptEmpty, plan.Added)
+	}
+	for _, k := range plan.Changed {
+		if k == "broker_login" {
+			t.Error("broker_login counted as changed")
+		}
+	}
+}
+
 func TestRenderKeepsCommentsAndUnmanaged(t *testing.T) {
 	current := []byte(`# my comment about wifi
 wifi_ssid: home # trailing

@@ -28,6 +28,11 @@ Nothing yet.
   holds it; the change stays pending and is finished on the next start.
 - The configuration check runs once per change instead of twice back to back
   before a Home Assistant restart.
+- An empty 1Password field no longer replaces the value a secrets file holds
+  for that key (and the previous copy is no longer deleted after it). The
+  file keeps its value until the field is filled, deleting the field leaves a
+  hand-written value where it was, and a key that is new or already empty is
+  still written empty, so a value left blank on purpose keeps working.
 
 ## [0.1.13] - 2026-11-20
 

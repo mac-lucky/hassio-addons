@@ -62,6 +62,10 @@ type Plan struct {
 	// Unmanaged keys are in the file but not in 1Password and were never
 	// written by this add-on: the migration's to-do list.
 	Unmanaged []string
+	// KeptEmpty are keys whose 1Password value is empty and whose
+	// non-empty value in the file was left in place (also in Unchanged):
+	// an empty field never wipes a value.
+	KeptEmpty []string
 	// KeyErrors are keys whose value could not be rendered (a _json value
 	// this renderer cannot represent): they keep what the file had, and
 	// the rest of the file is still written. Reasons quote no value.
@@ -125,6 +129,11 @@ func Render(in Input) (Plan, error) {
 			}
 			if same {
 				plan.Unchanged = append(plan.Unchanged, key)
+				break
+			}
+			if !d.Structured && d.Value.IsZero() && v.Kind == yaml.ScalarNode && v.Tag != "!!null" && v.Value != "" {
+				plan.Unchanged = append(plan.Unchanged, key)
+				plan.KeptEmpty = append(plan.KeptEmpty, key)
 				break
 			}
 			nv, err := valueNode(d)

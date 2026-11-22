@@ -498,6 +498,35 @@ func TestAdoptThenRotate(t *testing.T) {
 	h.assertNoLeak()
 }
 
+// An empty field never wipes a value the file holds, and does not take the
+// key over: deleting the field leaves the hand-written value alone. A new
+// key is still written empty, for a value left blank on purpose.
+func TestEmptyFieldKeepsTheFileValue(t *testing.T) {
+	h := newHarness(t, nil)
+	h.sync()
+	h.connect.set("i6", "homeassistant extra", 1, map[string]string{"hand_written": ""})
+	st := h.sync()
+	if got := h.read("secrets.yaml")["hand_written"]; got != "keep-me" {
+		t.Fatalf("hand_written = %#v, want the file's value kept", got)
+	}
+	if !strings.Contains(fmt.Sprint(st.Problems), "hand_written is empty") {
+		t.Fatalf("no empty-value warning: %+v", st.Problems)
+	}
+
+	h.connect.set("i6", "homeassistant extra", 2, map[string]string{})
+	h.sync()
+	if got := h.read("secrets.yaml")["hand_written"]; got != "keep-me" {
+		t.Fatalf("hand_written = %#v after the empty field was deleted, want it kept", got)
+	}
+
+	h.connect.set("i6", "homeassistant extra", 3, map[string]string{"anon_broker": ""})
+	h.sync()
+	if got, ok := h.read("secrets.yaml")["anon_broker"]; !ok || got != "" {
+		t.Fatalf("anon_broker = %#v (present %v), want written empty", got, ok)
+	}
+	h.assertNoLeak()
+}
+
 func TestRestartFailureRollsBackAndHoldsBack(t *testing.T) {
 	h := newHarness(t, nil)
 	h.sync()

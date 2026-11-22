@@ -163,7 +163,7 @@ func (e *Engine) buildStatus(s Status, c *cycle) Status {
 			fix = "Correct the reference in the add-on's references option."
 		case "empty_value":
 			sev = "warning"
-			fix = "Fill the field in 1Password, or delete it."
+			fix = "The file keeps its current value until the field is filled, or delete the field."
 		}
 		s.Problems = append(s.Problems, Problem{Severity: sev, Title: problemTitle(p), Detail: p.Detail, Fix: fix, Key: p.Key})
 	}

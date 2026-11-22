@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -644,7 +645,13 @@ func (e *Engine) write(ctx context.Context, c *cycle) error {
 			continue
 		}
 		managed := map[string]bool{}
+		wasManaged := e.st.ManagedSet(j.path)
 		for k := range j.desired {
+			// A value an empty field left in place stays the owner's until
+			// the field is filled, so deleting the field cannot remove it.
+			if slices.Contains(j.plan.KeptEmpty, k) && !wasManaged[k] {
+				continue
+			}
 			managed[k] = true
 		}
 		for k := range j.keep {
