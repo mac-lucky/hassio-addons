@@ -5,6 +5,15 @@ All notable changes to this add-on will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.9] - 2026-11-24
+
+### Changed
+
+- Vector updated to 0.62.0. It now substitutes the username and password into
+  the parsed config instead of into its text, so they are handed over exactly
+  as configured; with the old escaping kept, a `'` in either would have reached
+  VictoriaLogs doubled and the login would fail.
+
 ## [1.11.8] - 2026-11-24
 
 Rebuild only, no functional change.

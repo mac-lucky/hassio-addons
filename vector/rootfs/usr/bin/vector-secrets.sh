@@ -12,12 +12,11 @@
 # Vector execs this directly, so it cannot rely on anything the run script set
 # up. It reads the options file itself.
 #
-# The values are escaped for YAML on the way out, and that is load-bearing.
-# Vector substitutes what comes back into the config as TEXT and parses the
-# result, so a password containing a quote would otherwise end the scalar it
-# lands in and break the whole config. The generator emits single-quoted
-# scalars; a single quote is the only character that can terminate one, so
-# doubling it is the whole escape. Change one side and you must change both.
+# The values go out exactly as configured, with no escaping. Since 0.62 Vector
+# parses the config first and substitutes what comes back into the string value
+# itself, so quotes and other YAML syntax in a password are plain characters.
+# Escaping here would put the escape on the wire: up to 0.61 the substitution
+# was textual and this doubled ' for the single-quoted scalar.
 # ==============================================================================
 set -euo pipefail
 
@@ -34,8 +33,6 @@ request=$(cat)
 # backend, so in that mode nothing is known and every name errors out. The
 # generated config never asks in that mode either, because auth_username returns
 # empty for it - two independent gates on the same rule.
-# gsub uses \u0027 rather than a literal quote because this filter is itself a
-# single-quoted shell string, where one cannot appear.
 jq -cn \
     --argjson request "${request}" \
     --slurpfile options "${VECTOR_OPTIONS_FILE}" \
@@ -48,8 +45,7 @@ jq -cn \
       } end) as $known
     | reduce ($request.secrets // [])[] as $name ({};
         .[$name] = (if ($known | has($name))
-                    then {value: ($known[$name] | gsub("\u0027"; "\u0027\u0027")),
-                          error: null}
+                    then {value: $known[$name], error: null}
                     else {value: null, error: "no such secret: \($name)"}
                     end))
     '

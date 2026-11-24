@@ -309,14 +309,13 @@ printf '{"version":"1.0","secrets":["user","password"]}' \
     | "${VECTOR_SECRETS_HELPER}" > "${LOG}" 2>&1
 raw_password=$(jq -r '.victorialogs_password' "${VECTOR_OPTIONS_FILE}")
 raw_username=$(jq -r '.victorialogs_username' "${VECTOR_OPTIONS_FILE}")
-# Escaped for the single-quoted scalar Vector substitutes them into, so what
-# comes out here is not the plain value. The auth-wire case above is what pins
-# the pair of escape and scalar down to the right plaintext on the wire.
-check "password comes back escaped for YAML" \
-    test "$(jq -r '.password.value' "${LOG}")" = "${raw_password//\'/\'\'}"
-check "username comes back escaped for YAML" \
-    test "$(jq -r '.user.value' "${LOG}")" = "${raw_username//\'/\'\'}"
-check "the fixture actually exercises the escape" \
+# Unescaped: since 0.62 Vector substitutes into the parsed string value, so an
+# escape would reach the wire. The auth-wire case above pins that end to end.
+check "password comes back as configured" \
+    test "$(jq -r '.password.value' "${LOG}")" = "${raw_password}"
+check "username comes back as configured" \
+    test "$(jq -r '.user.value' "${LOG}")" = "${raw_username}"
+check "the fixture carries a quote" \
     grep -Fq "'" <<< "${raw_password}${raw_username}"
 check "an unknown name is an error, not an empty value" \
     test "$(printf '{"version":"1.0","secrets":["nope"]}' \
