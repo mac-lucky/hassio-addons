@@ -759,9 +759,9 @@ SINKS
 # unquoted delimiter; SECRET[...] survives it because it holds no $.
 #
 # Three things are load-bearing and none is obvious:
-# - the scalars must stay SINGLE-quoted. Vector substitutes the secret in as
-#   text and parses afterwards, so an unescaped quote in a password ends the
-#   scalar and breaks the config. vector-secrets.sh doubles ' to match.
+# - vector-secrets.sh returns the values unescaped. Since 0.62 Vector parses
+#   first and substitutes into the string value, so any escape it added would
+#   reach the server as part of the password.
 # - do not swap this for an environment reference. Vector does not interpolate
 #   ${VAR} in a --config-yaml config and the sink then authenticates with the
 #   literal text. That shipped in 1.6.0 and was rejected by every server.
